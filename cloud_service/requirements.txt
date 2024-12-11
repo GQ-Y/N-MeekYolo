@@ -1,0 +1,20 @@
+# FastAPI 相关
+fastapi>=0.68.0
+uvicorn>=0.15.0
+python-multipart>=0.0.5
+pydantic>=1.8.0
+email-validator>=1.1.0
+
+# 数据库相关
+sqlalchemy>=1.4.0
+
+# 文件处理
+aiofiles>=0.7.0
+pyyaml>=5.4.0
+
+# HTTP客户端
+aiohttp>=3.8.0
+httpx>=0.24.0
+
+# 工具
+python-dotenv>=1.0.0 

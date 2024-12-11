@@ -1,0 +1,19 @@
+Metadata-Version: 2.1
+Name: cloud_service
+Version: 1.0.0
+Summary: Cloud Model Market Service
+Author: Your Name
+Author-email: your.email@example.com
+Keywords: cloud,model,market,ai
+Requires-Python: >=3.8
+Requires-Dist: fastapi>=0.68.0
+Requires-Dist: uvicorn>=0.15.0
+Requires-Dist: sqlalchemy>=1.4.0
+Requires-Dist: pydantic>=1.8.0
+Requires-Dist: python-multipart>=0.0.5
+Requires-Dist: aiofiles>=0.7.0
+Requires-Dist: pyyaml>=5.4.0
+Requires-Dist: email-validator>=1.1.0
+Requires-Dist: aiohttp>=3.8.0
+Requires-Dist: httpx>=0.24.0
+Requires-Dist: python-dotenv>=1.0.0

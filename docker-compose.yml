@@ -1,0 +1,76 @@
+services:
+  gateway:
+    container_name: gateway
+    build: 
+      context: .
+      dockerfile: gateway/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - CONFIG_PATH=/app/config/config.yaml
+    volumes:
+      - ./config:/app/config
+    networks:
+      - meekyolo-net
+    depends_on:
+      - api_service
+      - analysis_service
+      - model_service
+
+  api_service:
+    container_name: api_service
+    build: 
+      context: .
+      dockerfile: api_service/Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - CONFIG_PATH=/app/config/config.yaml
+    volumes:
+      - ./config:/app/config
+    networks:
+      - meekyolo-net
+    depends_on:
+      - analysis_service
+
+  analysis_service:
+    container_name: analysis_service
+    build: 
+      context: .
+      dockerfile: analysis_service/Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      - CONFIG_PATH=/app/config/config.yaml
+      - CUDA_VISIBLE_DEVICES=0  # 如果使用GPU
+    volumes:
+      - ./config:/app/config
+      - ./models:/app/models
+      - ./results:/app/results
+    networks:
+      - meekyolo-net
+    depends_on:
+      - model_service
+
+  model_service:
+    container_name: model_service
+    build: 
+      context: .
+      dockerfile: model_service/Dockerfile
+    ports:
+      - "8003:8003"
+    environment:
+      - CONFIG_PATH=/app/config/config.yaml
+    volumes:
+      - ./config:/app/config
+      - ./models:/app/models
+    networks:
+      - meekyolo-net
+
+networks:
+  meekyolo-net:
+    driver: bridge
+
+volumes:
+  models:
+  results:

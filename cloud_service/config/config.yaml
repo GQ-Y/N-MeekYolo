@@ -1,0 +1,30 @@
+# 基础配置
+PROJECT_NAME: "Cloud Model Market"
+VERSION: "1.0.0"
+
+# 服务配置
+SERVICE:
+  host: "0.0.0.0"
+  port: 8004
+
+# 存储配置
+STORAGE:
+  base_dir: "models"  # 存储根目录
+  max_size: 1073741824  # 1GB
+  allowed_formats: [".pt", ".pth", ".onnx", ".yaml"]
+
+# 日志配置
+LOGGING:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# 数据库配置
+DATABASE:
+  url: "sqlite:///data/cloud_market.db"  # SQLite数据库路径 
+
+# 应用配置
+APP:
+  title: "Cloud Service"
+  version: "1.0.0"
+  description: "云服务"
+  base_url: "http://localhost:8004"  # 添加基础URL
