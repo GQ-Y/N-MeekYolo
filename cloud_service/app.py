@@ -12,8 +12,11 @@ logger = setup_logger(__name__)
 
 # 创建应用
 app = FastAPI(
-    title=settings.PROJECT_NAME,
-    version=settings.VERSION
+    title=settings.APP.title,
+    version=settings.APP.version,
+    description=settings.APP.description,
+    openapi_url="/api/v1/openapi.json",
+    docs_url="/api/v1/docs"
 )
 
 # 添加CORS中间件
@@ -28,6 +31,15 @@ app.add_middleware(
 # 注册路由
 app.include_router(model.router, prefix="/api/v1")
 app.include_router(key.router, prefix="/api/v1")
+
+# 健康检查
+@app.get("/health")
+async def health_check():
+    """健康检查接口"""
+    return {
+        "status": "healthy",
+        "name": "cloud"
+    }
 
 # 启动事件
 @app.on_event("startup")

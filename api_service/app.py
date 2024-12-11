@@ -69,4 +69,8 @@ async def shutdown_event():
 # 健康检查
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"} 
+    """健康检查接口"""
+    return {
+        "status": "healthy",
+        "name": "api"
+    }

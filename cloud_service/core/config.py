@@ -41,7 +41,7 @@ class OutputConfig(BaseModel):
     save_txt: bool = False
 
 class ServicesConfig(BaseModel):
-    """服��配置组"""
+    """服务配置组"""
     model: Dict[str, Any]
     analysis: Dict[str, Any]
     api: Dict[str, Any]
@@ -56,7 +56,7 @@ class AppSettings(BaseModel):
 class CloudSettings(BaseSettings):
     """云服务配置"""
     
-    PROJECT_NAME: str = "MeekYolo Cloud Service"
+    PROJECT_NAME: str = "MeekYolo Service"
     VERSION: str = "1.0.0"
     
     # 服务配置
@@ -80,6 +80,8 @@ class CloudSettings(BaseSettings):
     
     # 应用配置 - 使用默认值
     APP: AppSettings = AppSettings()
+    PROJECT_NAME: str = "MeekYolo Cloud Service"
+    VERSION: str = "1.0.0"
     
     class Config:
         env_file = ".env"

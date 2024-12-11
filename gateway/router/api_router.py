@@ -2,25 +2,51 @@
 API路由模块
 处理所有外部API请求的路由和转发
 """
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Path, Query
+from typing import Optional
 from shared.models.base import BaseResponse
 from shared.utils.logger import setup_logger
 from gateway.discovery.service_registry import service_registry
 import aiohttp
 
 logger = setup_logger(__name__)
-router = APIRouter()
+router = APIRouter(tags=["API路由"])
 
-@router.api_route("/{service_name}/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+@router.api_route("/api/{path:path}", 
+    methods=["GET", "POST", "PUT", "DELETE"],
+    summary="API服务路由"
+)
+async def route_api_request(
+    path: str = Path(..., description="API路径"),
+    request: Request = None
+):
+    """路由API服务请求"""
+    return await route_request("api", path, request)
+
+@router.api_route("/model/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    summary="模型服务路由"
+)
+async def route_model_request(
+    path: str = Path(..., description="API路径"),
+    request: Request = None
+):
+    """路由模型服务请求"""
+    return await route_request("model", path, request)
+
+@router.api_route("/analysis/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    summary="分析服务路由"
+)
+async def route_analysis_request(
+    path: str = Path(..., description="API路径"),
+    request: Request = None
+):
+    """路由分析服务请求"""
+    return await route_request("analysis", path, request)
+
 async def route_request(service_name: str, path: str, request: Request):
-    """
-    路由请求到对应的服务
-    
-    Args:
-        service_name: 服务名称
-        path: 请求路径
-        request: 请求对象
-    """
+    """通用请求路由处理"""
     try:
         # 获取服务信息
         service = await service_registry.get_service(service_name)

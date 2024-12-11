@@ -5,9 +5,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from analysis_service.core.config import settings
 from analysis_service.routers.analyze import router as analyze_router
-import logging
+from shared.utils.logger import setup_logger
 
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__)
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -31,7 +31,11 @@ app.include_router(analyze_router)
 # 健康检查
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    """健康检查接口"""
+    return {
+        "status": "healthy",
+        "name": "analysis"  
+    }
 
 @app.on_event("startup")
 async def startup_event():
