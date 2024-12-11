@@ -3,6 +3,7 @@
 """
 from typing import List, Dict, Optional
 from pydantic import BaseModel, Field
+from enum import Enum
 
 # 分析请求模型
 class AnalysisRequest(BaseModel):
@@ -46,12 +47,21 @@ class StreamCreate(BaseModel):
     description: Optional[str] = Field(None, description="视频源描述")
     group_ids: Optional[List[int]] = Field(None, description="分组ID列表")
 
+class StreamStatus(str, Enum):
+    """视频源状态枚举"""
+    ACTIVE = "active"        # 正在运行
+    INACTIVE = "inactive"    # 未运行
+    ERROR = "error"         # 发生错误
+    CONNECTING = "connecting" # 正在连接
+    DISCONNECTED = "disconnected" # 连接断开
+    PAUSED = "paused"       # 已暂停
+
 class StreamUpdate(BaseModel):
     """更新视频源请求"""
     name: Optional[str] = Field(None, description="视频源名称")
     url: Optional[str] = Field(None, description="视频源URL")
     description: Optional[str] = Field(None, description="视频源描述")
-    status: Optional[str] = Field(None, description="视频源状态")
+    status: Optional[StreamStatus] = Field(None, description="视频源状态")
     error_message: Optional[str] = Field(None, description="错误信息")
     group_ids: Optional[List[int]] = Field(None, description="分组ID列表")
 
@@ -106,10 +116,19 @@ class TaskUpdate(BaseModel):
     callback_ids: Optional[List[int]] = Field(None, description="回调服务ID列表")
     callback_interval: Optional[int] = Field(None, description="回调间隔(秒)")
 
+class TaskStatus(str, Enum):
+    """任务状态枚举"""
+    CREATED = "created"      # 已创建
+    STARTING = "starting"    # 正在启动
+    RUNNING = "running"      # 运行中
+    STOPPING = "stopping"    # 正在停止
+    STOPPED = "stopped"      # 已停止
+    ERROR = "error"         # 错误
+
 class TaskStatusUpdate(BaseModel):
-    """更新任务状态请求"""
-    status: str = Field(..., description="任务状态")
-    error_message: Optional[str] = Field(None, description="错误信息")
+    """任务状态更新请求"""
+    status: TaskStatus
+    error_message: Optional[str] = None
 
 class CreateStreamRequest(BaseModel):
     """创建流请求"""

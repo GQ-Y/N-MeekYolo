@@ -2,7 +2,7 @@
 响应数据模型
 """
 from typing import Dict, Optional, List, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 
 class BaseResponse(BaseModel):
@@ -85,13 +85,16 @@ class TaskResponse(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     
-    # 关联数据
-    streams: List[int] = []  # 流ID列表
-    models: List[int] = []   # 模型ID列表
-    callbacks: List[int] = [] # 回调服务ID列表
+    # 关联数据 - 只存储ID
+    stream_ids: List[int] = Field(default_factory=list)  # 改名以更清晰
+    model_ids: List[int] = Field(default_factory=list)   # 改名以更清晰
+    callback_ids: List[int] = Field(default_factory=list) # 改名以更清晰
 
     class Config:
         from_attributes = True
+        
+        # 添加别名映射，使其能正确从数据库模型转换
+        alias_generator = lambda x: x.replace('_ids', 's')
 
 class ResponseModel(BaseModel):
     """通用响应模型"""

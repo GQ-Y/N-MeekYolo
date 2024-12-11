@@ -14,8 +14,10 @@ from analysis_service.models.responses import (
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
-router = APIRouter()
+logger.info("初始化 YOLODetector...")
 detector = YOLODetector()
+logger.info("YOLODetector 初始化完成")
+router = APIRouter(prefix="/analyze")
 
 class ImageAnalysisRequest(BaseModel):
     """图片分析请求"""
@@ -75,6 +77,7 @@ async def analyze_video(request: VideoAnalysisRequest):
 @router.post("/stream", response_model=StreamAnalysisResponse)
 async def analyze_stream(request: StreamAnalysisRequest):
     """分析RTSP流"""
+    logger.info(f"收到流分析请求: {request}")
     try:
         task = await detector.start_stream_analysis(
             request.model_code,
@@ -83,6 +86,7 @@ async def analyze_stream(request: StreamAnalysisRequest):
             request.output_url,
             request.callback_interval
         )
+        logger.info(f"流分析任务创建成功: {task}")
         return StreamAnalysisResponse(**task)
     except Exception as e:
         logger.error(f"Stream analysis failed: {str(e)}")

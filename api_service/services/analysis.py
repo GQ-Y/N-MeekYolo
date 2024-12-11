@@ -26,7 +26,7 @@ class AnalysisService:
         task_id = str(uuid.uuid4())
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{self.analysis_url}/image",
+                f"{self.analysis_url}/analyze/image",
                 json={
                     "task_id": task_id,
                     "model_code": model_code,
@@ -48,7 +48,7 @@ class AnalysisService:
         task_id = str(uuid.uuid4())
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{self.analysis_url}/video",
+                f"{self.analysis_url}/analyze/video",
                 json={
                     "task_id": task_id,
                     "model_code": model_code,
@@ -71,7 +71,7 @@ class AnalysisService:
         task_id = str(uuid.uuid4())
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{self.analysis_url}/stream",
+                f"{self.analysis_url}/analyze/stream",
                 json={
                     "task_id": task_id,
                     "model_code": model_code,
@@ -88,6 +88,6 @@ class AnalysisService:
         """停止分析任务"""
         async with httpx.AsyncClient() as client:
             response = await client.delete(
-                f"{self.analysis_url}/tasks/{task_id}"
+                f"{self.analysis_url}/analyze/stream/{task_id}/stop"
             )
             response.raise_for_status() 

@@ -9,6 +9,20 @@ class AnalysisSettings(Settings):
     
     PROJECT_NAME: str = "MeekYolo Analysis Service"
     
+    # 模型配置
+    MODEL: Dict[str, Any] = {
+        "default_model": "/models/yolo/yolov11.pt",  # 默认模型路径
+        "store_dir": "/store"  # model_service的模型存储目录
+    }
+    
+    # 服务配置
+    SERVICES: Dict[str, Dict[str, Any]] = {
+        "model": {
+            "host": "localhost",
+            "port": 8003
+        }
+    }
+    
     # 分析配置
     ANALYSIS: Dict[str, Any] = {
         "confidence": 0.5,     # 置信度阈值

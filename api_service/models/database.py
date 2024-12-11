@@ -16,6 +16,7 @@ from sqlalchemy import (
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
+from typing import List
 
 Base = declarative_base()
 
@@ -144,9 +145,22 @@ class Task(Base):
     started_at = Column(DateTime)
     completed_at = Column(DateTime)
     
-    # 关联视频源
+    # 关联关系
     streams = relationship('Stream', secondary=task_stream_association, back_populates='tasks')
-    # 关联模型
     models = relationship('Model', secondary=task_model_association, back_populates='tasks')
-    # 关联回调服务
-    callbacks = relationship('Callback', secondary=task_callback_association, back_populates='tasks') 
+    callbacks = relationship('Callback', secondary=task_callback_association, back_populates='tasks')
+    
+    @property
+    def stream_ids(self) -> List[int]:
+        """获取流ID列表"""
+        return [stream.id for stream in self.streams]
+        
+    @property
+    def model_ids(self) -> List[int]:
+        """获取模型ID列表"""
+        return [model.id for model in self.models]
+        
+    @property
+    def callback_ids(self) -> List[int]:
+        """获取回调ID列表"""
+        return [callback.id for callback in self.callbacks] 

@@ -4,7 +4,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from analysis_service.core.config import settings
-from analysis_service.routers import analyze_router
+from analysis_service.routers.analyze import router as analyze_router
+import logging
+
+logger = logging.getLogger(__name__)
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -22,10 +25,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 注册路由
-app.include_router(analyze_router, prefix="/analyze", tags=["analyze"])
+# 直接注册路由,不使用前缀
+app.include_router(analyze_router)
 
 # 健康检查
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"} 
+    return {"status": "healthy"}
+
+@app.on_event("startup")
+async def startup_event():
+    logger.info("分析服务启动...")
+    logger.info(f"注册的路由: {[route for route in app.routes]}") 

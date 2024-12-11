@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "MeekYolo Service"
     VERSION: str = "1.0.0"
     
-    # 数据库配置 - 使用相对�� api_service 的路径
+    # 数据库配置 - 使用相对路径 api_service 的路径
     DATABASE_DIR: str = "data"  # api_service/data 目录
     DATABASE_NAME: str = "api_service.db"
     
