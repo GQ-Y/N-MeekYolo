@@ -4,9 +4,10 @@
 import httpx
 from typing import Dict, Any
 from sqlalchemy.orm import Session
-from api_service.models.database import Task
+from api_service.models.database import Task, Stream
 from api_service.core.config import settings
 from shared.utils.logger import setup_logger
+from api_service.models.requests import StreamStatus
 
 logger = setup_logger(__name__)
 
@@ -16,14 +17,14 @@ class TaskController:
     def __init__(self):
         self.analysis_url = f"http://{settings.SERVICES.analysis.host}:{settings.SERVICES.analysis.port}"
         
-    async def start_analysis(self, stream_url: str, model_code: str, callback_url: str = None) -> Dict[str, Any]:
+    async def start_analysis(self, stream_url: str, model_code: str, callback_urls: list) -> Dict[str, Any]:
         """启动分析"""
         try:
             # 构造请求体
             request_data = {
                 "model_code": model_code,
                 "stream_url": stream_url,
-                "callback_url": callback_url,
+                "callback_urls": callback_urls,
                 "callback_interval": 1
             }
             
@@ -56,6 +57,28 @@ class TaskController:
             logger.error(f"调用分析服务失败: {str(e)}")
             raise
             
+    async def update_stream_status(self, db: Session, task_id: int, status: StreamStatus):
+        """更新任务关联的摄像头状态"""
+        try:
+            # 获取任务
+            task = db.query(Task).filter(Task.id == task_id).first()
+            if not task:
+                logger.error(f"Task {task_id} not found")
+                return False
+                
+            # 更新所有关联摄像头的状态
+            for stream in task.streams:
+                stream.status = status
+                logger.info(f"Updated stream {stream.id} status to {status}")
+                
+            db.commit()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to update stream status: {str(e)}")
+            db.rollback()
+            return False
+    
     async def start_task(self, db: Session, task_id: int) -> bool:
         """启动任务"""
         try:
@@ -74,25 +97,28 @@ class TaskController:
             task.status = "running"
             db.commit()
             
-            # 为每个视频源和模型组合启动分析
+            # 获取 api_service 回调地址
+            api_callback_url = f"http://{settings.SERVICES.api.host}:{settings.SERVICES.api.port}/api/v1/callbacks/analysis/callback"
+            
             for stream in task.streams:
                 for model in task.models:
                     try:
-                        # 构造回调URL
-                        callback_url = None
+                        # 构造回调URL列表
+                        callback_urls = []
                         if task.callbacks:
-                            callback_url = task.callbacks[0].url
-                            
+                            callback_urls.extend([cb.url for cb in task.callbacks])
+                        callback_urls.append(api_callback_url)  # 添加 api_service 回调
+                        
                         logger.info(f"开始处理 - 任务:{task_id} 视频源:{stream.id} 模型:{model.id}")
                         logger.info(f"视频源URL: {stream.url}")
                         logger.info(f"模型代码: {model.code}")
-                        logger.info(f"回调URL: {callback_url}")
+                        logger.info(f"回调URLs: {callback_urls}")
                         
                         # 启动分析
                         result = await self.start_analysis(
                             stream_url=stream.url,
                             model_code=model.code,
-                            callback_url=callback_url
+                            callback_urls=callback_urls  # 传入回调URL列表
                         )
                         
                         logger.info(f"分析启动成功 - 任务:{task_id} 视频源:{stream.id} 模型:{model.id}")
@@ -102,6 +128,12 @@ class TaskController:
                         logger.error(f"分析服务调用失败 - 任务:{task_id} 视频源:{stream.id} 模型:{model.id} 错误:{str(e)}")
                         continue
                         
+            # 任务启动成功后,更新摄像头状态为运行中
+            if await self.update_stream_status(db, task_id, StreamStatus.ACTIVE):
+                logger.info(f"Updated streams status to active for task {task_id}")
+            else:
+                logger.warning(f"Failed to update streams status for task {task_id}")
+                
             return True
             
         except Exception as e:

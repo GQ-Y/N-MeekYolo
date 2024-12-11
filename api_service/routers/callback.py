@@ -3,12 +3,14 @@
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List
-from api_service.models.requests import CallbackCreate, CallbackUpdate
+from typing import List, Dict, Any
+from api_service.models.requests import CallbackCreate, CallbackUpdate, StreamStatus
 from api_service.models.responses import BaseResponse, CallbackResponse
+from api_service.models.database import Stream
 from api_service.crud import callback
 from api_service.services.database import get_db
 from shared.utils.logger import setup_logger
+from datetime import datetime
 
 logger = setup_logger(__name__)
 router = APIRouter(prefix="/callbacks", tags=["回调服务"])
@@ -101,4 +103,39 @@ async def delete_callback(callback_id: int, db: Session = Depends(get_db)):
         raise
     except Exception as e:
         logger.error(f"Delete callback failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/analysis/callback", response_model=BaseResponse)
+async def analysis_callback(
+    callback_data: Dict[str, Any],
+    db: Session = Depends(get_db)
+):
+    """接收分析服务回调"""
+    try:
+        logger.info(f"Received analysis callback: {callback_data}")
+        
+        # 获取任务ID和状态
+        task_id = callback_data.get("task_id")
+        status = callback_data.get("status")
+        
+        if not task_id or not status:
+            raise HTTPException(status_code=400, detail="Invalid callback data")
+            
+        # 如果是停止状态,更新���关视频源状态
+        if status == "stopped":
+            stream_url = callback_data.get("stream_url")
+            if stream_url:
+                # 查找对应的视频源
+                stream = db.query(Stream).filter(Stream.url == stream_url).first()
+                if stream:
+                    # 更新状态为断开连接
+                    stream.status = StreamStatus.DISCONNECTED
+                    stream.updated_at = datetime.now()
+                    db.commit()
+                    logger.info(f"Updated stream {stream.id} status to disconnected")
+                    
+        return BaseResponse(message="Callback processed successfully")
+        
+    except Exception as e:
+        logger.error(f"Process analysis callback failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) 

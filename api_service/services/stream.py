@@ -14,6 +14,14 @@ class StreamService:
     def create_stream(self, db: Session, stream_data: CreateStreamRequest) -> Stream:
         """创建流"""
         try:
+            # 检查URL是否已存在
+            existing_stream = db.query(Stream).filter(Stream.url == stream_data.url).first()
+            if existing_stream:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Stream with URL '{stream_data.url}' already exists"
+                )
+            
             # 创建流对象
             stream = Stream(
                 name=stream_data.name,
@@ -35,10 +43,15 @@ class StreamService:
             
             return stream
             
+        except HTTPException:
+            raise
         except Exception as e:
             db.rollback()
             logger.error(f"Database error in create stream: {str(e)}", exc_info=True)
-            raise
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to create stream: {str(e)}"
+            )
 
     def get_streams(
         self,

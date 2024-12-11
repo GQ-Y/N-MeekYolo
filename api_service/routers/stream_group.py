@@ -1,17 +1,18 @@
 """
-流分组路由
+视频源分组路由
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
-from api_service.models.responses import BaseResponse, StreamGroupResponse
 from api_service.models.requests import StreamGroupCreate, StreamGroupUpdate
+from api_service.models.responses import BaseResponse, StreamGroupResponse
 from api_service.services.stream_group import StreamGroupService
 from api_service.services.database import get_db
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
-router = APIRouter(prefix="/stream-groups", tags=["流分组"])
+
+router = APIRouter()
 stream_group_service = StreamGroupService()
 
 @router.post("", response_model=BaseResponse)
@@ -19,7 +20,7 @@ async def create_stream_group(
     data: StreamGroupCreate,
     db: Session = Depends(get_db)
 ):
-    """创建流分组"""
+    """创建视频源分组"""
     try:
         group = await stream_group_service.create_stream_group(db, data)
         
@@ -40,19 +41,12 @@ async def create_stream_group(
             message="创建成功",
             data=response_data
         )
-    except HTTPException as e:
-        logger.error(f"Business error in create stream group: {e.detail}")
-        return BaseResponse(
-            code=e.status_code,
-            message=e.detail,
-            data=None
-        )
+        
     except Exception as e:
-        logger.error(f"Create stream group failed: {str(e)}", exc_info=True)
-        return BaseResponse(
-            code=500,
-            message=f"创建失败: {str(e)}",
-            data=None
+        logger.error(f"Create stream group failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"创建失败: {str(e)}"
         )
 
 @router.get("", response_model=List[StreamGroupResponse])

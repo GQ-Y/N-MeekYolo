@@ -10,6 +10,7 @@ from api_service.crud import task
 from api_service.services.database import get_db
 from shared.utils.logger import setup_logger
 from api_service.services.task_controller import TaskController
+from api_service.models.database import Task
 
 logger = setup_logger(__name__)
 router = APIRouter(prefix="/tasks", tags=["任务"])
@@ -247,66 +248,35 @@ async def delete_task(task_id: int, db: Session = Depends(get_db)):
         logger.error(f"Delete task failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/{task_id}/start", response_model=BaseResponse,
-    description="启动任务",
-    responses={
-        200: {
-            "description": "任务启动成功",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "code": 200,
-                        "message": "任务启动成功",
-                        "data": {
-                            "task_id": 1,
-                            "status": "running",
-                            "started_at": "2024-01-01T00:00:00"
-                        }
-                    }
-                }
-            }
-        },
-        400: {
-            "description": "启动失败",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "code": 400,
-                        "message": "Failed to start task",
-                        "detail": "任务已在运行中"
-                    }
-                }
-            }
-        }
-    }
-)
+@router.post("/{task_id}/start", response_model=BaseResponse)
 async def start_task(
     task_id: int = Path(..., description="任务ID"),
     db: Session = Depends(get_db)
 ):
-    """
-    启动任务
-    
-    将任务状态更新为运行中，并为每个视频源和模型的组合创建分析线程。
-    每个分析线程会：
-    1. 连接到视频源
-    2. 加载指定的模型
-    3. 执行实时分析
-    4. 按指定间隔发送回调通知
-    
-    注意：
-    - 任务必须处于已创建或已停止状态
-    - 每个视频源会对应多个分析线程(取决于模型数量)
-    - 所有分析线程都是独立运行的
-    """
+    """启动任务"""
     try:
         success = await task_controller.start_task(db, task_id)
         if not success:
             raise HTTPException(status_code=400, detail="Failed to start task")
             
+        # 获取更新后的任务信息
+        task = db.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+            
         return BaseResponse(
             message="任务启动成功",
-            data={"task_id": task_id}
+            data={
+                "task_id": task_id,
+                "status": task.status,
+                "started_at": task.started_at,
+                "streams": [
+                    {
+                        "id": stream.id,
+                        "status": stream.status
+                    } for stream in task.streams
+                ]
+            }
         )
         
     except HTTPException:

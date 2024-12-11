@@ -21,7 +21,9 @@ logger = setup_logger(__name__)
 # 创建FastAPI应用
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    version=settings.VERSION
+    version=settings.VERSION,
+    docs_url="/docs",  # 明确指定swagger ui路径
+    redoc_url="/redoc"  # 明确指定redoc路径
 )
 
 # 配置CORS
@@ -33,13 +35,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 注册路由
-app.include_router(stream_router, prefix="/api/v1", tags=["streams"])
-app.include_router(stream_group_router, prefix="/api/v1", tags=["stream_groups"])
-app.include_router(model_router, prefix="/api/v1", tags=["models"])
-app.include_router(callback_router, prefix="/api/v1", tags=["callbacks"])
-app.include_router(task_router, prefix="/api/v1", tags=["tasks"])
-app.include_router(analysis_router, prefix="/api/v1", tags=["analysis"])
+# 注册路由 - 使用统一的中文标签
+app.include_router(stream_router, prefix="/api/v1", tags=["视频源"])
+app.include_router(stream_group_router, prefix="/api/v1", tags=["视频源分组"])
+app.include_router(model_router, prefix="/api/v1", tags=["模型"])
+app.include_router(callback_router, prefix="/api/v1", tags=["回调服务"])
+app.include_router(task_router, prefix="/api/v1", tags=["任务"])
+app.include_router(analysis_router, prefix="/api/v1", tags=["分析"])
 
 # 创建视频源监控器
 stream_monitor = StreamMonitor()

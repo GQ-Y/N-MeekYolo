@@ -220,7 +220,7 @@ class YOLODetector:
                     # 获取边界框坐标
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                     
-                    # 获取类别���息
+                    # 获取类别信息
                     class_id = int(box.cls[0].item())
                     class_name = result.names[class_id]
                     
@@ -245,27 +245,22 @@ class YOLODetector:
             logger.error(f"检测失败: {str(e)}")
             raise
             
-    async def _send_callback(self, callback_url: str, result: Dict[str, Any]):
-        """
-        发送回调请求
-        
-        Args:
-            callback_url: 回调URL
-            result: 检测结果
-        """
-        if not callback_url:
+    async def _send_callbacks(self, callback_urls: List[str], result: Dict[str, Any]):
+        """发送多个回调请求"""
+        if not callback_urls:
             return
-            
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(callback_url, json=result) as response:
-                    if response.status == 200:
-                        logger.info(f"回调成功: {callback_url}")
-                    else:
-                        logger.error(f"回调失败: {callback_url}, 状态码: {response.status}")
-        except Exception as e:
-            logger.error(f"发送回调请求失败: {callback_url}, 错误: {str(e)}")
-            
+        
+        for callback_url in callback_urls:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(callback_url, json=result) as response:
+                        if response.status == 200:
+                            logger.info(f"回调成功: {callback_url}")
+                        else:
+                            logger.error(f"回调失败: {callback_url}, 状态码: {response.status}")
+            except Exception as e:
+                logger.error(f"发送回调请求失败: {callback_url}, 错误: {str(e)}")
+
     async def detect_images(self, model_code: str, image_urls: List[str], callback_url: str = None, is_base64: bool = False) -> Dict[str, Any]:
         """
         检测图片
@@ -312,7 +307,7 @@ class YOLODetector:
             
             # 发送回调
             if callback_url:
-                await self._send_callback(callback_url, result)
+                await self._send_callbacks([callback_url], result)
                 
             return result
             
@@ -321,26 +316,14 @@ class YOLODetector:
             raise
 
     async def start_stream_analysis(
-        self, 
-        model_code: str, 
+        self,
+        model_code: str,
         stream_url: str,
-        callback_url: str = None,
+        callback_urls: List[str] = None,
         output_url: str = None,
         callback_interval: int = 1
     ) -> Dict[str, Any]:
-        """
-        开始流分析
-        
-        Args:
-            model_code: 模型代码
-            stream_url: 流��址
-            callback_url: 回调URL
-            output_url: 输出流地址
-            callback_interval: 回调间隔(秒)
-            
-        Returns:
-            Dict[str, Any]: 任务信息
-        """
+        """开始流分析"""
         try:
             # 加载模型
             if not self.model:
@@ -353,7 +336,7 @@ class YOLODetector:
             asyncio.create_task(self._process_stream(
                 task_id,
                 stream_url,
-                callback_url,
+                callback_urls,
                 output_url,
                 callback_interval
             ))
@@ -398,7 +381,7 @@ class YOLODetector:
         self,
         task_id: str,
         stream_url: str,
-        callback_url: str = None,
+        callback_urls: List[str] = None,
         output_url: str = None,
         callback_interval: int = 1
     ):
@@ -459,7 +442,7 @@ class YOLODetector:
                 
                 # 发送回调
                 current_time = time.time()
-                if callback_url and (current_time - last_callback_time) >= callback_interval:
+                if callback_urls and (current_time - last_callback_time) >= callback_interval:
                     # 编码结果帧
                     _, buffer = cv2.imencode('.jpg', result_frame)
                     frame_base64 = base64.b64encode(buffer).decode('utf-8')
@@ -475,12 +458,12 @@ class YOLODetector:
                         "timestamp": current_time
                     }
                     
-                    await self._send_callback(callback_url, callback_data)
+                    await self._send_callbacks(callback_urls, callback_data)
                     last_callback_time = current_time
                     
             # 发送停止回调
-            if callback_url:
-                await self._send_callback(callback_url, {
+            if callback_urls:
+                await self._send_callbacks(callback_urls, {
                     "task_id": task_id,
                     "status": "stopped",
                     "stream_url": stream_url,
@@ -490,8 +473,8 @@ class YOLODetector:
                 
         except Exception as e:
             logger.error(f"Process stream failed: {str(e)}")
-            if callback_url:
-                await self._send_callback(callback_url, {
+            if callback_urls:
+                await self._send_callbacks(callback_urls, {
                     "task_id": task_id,
                     "status": "failed",
                     "error": str(e),
