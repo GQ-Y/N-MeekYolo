@@ -122,13 +122,27 @@ class ServiceRegistry:
                         logger.info(f"Found healthy service at {url}")
                         # 获取服务信息
                         info = await self.discovery.get_service_info(url)
+                        # 添加详细日志
+                        logger.info(f"Service info from {url}:")
+                        logger.info(f"  - Name: {info.name if info else 'None'}")
+                        logger.info(f"  - URL: {info.url if info else 'None'}")
+                        logger.info(f"  - Description: {info.description if info else 'None'}")
+                        logger.info(f"  - Status: {info.status if info else 'None'}")
+                        logger.info(f"  - Started at: {info.started_at if info else 'None'}")
+                        logger.info(f"  - Raw response: {info}")
+                        
                         if info and info.name not in self.services:
                             logger.info(f"Registering new service: {info.name} at {url}")
                             await self.register_service(info)
+                        elif not info:
+                            logger.warning(f"Got empty service info from {url}")
+                        elif info.name in self.services:
+                            logger.info(f"Service {info.name} already registered")
                     else:
                         logger.warning(f"Service at {url} is not healthy")
                 except Exception as e:
                     logger.error(f"Error checking service at {url}: {str(e)}")
+                    logger.exception("Full traceback:")
                     continue
                     
             self._last_discovery = datetime.now()
@@ -136,6 +150,7 @@ class ServiceRegistry:
             
         except Exception as e:
             logger.error(f"Service discovery failed: {str(e)}")
+            logger.exception("Full traceback:")
             
     async def update_service_stats(self, service_name: str, response_time: float, success: bool):
         """更新服务统计信息"""

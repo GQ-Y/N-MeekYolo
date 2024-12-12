@@ -30,10 +30,10 @@ STORAGE:
 
 # 分析配置
 ANALYSIS:
-  confidence: 0.5
-  iou: 0.45
-  max_det: 300
-  device: "auto"
+  confidence: 0.5  # 目标检测置信度阈值,低于此值的检测框将被过滤
+  iou: 0.45  # 非极大值抑制的IOU阈值,用于去除重叠检测框
+  max_det: 300  # 每张图像最大检测目标数量
+  device: "auto"  # 推理设备,auto表示自动选择可用的最佳设备(CPU/GPU)
 
 # 输出配置
 OUTPUT:
