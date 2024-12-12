@@ -10,7 +10,7 @@ import numpy as np
 import aiohttp
 import torch
 from ultralytics import YOLO
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from shared.utils.logger import setup_logger
 from analysis_service.core.config import settings
 import time
@@ -255,21 +255,45 @@ class YOLODetector:
             logger.error(f"检测失败: {str(e)}")
             raise
             
-    async def _send_callbacks(self, callback_urls: List[str], result: Dict[str, Any]):
-        """发送多个回调请求"""
-        if not callback_urls:
-            return
-        
-        for callback_url in callback_urls:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(callback_url, json=result) as response:
-                        if response.status == 200:
-                            logger.info(f"回调成功: {callback_url}")
-                        else:
-                            logger.error(f"回调失败: {callback_url}, 状态码: {response.status}")
-            except Exception as e:
-                logger.error(f"发送回调请求失败: {callback_url}, 错误: {str(e)}")
+    async def _send_callbacks(self, callback_urls: Union[str, List[str]], data: Dict[str, Any]):
+        """发送回调请求"""
+        try:
+            # 统一处理回调URL
+            if isinstance(callback_urls, str):
+                urls = [callback_urls]
+            elif isinstance(callback_urls, list):
+                urls = callback_urls
+            else:
+                logger.error(f"Invalid callback_urls type: {type(callback_urls)}")
+                return
+            
+            # 验证URLs
+            valid_urls = []
+            for url in urls:
+                if isinstance(url, str) and url.startswith(('http://', 'https://')):
+                    valid_urls.append(url)
+                else:
+                    logger.warning(f"Invalid callback URL: {url}")
+                
+            if not valid_urls:
+                logger.warning("No valid callback URLs found")
+                return
+            
+            # 发送回调
+            async with aiohttp.ClientSession() as session:
+                for url in valid_urls:
+                    try:
+                        logger.info(f"Sending callback to: {url}")
+                        async with session.post(url, json=data) as response:
+                            if response.status == 200:
+                                logger.info(f"Callback successful: {url}")
+                            else:
+                                logger.error(f"Callback failed: {url}, status: {response.status}")
+                    except Exception as e:
+                        logger.error(f"Error sending callback to {url}: {str(e)}")
+                    
+        except Exception as e:
+            logger.error(f"Error in _send_callbacks: {str(e)}")
 
     async def detect_images(self, model_code: str, image_urls: List[str], callback_url: str = None, is_base64: bool = False) -> Dict[str, Any]:
         """
@@ -329,7 +353,7 @@ class YOLODetector:
         self,
         model_code: str,
         stream_url: str,
-        callback_urls: List[str] = None,
+        callback_urls: Union[str, List[str]] = None,
         output_url: str = None,
         callback_interval: int = 1
     ) -> Dict[str, Any]:
@@ -391,7 +415,7 @@ class YOLODetector:
         self,
         task_id: str,
         stream_url: str,
-        callback_urls: List[str] = None,
+        callback_urls: Union[str, List[str]] = None,
         output_url: str = None,
         callback_interval: int = 1
     ):
@@ -405,7 +429,7 @@ class YOLODetector:
             if not cap.isOpened():
                 raise Exception(f"Cannot open stream: {stream_url}")
             
-            # 获取视频信��
+            # 获取视频信息
             fps = int(cap.get(cv2.CAP_PROP_FPS))
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -413,7 +437,6 @@ class YOLODetector:
             # 初始化输出
             writer = None
             if output_url:
-                # 设置输出编码器
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                 writer = cv2.VideoWriter(output_url, fourcc, fps, (width, height))
             
@@ -451,25 +474,26 @@ class YOLODetector:
                     writer.write(result_frame)
                 
                 # 发送回调
-                current_time = time.time()
-                if callback_urls and (current_time - last_callback_time) >= callback_interval:
-                    # 编码结果帧
-                    _, buffer = cv2.imencode('.jpg', result_frame)
-                    frame_base64 = base64.b64encode(buffer).decode('utf-8')
-                    
-                    # 准备回调数据
-                    callback_data = {
-                        "task_id": task_id,
-                        "status": "processing",
-                        "stream_url": stream_url,
-                        "output_url": output_url,
-                        "detections": detections,
-                        "result_frame": frame_base64,
-                        "timestamp": current_time
-                    }
-                    
-                    await self._send_callbacks(callback_urls, callback_data)
-                    last_callback_time = current_time
+                if callback_urls:
+                    current_time = time.time()
+                    if (current_time - last_callback_time) >= callback_interval:
+                        # 编码结果帧
+                        _, buffer = cv2.imencode('.jpg', result_frame)
+                        frame_base64 = base64.b64encode(buffer).decode('utf-8')
+                        
+                        # 准备回调数据
+                        callback_data = {
+                            "task_id": task_id,
+                            "status": "processing",
+                            "stream_url": stream_url,
+                            "output_url": output_url,
+                            "detections": detections,
+                            "result_frame": frame_base64,
+                            "timestamp": current_time
+                        }
+                        
+                        await self._send_callbacks(callback_urls, callback_data)
+                        last_callback_time = current_time
                     
             # 发送停止回调
             if callback_urls:
