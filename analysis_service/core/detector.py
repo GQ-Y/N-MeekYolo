@@ -25,16 +25,26 @@ class YOLODetector:
         self.model = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.stop_flags = {}
+        
+        # 构建model_service_url
         self.model_service_url = f"http://{settings.SERVICES['model']['host']}:{settings.SERVICES['model']['port']}"
         
-        # 获取项目根目录
+        # 获取项目根目录和模型存储目录
         self.root_dir = Path(__file__).parent.parent.parent
         self.model_store_dir = self.root_dir / "model_service/store"
         
+        # 打印详细的路径信息
         logger.info(f"使用设备: {self.device}")
         logger.info(f"Model service URL: {self.model_service_url}")
+        logger.info(f"Current file: {__file__}")
+        logger.info(f"Current file parent: {Path(__file__).parent}")
+        logger.info(f"Current file parent.parent: {Path(__file__).parent.parent}")
         logger.info(f"Project root directory: {self.root_dir}")
         logger.info(f"Model store directory: {self.model_store_dir}")
+        logger.info(f"Model store directory (absolute): {self.model_store_dir.absolute()}")
+        logger.info(f"Model store directory exists: {os.path.exists(self.model_store_dir)}")
+        if os.path.exists(self.model_store_dir):
+            logger.info(f"Model store directory contents: {os.listdir(self.model_store_dir)}")
         
     async def get_model_path(self, model_code: str) -> str:
         """获取模型文件路径"""
@@ -46,38 +56,38 @@ class YOLODetector:
                 logger.info(f"Default model absolute path: {default_path.absolute()}")
                 return str(default_path)
                 
-            # 从模型服务获取模型信息
-            async with aiohttp.ClientSession() as session:
-                url = f"{self.model_service_url}/api/v1/models/code/{model_code}"
-                logger.info(f"Getting model info from: {url}")
-                
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        logger.info(f"Model service response: {data}")
-                        if data.get("data"):
-                            model_info = data["data"]
-                            # 使用模型服务的store目录构建路径
-                            model_path = self.model_store_dir / model_info.get("path", "")
-                            logger.info(f"Constructed model path: {model_path}")
-                            logger.info(f"Model absolute path: {model_path.absolute()}")
-                            return str(model_path)
-                        else:
-                            logger.error(f"Model service returned invalid data")
-                    else:
-                        logger.error(f"Model service returned status {response.status}")
-                            
-            # 如果获取失败，使用默认模型
-            logger.warning(f"Failed to get model info for {model_code}, using default model")
-            default_path = self.root_dir / settings.MODEL["default_model"].lstrip('/')
-            logger.info(f"Fallback to default model path: {default_path}")
-            logger.info(f"Default model absolute path: {default_path.absolute()}")
-            return str(default_path)
+            # 直接从本地store目录获取模型
+            # 使用绝对路径构建模型目录
+            model_dir = os.path.join(str(self.model_store_dir.absolute()), model_code)
+            logger.info(f"Model store directory (absolute): {self.model_store_dir.absolute()}")
+            logger.info(f"Model code: {model_code}")
+            logger.info(f"Looking for model in directory: {model_dir}")
+            logger.info(f"Model directory exists: {os.path.exists(model_dir)}")
             
+            if os.path.exists(model_dir):
+                logger.info(f"Model directory contents: {os.listdir(model_dir)}")
+                
+                # 构建模型文件路径
+                model_path = os.path.join(model_dir, "best.pt")
+                logger.info(f"Checking model file: {model_path}")
+                logger.info(f"Model file exists: {os.path.exists(model_path)}")
+                
+                # 验证模型文件是否存在
+                if os.path.exists(model_path):
+                    logger.info(f"Found model at: {model_path}")
+                    return model_path
+                else:
+                    logger.error(f"Model file not found at: {model_path}")
+                    raise ValueError(f"Model file not found at: {model_path}")
+            else:
+                logger.error(f"Model directory not found: {model_dir}")
+                raise ValueError(f"Model directory not found: {model_dir}")
+                    
         except Exception as e:
             logger.error(f"Error getting model path: {str(e)}")
+            # 如果获取失败，使用默认模型
             default_path = self.root_dir / settings.MODEL["default_model"].lstrip('/')
-            logger.info(f"Error fallback to default model path: {default_path}")
+            logger.info(f"Fallback to default model path: {default_path}")
             logger.info(f"Default model absolute path: {default_path.absolute()}")
             return str(default_path)
 
@@ -325,9 +335,9 @@ class YOLODetector:
     ) -> Dict[str, Any]:
         """开始流分析"""
         try:
-            # 加载模型
+            # 加载模型 - 直接使用model_code
             if not self.model:
-                await self.load_model(f"models/{model_code}/best.pt")
+                await self.load_model(model_code)  # 修改这里，直接传入model_code
                 
             # 创建任务ID
             task_id = f"stream_{int(time.time())}"
@@ -395,7 +405,7 @@ class YOLODetector:
             if not cap.isOpened():
                 raise Exception(f"Cannot open stream: {stream_url}")
             
-            # 获取视频信息
+            # 获取视频信��
             fps = int(cap.get(cv2.CAP_PROP_FPS))
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
