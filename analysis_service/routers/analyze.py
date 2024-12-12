@@ -2,16 +2,23 @@
 分析路由
 处理分析请求
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from typing import List
 from pydantic import BaseModel
 from analysis_service.core.detector import YOLODetector
 from analysis_service.models.responses import (
     ImageAnalysisResponse,
     VideoAnalysisResponse,
-    StreamAnalysisResponse
+    StreamAnalysisResponse,
+    BaseResponse,
+    StreamResponse
 )
 from shared.utils.logger import setup_logger
+from analysis_service.services.database import get_db_dependency
+from analysis_service.crud import task as task_crud
+import asyncio
+import time
+from sqlalchemy.orm import Session
 
 logger = setup_logger(__name__)
 logger.info("初始化 YOLODetector...")
@@ -19,24 +26,36 @@ detector = YOLODetector()
 logger.info("YOLODetector 初始化完成")
 router = APIRouter(prefix="/analyze")
 
+# 依赖注入获取检测器实例
+def get_detector():
+    return detector
+
+# 依赖注入获取数据库会话
+def get_db():
+    db = get_db_dependency()
+    try:
+        yield db
+    finally:
+        db.close()
+
 class ImageAnalysisRequest(BaseModel):
     """图片分析请求"""
     model_code: str
     image_urls: List[str]
-    callback_url: str = None
+    callback_urls: str = None
     is_base64: bool = False
 
 class VideoAnalysisRequest(BaseModel):
     """视频分析请求"""
     model_code: str
     video_url: str
-    callback_url: str = None
+    callback_urls: str = None
 
 class StreamAnalysisRequest(BaseModel):
     """流分析请求"""
     model_code: str
     stream_url: str
-    callback_url: str = None
+    callback_urls: str = None
     output_url: str = None
     callback_interval: int = 1
 
@@ -47,7 +66,7 @@ async def analyze_image(request: ImageAnalysisRequest):
         result = await detector.detect_images(
             request.model_code,
             request.image_urls,
-            request.callback_url,
+            request.callback_urls,
             request.is_base64
         )
         logger.info(f"Detection result: {result}")
@@ -74,23 +93,56 @@ async def analyze_video(request: VideoAnalysisRequest):
         logger.error(f"Video analysis failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/stream", response_model=StreamAnalysisResponse)
-async def analyze_stream(request: StreamAnalysisRequest):
-    """分析RTSP流"""
-    logger.info(f"收到流分析请求: {request}")
+@router.post("/stream", response_model=StreamResponse)
+async def analyze_stream(
+    request: StreamAnalysisRequest,
+    detector: YOLODetector = Depends(get_detector),
+    db: Session = Depends(get_db_dependency)
+) -> StreamResponse:
+    """处理流分析请求"""
     try:
-        task = await detector.start_stream_analysis(
-            request.model_code,
-            request.stream_url,
-            request.callback_url,
-            request.output_url,
-            request.callback_interval
+        # 生成任务ID
+        task_id = f"stream_{int(time.time())}"
+        
+        # 创建任务记录
+        task = task_crud.create_task(
+            db=db,
+            task_id=task_id,
+            model_code=request.model_code,
+            stream_url=request.stream_url,
+            callback_urls=request.callback_urls,
+            output_url=request.output_url
         )
-        logger.info(f"流分析任务创建成功: {task}")
-        return StreamAnalysisResponse(**task)
+        
+        # 启动流分析
+        result = await detector.start_stream_analysis(
+            model_code=request.model_code,
+            stream_url=request.stream_url,
+            callback_urls=request.callback_urls,
+            output_url=request.output_url,
+            callback_interval=request.callback_interval
+        )
+        
+        # 更新任务状态为运行中
+        task_crud.update_task_status(db, task_id, 1)
+        
+        return StreamResponse(
+            code=200,
+            message="Stream analysis started",
+            data={
+                "task_id": result["task_id"],
+                "status": result["status"],
+                "stream_url": result["stream_url"],
+                "output_url": result["output_url"]
+            }
+        )
+        
     except Exception as e:
-        logger.error(f"Stream analysis failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Start stream analysis failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 @router.post("/stream/{task_id}/stop")
 async def stop_stream_analysis(task_id: str):
@@ -100,4 +152,27 @@ async def stop_stream_analysis(task_id: str):
         return StreamAnalysisResponse(**result)
     except Exception as e:
         logger.error(f"Stop stream analysis failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/stream/{task_id}/status", response_model=BaseResponse)
+async def get_stream_status(
+    task_id: str,
+    db: Session = Depends(get_db)
+):
+    """获取流分析状态"""
+    try:
+        task = task_crud.get_task(db, task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+            
+        return {
+            "code": 200,
+            "message": "success",
+            "data": task.to_dict()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get task status failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) 

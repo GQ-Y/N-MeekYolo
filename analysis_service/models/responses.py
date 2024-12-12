@@ -4,6 +4,44 @@
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 
+class BaseResponse(BaseModel):
+    """基础响应模型"""
+    code: int = 200
+    message: str = "success"
+    data: Optional[Dict[str, Any]] = None
+
+class DetectionResponse(BaseResponse):
+    """检测响应"""
+    data: Dict[str, Any] = {
+        "detections": List[Dict[str, Any]],
+        "result_image": Optional[str]
+    }
+
+class StreamResponse(BaseResponse):
+    """流分析响应"""
+    class DataModel(BaseModel):
+        task_id: str
+        status: str
+        stream_url: str
+        output_url: Optional[str] = None
+        
+    data: Optional[DataModel] = None
+
+class TaskStatusResponse(BaseResponse):
+    """任务状态响应"""
+    data: Dict[str, Any] = {
+        "task_id": str,
+        "status": str,
+        "message": Optional[str]
+    }
+
+class HealthResponse(BaseResponse):
+    """健康检查响应"""
+    data: Dict[str, Any] = {
+        "status": str,
+        "version": str
+    }
+
 class DetectionResult(BaseModel):
     """检测结果"""
     track_id: Optional[int] = None

@@ -15,6 +15,8 @@ from shared.utils.logger import setup_logger
 from analysis_service.core.config import settings
 import time
 import asyncio
+from analysis_service.services.database import get_db
+from analysis_service.crud import task as task_crud
 
 logger = setup_logger(__name__)
 
@@ -33,7 +35,7 @@ class YOLODetector:
         self.root_dir = Path(__file__).parent.parent.parent
         self.model_store_dir = self.root_dir / "model_service/store"
         
-        # 打印详细的路径信息
+        # 打印详细的路径
         logger.info(f"使用设备: {self.device}")
         logger.info(f"Model service URL: {self.model_service_url}")
         logger.info(f"Current file: {__file__}")
@@ -171,7 +173,7 @@ class YOLODetector:
             # 复制图片以免修改原图
             result_image = image.copy()
             
-            # 在图片上绘制检测结果
+            # 图片上绘制检测结果
             for det in detections:
                 bbox = det['bbox']
                 x1, y1 = bbox['x1'], bbox['y1']
@@ -255,54 +257,38 @@ class YOLODetector:
             logger.error(f"检测失败: {str(e)}")
             raise
             
-    async def _send_callbacks(self, callback_urls: Union[str, List[str]], data: Dict[str, Any]):
+    async def _send_callbacks(self, callback_urls: str, data: Dict[str, Any]):
         """发送回调请求"""
+        if not callback_urls:
+            return
+            
         try:
-            # 统一处理回调URL
-            if isinstance(callback_urls, str):
-                urls = [callback_urls]
-            elif isinstance(callback_urls, list):
-                urls = callback_urls
-            else:
-                logger.error(f"Invalid callback_urls type: {type(callback_urls)}")
-                return
-            
-            # 验证URLs
-            valid_urls = []
-            for url in urls:
-                if isinstance(url, str) and url.startswith(('http://', 'https://')):
-                    valid_urls.append(url)
-                else:
-                    logger.warning(f"Invalid callback URL: {url}")
-                
-            if not valid_urls:
-                logger.warning("No valid callback URLs found")
-                return
-            
-            # 发送回调
+            logger.info(f"Sending callback to: {callback_urls}")
             async with aiohttp.ClientSession() as session:
-                for url in valid_urls:
-                    try:
-                        logger.info(f"Sending callback to: {url}")
-                        async with session.post(url, json=data) as response:
-                            if response.status == 200:
-                                logger.info(f"Callback successful: {url}")
-                            else:
-                                logger.error(f"Callback failed: {url}, status: {response.status}")
-                    except Exception as e:
-                        logger.error(f"Error sending callback to {url}: {str(e)}")
+                try:
+                    async with session.post(callback_urls, json=data, timeout=5) as response:
+                        if response.status == 200:
+                            logger.info(f"Callback successful: {callback_urls}")
+                        else:
+                            logger.warning(f"Callback failed: {callback_urls}, status: {response.status}")
+                except asyncio.TimeoutError:
+                    logger.warning(f"Callback timeout: {callback_urls}")
+                except Exception as e:
+                    logger.warning(f"Callback request failed: {callback_urls}, error: {str(e)}")
                     
         except Exception as e:
-            logger.error(f"Error in _send_callbacks: {str(e)}")
+            logger.warning(f"Error creating callback session to {callback_urls}: {str(e)}")
+            # 继续执行,不影响主任务
+            pass
 
-    async def detect_images(self, model_code: str, image_urls: List[str], callback_url: str = None, is_base64: bool = False) -> Dict[str, Any]:
+    async def detect_images(self, model_code: str, image_urls: List[str], callback_urls: str = None, is_base64: bool = False) -> Dict[str, Any]:
         """
         检测图片
         
         Args:
             model_code: 模型代码
             image_urls: 图片URL列表
-            callback_url: 回调URL
+            callback_urls: 回调URL
             is_base64: 是否返回base64编码的结果图片
             
         Returns:
@@ -340,8 +326,8 @@ class YOLODetector:
             result = results[0] if results else {'detections': [], 'result_image': None}
             
             # 发送回调
-            if callback_url:
-                await self._send_callbacks([callback_url], result)
+            if callback_urls:
+                await self._send_callbacks(callback_urls, result)
                 
             return result
             
@@ -353,15 +339,15 @@ class YOLODetector:
         self,
         model_code: str,
         stream_url: str,
-        callback_urls: Union[str, List[str]] = None,
-        output_url: str = None,
+        callback_urls: Optional[str] = None,
+        output_url: Optional[str] = None,
         callback_interval: int = 1
     ) -> Dict[str, Any]:
         """开始流分析"""
         try:
-            # 加载模型 - 直接使用model_code
+            # 加载模型
             if not self.model:
-                await self.load_model(model_code)  # 修改这里，直接传入model_code
+                await self.load_model(model_code)
                 
             # 创建任务ID
             task_id = f"stream_{int(time.time())}"
@@ -375,11 +361,12 @@ class YOLODetector:
                 callback_interval
             ))
             
+            # 返回标准格式的响应
             return {
                 "task_id": task_id,
-                "status": "started",
+                "status": "started",  # 确保是字符串类型
                 "stream_url": stream_url,
-                "output_url": output_url
+                "output_url": output_url if output_url else None  # 确保空值返回None
             }
             
         except Exception as e:
@@ -415,11 +402,12 @@ class YOLODetector:
         self,
         task_id: str,
         stream_url: str,
-        callback_urls: Union[str, List[str]] = None,
-        output_url: str = None,
+        callback_urls: Optional[str] = None,
+        output_url: Optional[str] = None,
         callback_interval: int = 1
     ):
         """处理流分析"""
+        db = get_db()
         try:
             # 初始化停止标志
             self.stop_flags[task_id] = False
@@ -427,8 +415,9 @@ class YOLODetector:
             # 打开视频流
             cap = cv2.VideoCapture(stream_url)
             if not cap.isOpened():
+                task_crud.update_task_status(db, task_id, -1)
                 raise Exception(f"Cannot open stream: {stream_url}")
-            
+                
             # 获取视频信息
             fps = int(cap.get(cv2.CAP_PROP_FPS))
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -444,11 +433,12 @@ class YOLODetector:
             while True:
                 # 检查停止标志
                 if self.stop_flags.get(task_id, False):
-                    logger.info(f"任务 {task_id} 收到停止信号")
+                    task_crud.update_task_status(db, task_id, 0)  # 更新为停止状态
                     break
                     
                 ret, frame = cap.read()
                 if not ret:
+                    task_crud.update_task_status(db, task_id, -1)  # 更新为异常状态
                     break
                     
                 # 执行检测
@@ -506,19 +496,8 @@ class YOLODetector:
                 })
                 
         except Exception as e:
-            logger.error(f"Process stream failed: {str(e)}")
-            if callback_urls:
-                await self._send_callbacks(callback_urls, {
-                    "task_id": task_id,
-                    "status": "failed",
-                    "error": str(e),
-                    "stream_url": stream_url
-                })
-                
+            task_crud.update_task_status(db, task_id, -1)  # 更新为异常状态
+            raise
+        
         finally:
-            # 清理资源
-            if task_id in self.stop_flags:
-                del self.stop_flags[task_id]
-            cap.release()
-            if writer:
-                writer.release()
+            db.close()
