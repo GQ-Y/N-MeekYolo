@@ -1,6 +1,6 @@
 author: AI Team
 code: model-mj
-create_time: '2024-12-11T12:39:14.601941'
+create_time: '2024-12-12T05:35:18.506509'
 description: 用于检测麻将牌型识别
 name: 麻将检测模型
 names:
@@ -24,5 +24,5 @@ names:
   17: 五筒
   18: 三筒
 nc: 19
-update_time: '2024-12-11T12:39:14.601948'
+update_time: '2024-12-12T05:35:18.506520'
 version: 1.0.0

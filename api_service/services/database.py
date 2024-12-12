@@ -48,9 +48,8 @@ def init_db():
         existing_tables = inspector.get_table_names()
         logger.info(f"Existing tables before creation: {existing_tables}")
         
-        # # 在开发环境下强制重建表
-        # Base.metadata.drop_all(bind=engine)
-        # Base.metadata.create_all(bind=engine)
+        # 创建表
+        Base.metadata.create_all(bind=engine)
         
         # 验证表创建
         inspector = inspect(engine)
