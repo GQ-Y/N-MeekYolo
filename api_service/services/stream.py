@@ -7,6 +7,7 @@ from api_service.models.requests import (
     UpdateStreamRequest
 )
 from shared.utils.logger import setup_logger
+from api_service.core.config import settings
 
 logger = setup_logger(__name__)
 
@@ -29,12 +30,30 @@ class StreamService:
                 description=stream_data.description
             )
             
-            # 如果指定了分组，添加分组关联
+            # 处理分组关联
             if stream_data.group_ids:
+                # 如果指定了分组，添加分组关联
                 groups = db.query(StreamGroup).filter(
                     StreamGroup.id.in_(stream_data.group_ids)
                 ).all()
                 stream.groups.extend(groups)
+            else:
+                # 如果没有指定分组，关联到默认分组
+                default_group = db.query(StreamGroup).filter(
+                    StreamGroup.name == settings.DEFAULT_GROUP["name"]
+                ).first()
+                
+                if not default_group:
+                    # 如果默认分组不存在(异常情况),创建默认分组
+                    default_group = StreamGroup(
+                        name=settings.DEFAULT_GROUP["name"],
+                        description=settings.DEFAULT_GROUP["description"]
+                    )
+                    db.add(default_group)
+                    db.flush()  # 获取分组ID
+                    
+                stream.groups.append(default_group)
+                logger.info(f"Associated stream with default group: {default_group.name}")
             
             # 保存到数据库
             db.add(stream)

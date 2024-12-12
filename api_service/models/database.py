@@ -144,6 +144,7 @@ class Task(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     started_at = Column(DateTime)
     completed_at = Column(DateTime)
+    analysis_task_id = Column(String(50))  # 存储 analysis_service 的任务ID
     
     # 关联关系
     streams = relationship('Stream', secondary=task_stream_association, back_populates='tasks')

@@ -18,7 +18,7 @@ class StreamMonitor:
     """视频源监控器"""
     
     def __init__(self):
-        self.check_interval = 10  # 10分钟
+        self.check_interval = 600  # 10分钟
         self.is_running = False
         self.task = None
         # 添加统计信息

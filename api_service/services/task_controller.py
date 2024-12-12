@@ -8,6 +8,7 @@ from api_service.models.database import Task, Stream
 from api_service.core.config import settings
 from shared.utils.logger import setup_logger
 from api_service.models.requests import StreamStatus
+from datetime import datetime
 
 logger = setup_logger(__name__)
 
@@ -95,6 +96,7 @@ class TaskController:
                 
             # 更新任务状态
             task.status = "running"
+            task.started_at = datetime.now()
             db.commit()
             
             # 获取 api_service 回调地址
@@ -107,7 +109,7 @@ class TaskController:
                         callback_urls = []
                         if task.callbacks:
                             callback_urls.extend([cb.url for cb in task.callbacks])
-                        callback_urls.append(api_callback_url)  # 添加 api_service 回调
+                        callback_urls.append(api_callback_url)
                         
                         logger.info(f"开始处理 - 任务:{task_id} 视频源:{stream.id} 模型:{model.id}")
                         logger.info(f"视频源URL: {stream.url}")
@@ -120,6 +122,12 @@ class TaskController:
                             model_code=model.code,
                             callback_urls=callback_urls  # 传入回调URL列表
                         )
+                        
+                        # 保存 analysis_task_id
+                        if result and "task_id" in result:
+                            task.analysis_task_id = result["task_id"]
+                            db.commit()
+                            logger.info(f"保存analysis_task_id: {result['task_id']}")
                         
                         logger.info(f"分析启动成功 - 任务:{task_id} 视频源:{stream.id} 模型:{model.id}")
                         logger.info(f"分析结果: {result}")
@@ -154,12 +162,40 @@ class TaskController:
                 logger.warning(f"任务未在运行: {task_id}")
                 return False
                 
+            # 检查是否有 analysis_task_id
+            if not task.analysis_task_id:
+                logger.error(f"任务 {task_id} 没有关联的 analysis_task_id")
+                return False
+                
+            # 调用分析服务停止任务
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        f"{self.analysis_url}/analyze/stream/{task.analysis_task_id}/stop",
+                        timeout=30.0
+                    )
+                    
+                    logger.info(f"分析服务停止响应状态码: {response.status_code}")
+                    logger.info(f"分析服务停止响应内容: {response.text}")
+                    
+                    # 检查响应状态
+                    response.raise_for_status()
+                    
+            except Exception as e:
+                logger.error(f"调用分析服务停止任务失败: {str(e)}")
+                return False
+                
             # 更新任务状态
             task.status = "stopped"
+            task.completed_at = datetime.now()
             db.commit()
             
-            # TODO: 调用分析服务停止分析
-            
+            # 更新关联的摄像头状态为未运行
+            if await self.update_stream_status(db, task_id, StreamStatus.INACTIVE):
+                logger.info(f"Updated streams status to inactive for task {task_id}")
+            else:
+                logger.warning(f"Failed to update streams status for task {task_id}")
+                
             return True
             
         except Exception as e:

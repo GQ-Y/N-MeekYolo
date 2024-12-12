@@ -28,4 +28,4 @@ RUN pip install -e .
 RUN mkdir static
 
 # 启动服务
-CMD ["uvicorn", "analysis_service.app:app", "--host", "0.0.0.0", "--port", "8002"] 
+CMD ["uvicorn", "analysis_service.app:app", "--host", "0.0.0.0", "--port", "8003"] 

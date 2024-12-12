@@ -6,10 +6,10 @@ VERSION: "1.0.0"
 SERVICES:
   model:
     host: "localhost"
-    port: 8003
+    port: 8002
   analysis:
     host: "localhost"
-    port: 8002
+    port: 8003
   api:
     host: "localhost"
     port: 8001
@@ -30,7 +30,7 @@ STORAGE:
 
 # 分析配置
 ANALYSIS:
-  confidence: 0.5  # 目标检测置信度阈值,低于此值的检测框将被过滤
+  confidence: 0.1  # 目标检测置信度阈值,低于此值的检测框将被过滤
   iou: 0.45  # 非极大值抑制的IOU阈值,用于去除重叠检测框
   max_det: 300  # 每张图像最大检测目标数量
   device: "auto"  # 推理设备,auto表示自动选择可用的最佳设备(CPU/GPU)

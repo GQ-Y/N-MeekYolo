@@ -1,7 +1,7 @@
 """
 配置模块
 """
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, ClassVar
 from pydantic_settings import BaseSettings
 from pydantic import BaseModel
 import os
@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     # 数据库配置 - 使用相对路径 api_service 的路径
     DATABASE_DIR: str = "data"  # api_service/data 目录
     DATABASE_NAME: str = "api_service.db"
+    
+    # 默认分组配置 - 添加 ClassVar 类型注解
+    DEFAULT_GROUP: ClassVar[Dict[str, str]] = {
+        "name": "默认分组",
+        "description": "系统默认分组"
+    }
     
     @property
     def DATABASE_URL(self) -> str:

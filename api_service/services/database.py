@@ -29,40 +29,40 @@ Base = declarative_base()
 def init_db():
     """初始化数据库"""
     try:
-        # 导入所有模型以确保它们被注册
-        from api_service.models.database import Base
-        from api_service.models.database import (
-            Stream,
-            StreamGroup,
-            Model,
-            Callback,
-            Task,
-            stream_group_association,
-            task_stream_association,
-            task_model_association,
-            task_callback_association
-        )
-        
-        # 检查表是否存在
-        inspector = inspect(engine)
-        existing_tables = inspector.get_table_names()
-        logger.info(f"Existing tables before creation: {existing_tables}")
+        # 导入所有模型
+        from api_service.models.database import Base, StreamGroup
+        from api_service.core.config import settings
         
         # 创建表
         Base.metadata.create_all(bind=engine)
         
-        # 验证表创建
-        inspector = inspect(engine)
-        created_tables = inspector.get_table_names()
-        logger.info(f"Created tables after initialization: {created_tables}")
+        # 创建默认分组
+        with SessionLocal() as db:
+            # 检查默认分组是否存在
+            default_group = db.query(StreamGroup).filter(
+                StreamGroup.name == settings.DEFAULT_GROUP["name"]
+            ).first()
+            
+            if not default_group:
+                # 创建默认分组
+                default_group = StreamGroup(
+                    name=settings.DEFAULT_GROUP["name"],
+                    description=settings.DEFAULT_GROUP["description"]
+                )
+                db.add(default_group)
+                try:
+                    db.commit()
+                    logger.info(f"Created default stream group: {default_group.name}")
+                except Exception as e:
+                    db.rollback()
+                    logger.error(f"Failed to create default group: {str(e)}")
+            else:
+                logger.info("Default stream group already exists")
         
         # 记录数据库位置
         api_service_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         db_path = os.path.join(api_service_dir, settings.DATABASE_DIR, settings.DATABASE_NAME)
         logger.info(f"Database initialized at: {db_path}")
-        
-        if not created_tables:
-            raise Exception("No tables were created during initialization")
         
     except Exception as e:
         logger.error(f"Failed to initialize database: {str(e)}", exc_info=True)
