@@ -6,6 +6,8 @@ from fastapi import APIRouter, HTTPException, Depends
 from typing import List, Optional
 from pydantic import BaseModel
 from analysis_service.core.detector import YOLODetector
+from analysis_service.core.queue import TaskQueueManager
+from analysis_service.core.resource import ResourceMonitor
 from analysis_service.models.responses import (
     ImageAnalysisResponse,
     VideoAnalysisResponse,
@@ -21,14 +23,21 @@ import time
 from sqlalchemy.orm import Session
 
 logger = setup_logger(__name__)
-logger.info("初始化 YOLODetector...")
+
+# 初始化组件
 detector = YOLODetector()
-logger.info("YOLODetector 初始化完成")
+resource_monitor = ResourceMonitor()
+task_queue = None
+
 router = APIRouter(prefix="/analyze")
 
-# 依赖注入获取检测器实例
-def get_detector():
-    return detector
+# 依赖注入
+async def get_task_queue(db: Session = Depends(get_db_dependency)) -> TaskQueueManager:
+    global task_queue
+    if task_queue is None:
+        task_queue = TaskQueueManager(db)
+        await task_queue.start()
+    return task_queue
 
 class ImageAnalysisRequest(BaseModel):
     """图片分析请求"""
@@ -88,83 +97,93 @@ async def analyze_video(request: VideoAnalysisRequest):
 @router.post("/stream", response_model=StreamResponse)
 async def analyze_stream(
     request: StreamAnalysisRequest,
-    detector: YOLODetector = Depends(get_detector),
+    queue: TaskQueueManager = Depends(get_task_queue),
     db: Session = Depends(get_db_dependency)
 ) -> StreamResponse:
     """处理流分析请求"""
     try:
-        # 生成任务ID
-        task_id = f"stream_{int(time.time())}"
-        
+        # 检查资源是否足够
+        if not resource_monitor.has_available_resource():
+            raise HTTPException(
+                status_code=503,
+                detail="资源不足,请稍后重试"
+            )
+            
         # 创建任务记录
         task = task_crud.create_task(
             db=db,
-            task_id=task_id,
+            task_id=None,  # 由TaskQueue生成ID
             model_code=request.model_code,
             stream_url=request.stream_url,
             callback_urls=request.callback_urls,
             output_url=request.output_url
         )
         
-        # 启动流分析
-        result = await detector.start_stream_analysis(
-            model_code=request.model_code,
-            stream_url=request.stream_url,
-            callback_urls=request.callback_urls,
-            output_url=request.output_url,
-            callback_interval=request.callback_interval
-        )
-        
-        # 更新任务状态为运行中
-        task_crud.update_task_status(db, task_id, 1)
+        # 加入任务队列
+        queue_task = await queue.add_task(task)
         
         return StreamResponse(
             code=200,
-            message="Stream analysis started",
+            message="Stream analysis task queued",
             data={
-                "task_id": result["task_id"],
-                "status": result["status"],
-                "stream_url": result["stream_url"],
-                "output_url": result["output_url"]
+                "task_id": queue_task.id,
+                "status": "queued",
+                "stream_url": request.stream_url,
+                "output_url": request.output_url
             }
         )
         
     except Exception as e:
-        logger.error(f"Start stream analysis failed: {str(e)}")
+        logger.error(f"Queue stream analysis task failed: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=str(e)
         )
 
 @router.post("/stream/{task_id}/stop")
-async def stop_stream_analysis(task_id: str):
+async def stop_stream_analysis(
+    task_id: str,
+    queue: TaskQueueManager = Depends(get_task_queue)
+):
     """停止流分析"""
     try:
-        result = await detector.stop_stream_analysis(task_id)
-        return StreamAnalysisResponse(**result)
+        await queue.cancel_task(task_id)
+        return {
+            "code": 200,
+            "message": "Task cancelled successfully",
+            "data": {"task_id": task_id}
+        }
     except Exception as e:
-        logger.error(f"Stop stream analysis failed: {str(e)}")
+        logger.error(f"Cancel task failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/stream/{task_id}/status", response_model=BaseResponse)
 async def get_stream_status(
     task_id: str,
-    db: Session = Depends(get_db_dependency)
+    queue: TaskQueueManager = Depends(get_task_queue)
 ):
     """获取流分析状态"""
     try:
-        task = task_crud.get_task(db, task_id)
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-            
+        status = await queue.get_task_status(task_id)
         return {
             "code": 200,
             "message": "success",
-            "data": task.to_dict()
+            "data": status
         }
-        
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Get task status failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/resource", response_model=BaseResponse)
+async def get_resource_status():
+    """获取资源状态"""
+    try:
+        status = resource_monitor.get_resource_usage()
+        return {
+            "code": 200,
+            "message": "success",
+            "data": status
+        }
+    except Exception as e:
+        logger.error(f"Get resource status failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

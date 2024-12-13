@@ -510,3 +510,84 @@ class YOLODetector:
         
         finally:
             db.close()
+
+    async def stop_task(self, task_id: str):
+        """停止指定任务"""
+        if task_id in self.stop_flags:
+            self.stop_flags[task_id] = True
+            logger.info(f"Stop signal sent to task {task_id}")
+            return True
+        return False
+
+    async def _process_stream(self, task_id: str, stream_url: str, callback_urls: str = None):
+        """处理流分析任务"""
+        cap = None
+        try:
+            # 初始化停止标志
+            self.stop_flags[task_id] = False
+            
+            # 打开视频流
+            cap = cv2.VideoCapture(stream_url)
+            if not cap.isOpened():
+                raise Exception(f"Cannot open stream: {stream_url}")
+            
+            while not self.stop_flags.get(task_id, False):
+                ret, frame = cap.read()
+                if not ret:
+                    logger.warning("Failed to read frame")
+                    # 尝试重新连接
+                    cap.release()
+                    cap = cv2.VideoCapture(stream_url)
+                    continue
+                
+                try:
+                    # 执行检测
+                    detections = await self.detect(frame)
+                    
+                    # 处理结果图片
+                    result_frame = None
+                    if settings.OUTPUT["save_img"]:
+                        result_frame = await self._encode_result_image(frame, detections)
+                    
+                    # 发送回调
+                    if callback_urls:
+                        callback_data = {
+                            "task_id": task_id,
+                            "status": "processing",
+                            "detections": detections,
+                            "result_frame": result_frame,
+                            "timestamp": time.time()
+                        }
+                        await self._send_callbacks(callback_urls, callback_data)
+                    
+                except Exception as e:
+                    logger.error(f"Frame processing error: {str(e)}")
+                    continue
+                
+                await asyncio.sleep(0.01)  # 避免CPU占用过高
+            
+        except Exception as e:
+            logger.error(f"Stream processing error: {str(e)}")
+            # 发送错误回调
+            if callback_urls:
+                await self._send_callbacks(callback_urls, {
+                    "task_id": task_id,
+                    "status": "error",
+                    "error": str(e),
+                    "timestamp": time.time()
+                })
+            raise
+        
+        finally:
+            # 清理资源
+            if cap:
+                cap.release()
+            # 移除停止标志    
+            self.stop_flags.pop(task_id, None)
+            # 发送停止回调
+            if callback_urls:
+                await self._send_callbacks(callback_urls, {
+                    "task_id": task_id,
+                    "status": "stopped",
+                    "timestamp": time.time()
+                })

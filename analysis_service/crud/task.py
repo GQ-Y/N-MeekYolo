@@ -6,23 +6,35 @@ from sqlalchemy.orm import Session
 from analysis_service.models.database import Task
 from shared.utils.logger import setup_logger
 from typing import Dict, Any
+import uuid
 
 logger = setup_logger(__name__)
 
-def create_task(db: Session, task_id: str, model_code: str, stream_url: str, callback_urls: str = None, output_url: str = None) -> Task:
+def create_task(
+    db: Session,
+    task_id: str = None,
+    model_code: str = None,
+    stream_url: str = None,
+    callback_urls: str = None,
+    output_url: str = None
+) -> Task:
     """创建任务"""
+    # 如果没有提供task_id,生成一个新的
+    if task_id is None:
+        task_id = str(uuid.uuid4())
+        
     task = Task(
         id=task_id,
         model_code=model_code,
         stream_url=stream_url,
         callback_urls=callback_urls,
-        output_url=output_url,
-        status=0,  # 初始状态为0
-        start_time=datetime.now()
+        output_url=output_url
     )
+    
     db.add(task)
     db.commit()
     db.refresh(task)
+    
     return task
 
 def update_task_status(db: Session, task_id: str, status: int) -> Task:
