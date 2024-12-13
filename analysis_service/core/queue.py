@@ -179,7 +179,7 @@ class TaskQueueManager:
             if task_id:
                 self.running_tasks.pop(task_id, None)
             
-            # ���查等待中的任务
+            # 检查等待中的任务
             try:
                 await self._check_pending_tasks()
             except Exception as e:
@@ -212,7 +212,7 @@ class TaskQueueManager:
         queue_task.priority = priority
         self.db.commit()
         
-        # 重新加���队列以更新优先级
+        # 重新添加队列以更新优先级
         await self.queue.put((-priority, queue_task_id))
         logger.info(f"Updated priority for task {queue_task_id} to {priority}")
         

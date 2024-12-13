@@ -17,6 +17,7 @@ import time
 import asyncio
 from analysis_service.services.database import get_db
 from analysis_service.crud import task as task_crud
+from PIL import Image, ImageDraw, ImageFont
 
 logger = setup_logger(__name__)
 
@@ -158,20 +159,45 @@ class YOLODetector:
             logger.error(f"下载图片出错: {url}, 错误: {str(e)}")
             return None
             
-    async def _encode_result_image(self, image: np.ndarray, detections: List[Dict]) -> Optional[str]:
-        """
-        将检测结果绘制到图片上并编码为base64
-        
-        Args:
-            image: OpenCV格式的图像(BGR)
-            detections: 检测结果列表
-            
-        Returns:
-            str: base64编码的图片，如果失败返回None
-        """
+    async def _encode_result_image(self, image: np.ndarray, detections: List[Dict], return_image: bool = False) -> Union[str, np.ndarray, None]:
+        """将检测结果绘制到图片上"""
         try:
             # 复制图片以免修改原图
             result_image = image.copy()
+            
+            # 使用 PIL 处理图片，以支持中文
+            img_pil = Image.fromarray(cv2.cvtColor(result_image, cv2.COLOR_BGR2RGB))
+            draw = ImageDraw.Draw(img_pil)
+            
+            # 加载中文字体
+            try:
+                # 尝试加载系统中文字体
+                font_size = 24  # 增大字体大小
+                font_paths = [
+                    "/System/Library/Fonts/PingFang.ttc",  # macOS
+                    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",  # Linux
+                    "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",  # Linux 另一个位置
+                    "C:/Windows/Fonts/simhei.ttf",  # Windows
+                    "fonts/simhei.ttf",  # 项目本地字体
+                ]
+                
+                font = None
+                for font_path in font_paths:
+                    if os.path.exists(font_path):
+                        try:
+                            font = ImageFont.truetype(font_path, font_size)
+                            logger.debug(f"成功加载字体: {font_path}")
+                            break
+                        except Exception as e:
+                            logger.warning(f"尝试加载字体失败 {font_path}: {str(e)}")
+                
+                if font is None:
+                    logger.warning("未找到合适的中文字体，使用默认字体")
+                    font = ImageFont.load_default()
+                    
+            except Exception as e:
+                logger.warning(f"加载字体失败，使用默认字体: {str(e)}")
+                font = ImageFont.load_default()
             
             # 图片上绘制检测结果
             for det in detections:
@@ -179,22 +205,57 @@ class YOLODetector:
                 x1, y1 = bbox['x1'], bbox['y1']
                 x2, y2 = bbox['x2'], bbox['y2']
                 
-                # 绘制边界框
-                cv2.rectangle(result_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                # 绘制边界框 - 使用RGB颜色
+                box_color = (0, 255, 0)  # 绿色
+                draw.rectangle([(x1, y1), (x2, y2)], outline=box_color, width=3)  # 加粗边框
                 
-                # 绘制标签
+                # 绘制标签（支持中文）
                 label = f"{det['class_name']} {det['confidence']:.2f}"
-                cv2.putText(result_image, label, (x1, y1 - 10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                
+                # 计算文本大小
+                text_bbox = draw.textbbox((0, 0), label, font=font)
+                text_width = text_bbox[2] - text_bbox[0]
+                text_height = text_bbox[3] - text_bbox[1]
+                
+                # 确保标签不会超出图片顶部
+                label_y = max(y1 - text_height - 4, 0)
+                
+                # 绘制标签背景 - 半透明效果
+                background_shape = [(x1, label_y), (x1 + text_width + 4, label_y + text_height + 4)]
+                draw.rectangle(background_shape, fill=(0, 200, 0))  # 浅绿色背景
+                
+                # 绘制文本 - 白色文字
+                text_position = (x1 + 2, label_y + 2)  # 添加一点padding
+                draw.text(
+                    text_position,
+                    label,
+                    font=font,
+                    fill=(255, 255, 255)  # 白色文字
+                )
             
-            # 将图片编码为base64
-            _, buffer = cv2.imencode('.jpg', result_image)
-            image_base64 = base64.b64encode(buffer).decode('utf-8')
+            # 转换回OpenCV格式
+            result_image = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
             
-            return image_base64
+            if return_image:
+                return result_image
             
+            try:
+                # 将图片编码为base64，使用较高的图片质量
+                encode_params = [cv2.IMWRITE_JPEG_QUALITY, 95]
+                _, buffer = cv2.imencode('.jpg', result_image, encode_params)
+                if buffer is None:
+                    logger.error("图片编码失败")
+                    return None
+                image_base64 = base64.b64encode(buffer).decode('utf-8')
+                logger.debug(f"成功生成base64图片，长度: {len(image_base64)}")
+                return image_base64
+                
+            except Exception as e:
+                logger.error(f"图片编码为base64失败: {str(e)}", exc_info=True)
+                return None
+                
         except Exception as e:
-            logger.error(f"处理结果图片失败: {str(e)}")
+            logger.error(f"处理结果图片失败: {str(e)}", exc_info=True)
             return None
 
     async def detect(self, image) -> List[Dict[str, Any]]:
@@ -257,31 +318,32 @@ class YOLODetector:
             logger.error(f"检测失败: {str(e)}")
             raise
             
-    async def _send_callbacks(self, callback_urls: str, data: Dict[str, Any], parent_task_id: str = None):
+    async def _send_callbacks(self, callback_urls: str, callback_data: Dict[str, Any]):
         """发送回调请求"""
         if not callback_urls:
             return
-            
-        # 分割多个回调地址    
-        urls = callback_urls.split(',')  # 改用逗号分隔
-        logger.info(f"准备发送回调到以下地址: {urls}")
         
-        # 添加父任务ID到回调数据
-        if parent_task_id:
-            data["parent_task_id"] = parent_task_id
-        
+        # 记录回调数据信息
+        logger.debug(f"回调数据包含的键: {list(callback_data.keys())}")
+        if "result_image" in callback_data:
+            logger.debug(f"回调数据包含base64图片，长度: {len(callback_data['result_image']['data'])}")
+        if "result_image_url" in callback_data:
+            logger.debug(f"回调数据包含图片URL: {callback_data['result_image_url']}")
+
+        # 发送回调
         try:
             async with aiohttp.ClientSession() as session:
-                for url in urls:
+                for url in callback_urls.split(','):
                     url = url.strip()
                     if not url:
                         continue
-                        
+                    
                     try:
                         logger.info(f"正在发送回调到: {url}")
-                        async with session.post(url, json=data, timeout=5) as response:
+                        logger.debug(f"回调数据大小: {len(str(callback_data))}")
+                        async with session.post(url, json=callback_data, timeout=5) as response:
                             if response.status == 200:
-                                logger.info(f"回调成功: {url}")
+                                logger.info(f"���调成功: {url}")
                             else:
                                 logger.warning(f"回调失败: {url}, 状态码: {response.status}")
                     except asyncio.TimeoutError:
@@ -291,7 +353,6 @@ class YOLODetector:
                     
         except Exception as e:
             logger.warning(f"创建回调会话失败: {str(e)}")
-            pass
 
     async def detect_images(self, model_code: str, image_urls: List[str], callback_urls: str = None, is_base64: bool = False) -> Dict[str, Any]:
         """
@@ -323,7 +384,7 @@ class YOLODetector:
                 # 执行检测
                 detections = await self.detect(image)
                 
-                # 处理结果图片
+                # 处理结果图
                 result_image = None
                 if is_base64:
                     result_image = await self._encode_result_image(image, detections)
@@ -376,22 +437,65 @@ class YOLODetector:
                     # 执行检测
                     detections = await self.detect(frame)
                     
-                    # 处理结果图片
-                    result_frame = None
-                    if settings.OUTPUT.get("return_base64", False):
-                        result_frame = await self._encode_result_image(frame, detections)
-                    
-                    # 发送回调
-                    if callback_urls:
-                        callback_data = {
-                            "task_id": task_id,
-                            "status": "processing",
-                            "detections": detections,
-                            "result_frame": result_frame,
-                            "timestamp": time.time()
-                        }
-                        await self._send_callbacks(callback_urls, callback_data, parent_task_id)
-                    
+                    # 只在检测到目标时发送回调
+                    if detections and callback_urls:
+                        try:
+                            # 先生成带有检测框的图片
+                            result_frame = await self._encode_result_image(frame, detections, return_image=True)
+                            if result_frame is not None:
+                                # 将结果图片编码为base64
+                                try:
+                                    _, buffer = cv2.imencode('.jpg', result_frame)
+                                    if buffer is None:
+                                        raise Exception("图片编码失败")
+                                    base64_image = base64.b64encode(buffer).decode('utf-8')
+                                    logger.debug(f"成功生成base64图片，长度: {len(base64_image)}")
+                                except Exception as e:
+                                    logger.error(f"图片编码为base64失败: {str(e)}", exc_info=True)
+                                    continue
+                                
+                                # 构建回调数据
+                                callback_data = {
+                                    "task_id": task_id,
+                                    "status": "processing",
+                                    "detections": detections,
+                                    "timestamp": time.time(),
+                                    "result_image": {
+                                        "format": "base64",
+                                        "data": base64_image
+                                    }
+                                }
+                                
+                                # 如果需要保存图片
+                                if settings.OUTPUT.get("save_img", False):
+                                    try:
+                                        save_dir = Path(settings.OUTPUT["save_dir"])
+                                        save_dir.mkdir(parents=True, exist_ok=True)
+                                        
+                                        timestamp = int(time.time() * 1000)
+                                        filename = f"{task_id}_{timestamp}.jpg"
+                                        file_path = save_dir / filename
+                                        
+                                        cv2.imwrite(str(file_path), result_frame)
+                                        callback_data["result_image_url"] = str(file_path)
+                                        logger.debug(f"已保存图片到: {file_path}")
+                                    except Exception as e:
+                                        logger.error(f"保存图片失败: {str(e)}", exc_info=True)
+                                
+                                # 添加父任务ID
+                                if parent_task_id:
+                                    callback_data["parent_task_id"] = parent_task_id
+                                    
+                                # 发送回调前检查数据
+                                logger.debug(f"回调数据包含的��: {list(callback_data.keys())}")
+                                logger.debug(f"回调数据中的base64图片长度: {len(callback_data['result_image']['data'])}")
+                                
+                                # 发送回调
+                                await self._send_callbacks(callback_urls, callback_data)
+                                
+                        except Exception as e:
+                            logger.error(f"处理回调数据失败: {str(e)}", exc_info=True)
+                
                 except Exception as e:
                     logger.error(f"Frame processing error: {str(e)}")
                     continue
@@ -419,7 +523,7 @@ class YOLODetector:
         try:
             if task_id in self.stop_flags:
                 self.stop_flags[task_id] = True
-                logger.info(f"发送停止信号到任务 {task_id}")
+                logger.info(f"发送���止信号到任务 {task_id}")
                 return {
                     "task_id": task_id,
                     "status": "stopping",
@@ -435,10 +539,10 @@ class YOLODetector:
         """停止指定任务"""
         try:
             if task_id not in self.stop_flags:
-                logger.warning(f"任务 {task_id} 不存在")
+                logger.warning(f"任�� {task_id} 不存在")
                 return False
             
-            # 设置停止标志
+            # 设置停止志
             self.stop_flags[task_id] = True
             logger.info(f"已发送停止信号到任务 {task_id}")
             

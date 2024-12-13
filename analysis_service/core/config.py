@@ -42,8 +42,9 @@ class AnalysisSettings(Settings):
     OUTPUT: Dict[str, Any] = {
         "save_dir": "results",  # 结果保存目录
         "save_txt": False,      # 是否保存文本结果
-        "save_img": True,      # 是否保存图片结果
-        "return_base64": True  # 是否在回调中返回base64图片
+        "save_img": True,       # 是否保存图片结果
+        "return_base64": True,  # 是否在回调中返回base64图片
+        "only_send_detections": True  # 只在有检测结果时发送回调
     }
 
     class Config:
