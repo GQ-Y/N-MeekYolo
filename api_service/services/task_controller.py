@@ -132,7 +132,7 @@ class TaskController:
                     
                     # 批量添加子任务
                     try:
-                        logger.info(f"正在添加 {len(sub_tasks_to_create)} 个子任务到数据库")
+                        logger.info(f"正在添加 {len(sub_tasks_to_create)} 个���任务到数据库")
                         db.bulk_save_objects(sub_tasks_to_create)
                         db.flush()
                         logger.info("子任务已成功提交")
@@ -189,7 +189,7 @@ class TaskController:
                 logger.error(f"未找到任务 {task_id}")
                 return False
             
-            logger.info(f"正在停止任务 {task_id}，包含 {len(task.sub_tasks)} 个子任务")
+            logger.info(f"正在停止���务 {task_id}，包含 {len(task.sub_tasks)} 个子任务")
             
             # 更新任务状态
             task.status = "stopping"
@@ -223,10 +223,6 @@ class TaskController:
                                     sub_task.stream.status = "inactive"
                                     logger.info(f"已更新视频流 {sub_task.stream.id} 状态为非活动")
                                     
-                                # 删除子任务
-                                db.delete(sub_task)
-                                logger.info(f"已删除子任务 {sub_task.id}")
-                                
                         except Exception as e:
                             logger.error(f"调用分析服务停止子任务失败: {str(e)}", exc_info=True)
                             raise
@@ -236,6 +232,14 @@ class TaskController:
                     continue
                 
             try:
+                # 删除所有子任务
+                sub_tasks_to_delete = db.query(SubTask).filter(SubTask.task_id == task_id).all()
+                logger.info(f"准备删除 {len(sub_tasks_to_delete)} 个子任务")
+                
+                for sub_task in sub_tasks_to_delete:
+                    logger.info(f"删除子任务: {sub_task.id}")
+                    db.delete(sub_task)
+                
                 # 更新任务状态
                 task.status = "stopped"
                 task.completed_at = datetime.now()
@@ -243,10 +247,12 @@ class TaskController:
                 # 提交所有更改
                 db.commit()
                 
-                # 验证子任务是否已删除
-                remaining_tasks = db.query(SubTask).filter(SubTask.task_id == task_id).all()
-                if remaining_tasks:
-                    logger.warning(f"仍有 {len(remaining_tasks)} 个子任务未删除")
+                # 验证删除结果
+                remaining_sub_tasks = db.query(SubTask).filter(SubTask.task_id == task_id).all()
+                if remaining_sub_tasks:
+                    logger.warning(f"仍有 {len(remaining_sub_tasks)} 个子任务未被删除")
+                    for st in remaining_sub_tasks:
+                        logger.warning(f"  - 子任务ID: {st.id}")
                 else:
                     logger.info("所有子任务已成功删除")
                     
