@@ -44,7 +44,7 @@ task_model_association = Table(
     Column('model_id', Integer, ForeignKey('models.id'))
 )
 
-# 任务与回调服务的多对多关系表
+# 任务与回调服务的对多关系表
 task_callback_association = Table(
     'task_callback_association',
     Base.metadata,
@@ -151,6 +151,9 @@ class Task(Base):
     models = relationship('Model', secondary=task_model_association, back_populates='tasks')
     callbacks = relationship('Callback', secondary=task_callback_association, back_populates='tasks')
     
+    # 添加子任务关联
+    sub_tasks = relationship("SubTask", back_populates="task", cascade="all, delete-orphan")
+    
     @property
     def stream_ids(self) -> List[int]:
         """获取流ID列表"""
@@ -165,3 +168,24 @@ class Task(Base):
     def callback_ids(self) -> List[int]:
         """获取回调ID列表"""
         return [callback.id for callback in self.callbacks] 
+
+class SubTask(Base):
+    """子任务表"""
+    __tablename__ = "sub_tasks"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    task_id = Column(Integer, ForeignKey('tasks.id'))  # 关联主任务
+    analysis_task_id = Column(String(50))  # Analysis Service的任务ID
+    stream_id = Column(Integer, ForeignKey('streams.id'))  # 关联视频源
+    model_id = Column(Integer, ForeignKey('models.id'))  # 关联模型
+    status = Column(String(20), default="created")  # created, running, completed, failed, stopped
+    error_message = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    
+    # 关联关系
+    task = relationship("Task", back_populates="sub_tasks")
+    stream = relationship("Stream")
+    model = relationship("Model")

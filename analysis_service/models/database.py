@@ -36,9 +36,10 @@ class TaskQueue(Base):
     
     id = Column(String(36), primary_key=True)
     task_id = Column(String(36), ForeignKey('tasks.id'))
-    priority = Column(Integer, default=0)  # 优先级 数字越大优先级越高
+    parent_task_id = Column(String(36), ForeignKey('tasks.id'), nullable=True)
+    priority = Column(Integer, default=0)
     status = Column(Integer, default=0)  # 0:等待中 1:运行中 2:已完成 -1:失败
-    retry_count = Column(Integer, default=0)  # 添加重试次数字段
+    retry_count = Column(Integer, default=0)
     
     # 资源使用情况
     cpu_usage = Column(Float, nullable=True)
@@ -56,9 +57,10 @@ class TaskQueue(Base):
         return {
             "id": self.id,
             "task_id": self.task_id,
+            "parent_task_id": self.parent_task_id,
             "priority": self.priority,
             "status": self.status,
-            "retry_count": self.retry_count,  # 添加到返回字典
+            "retry_count": self.retry_count,
             "cpu_usage": self.cpu_usage,
             "memory_usage": self.memory_usage,
             "gpu_usage": self.gpu_usage,

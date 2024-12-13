@@ -10,22 +10,28 @@ class BaseResponse(BaseModel):
     message: str = "success"
     data: Optional[Dict[str, Any]] = None
 
+class SubTaskInfo(BaseModel):
+    """子任务信息"""
+    task_id: str
+    status: int  # 修改为整数类型，与数据库一致: 0:等待中 1:运行中 2:已完成 -1:失败
+    stream_url: str
+    output_url: Optional[str] = None
+
+class StreamBatchResponse(BaseModel):
+    """批量流分析响应数据"""
+    parent_task_id: str
+    sub_tasks: List[SubTaskInfo]
+
+class StreamResponse(BaseResponse):
+    """流分析响应"""
+    data: Optional[StreamBatchResponse] = None
+
 class DetectionResponse(BaseResponse):
     """检测响应"""
     data: Dict[str, Any] = {
         "detections": List[Dict[str, Any]],
         "result_image": Optional[str]
     }
-
-class StreamResponse(BaseResponse):
-    """流分析响应"""
-    class DataModel(BaseModel):
-        task_id: str
-        status: str
-        stream_url: str
-        output_url: Optional[str] = None
-        
-    data: Optional[DataModel] = None
 
 class TaskStatusResponse(BaseResponse):
     """任务状态响应"""

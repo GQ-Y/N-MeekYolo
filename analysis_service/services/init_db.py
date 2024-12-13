@@ -53,6 +53,7 @@ def _create_indexes():
         
         # 创建TaskQueue表索引
         create_index_if_not_exists('idx_queue_task_id', 'task_queue', TaskQueue.task_id)
+        create_index_if_not_exists('idx_queue_parent_task_id', 'task_queue', TaskQueue.parent_task_id)
         create_index_if_not_exists('idx_queue_status', 'task_queue', TaskQueue.status)
         create_index_if_not_exists('idx_queue_priority', 'task_queue', TaskQueue.priority)
         
@@ -86,7 +87,7 @@ def cleanup_old_data():
         from datetime import datetime, timedelta
         from sqlalchemy import delete
         
-        # 清理30天前的已完成任务
+        # 清理30天前���已完成任务
         threshold = datetime.now() - timedelta(days=30)
         
         with engine.connect() as conn:

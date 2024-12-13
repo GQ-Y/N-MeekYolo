@@ -257,20 +257,24 @@ class YOLODetector:
             logger.error(f"检测失败: {str(e)}")
             raise
             
-    async def _send_callbacks(self, callback_urls: str, data: Dict[str, Any]):
+    async def _send_callbacks(self, callback_urls: str, data: Dict[str, Any], parent_task_id: str = None):
         """发送回调请求"""
         if not callback_urls:
             return
             
         # 分割多个回调地址    
-        urls = callback_urls.split(';')
+        urls = callback_urls.split(',')  # 改用逗号分隔
         logger.info(f"准备发送回调到以下地址: {urls}")
+        
+        # 添加父任务ID到回调数据
+        if parent_task_id:
+            data["parent_task_id"] = parent_task_id
         
         try:
             async with aiohttp.ClientSession() as session:
                 for url in urls:
-                    url = url.strip()  # 移除可能的空格
-                    if not url:  # 跳过空URL
+                    url = url.strip()
+                    if not url:
                         continue
                         
                     try:
@@ -287,7 +291,6 @@ class YOLODetector:
                     
         except Exception as e:
             logger.warning(f"创建回调会话失败: {str(e)}")
-            # 继续执行,不影响主任务
             pass
 
     async def detect_images(self, model_code: str, image_urls: List[str], callback_urls: str = None, is_base64: bool = False) -> Dict[str, Any]:
@@ -346,41 +349,62 @@ class YOLODetector:
 
     async def start_stream_analysis(
         self,
-        model_code: str,
+        task_id: str,
         stream_url: str,
         callback_urls: Optional[str] = None,
-        output_url: Optional[str] = None,
-        callback_interval: int = 1
-    ) -> Dict[str, Any]:
-        """开始流分析"""
+        parent_task_id: Optional[str] = None
+    ):
+        """启动流分析任务"""
         try:
-            # 加载模型
-            if not self.model:
-                await self.load_model(model_code)
+            # 初始化停止标志
+            self.stop_flags[task_id] = False
+            
+            # 打开视频流
+            cap = cv2.VideoCapture(stream_url)
+            if not cap.isOpened():
+                raise Exception(f"Cannot open stream: {stream_url}")
+            
+            while not self.stop_flags.get(task_id, False):
+                ret, frame = cap.read()
+                if not ret:
+                    logger.warning("Failed to read frame")
+                    cap.release()
+                    cap = cv2.VideoCapture(stream_url)
+                    continue
                 
-            # 创建任务ID
-            task_id = f"stream_{int(time.time())}"
-            
-            # 启动流分析任务
-            asyncio.create_task(self._process_stream(
-                task_id,
-                stream_url,
-                callback_urls,
-                output_url,
-                callback_interval
-            ))
-            
-            # 返回标准格式的响应
-            return {
-                "task_id": task_id,
-                "status": "started",  # 确保是字符串类型
-                "stream_url": stream_url,
-                "output_url": output_url if output_url else None  # 确保空值返回None
-            }
-            
+                try:
+                    # 执行检测
+                    detections = await self.detect(frame)
+                    
+                    # 处理结果图片
+                    result_frame = None
+                    if settings.OUTPUT.get("return_base64", False):
+                        result_frame = await self._encode_result_image(frame, detections)
+                    
+                    # 发送回调
+                    if callback_urls:
+                        callback_data = {
+                            "task_id": task_id,
+                            "status": "processing",
+                            "detections": detections,
+                            "result_frame": result_frame,
+                            "timestamp": time.time()
+                        }
+                        await self._send_callbacks(callback_urls, callback_data, parent_task_id)
+                    
+                except Exception as e:
+                    logger.error(f"Frame processing error: {str(e)}")
+                    continue
+                
+                await asyncio.sleep(0.01)
+                
         except Exception as e:
-            logger.error(f"Start stream analysis failed: {str(e)}")
+            logger.error(f"Stream analysis failed: {str(e)}")
             raise
+            
+        finally:
+            if cap:
+                cap.release()
 
     async def stop_stream_analysis(self, task_id: str) -> Dict[str, Any]:
         """
@@ -407,110 +431,6 @@ class YOLODetector:
             logger.error(f"停止任务失败: {str(e)}")
             raise
             
-    async def _process_stream(
-        self,
-        task_id: str,
-        stream_url: str,
-        callback_urls: Optional[str] = None,
-        output_url: Optional[str] = None,
-        callback_interval: int = 1
-    ):
-        """处理流分析"""
-        db = get_db()
-        try:
-            # 初始化停止标志
-            self.stop_flags[task_id] = False
-            
-            # 打开视频流
-            cap = cv2.VideoCapture(stream_url)
-            if not cap.isOpened():
-                task_crud.update_task_status(db, task_id, -1)
-                raise Exception(f"Cannot open stream: {stream_url}")
-                
-            # 获取视频信息
-            fps = int(cap.get(cv2.CAP_PROP_FPS))
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            
-            # 初始化输出
-            writer = None
-            if output_url:
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                writer = cv2.VideoWriter(output_url, fourcc, fps, (width, height))
-            
-            last_callback_time = 0
-            while True:
-                # 检查停止标志
-                if self.stop_flags.get(task_id, False):
-                    task_crud.update_task_status(db, task_id, 0)  # 更新为停止状态
-                    break
-                    
-                ret, frame = cap.read()
-                if not ret:
-                    task_crud.update_task_status(db, task_id, -1)  # 更新为异常状态
-                    break
-                    
-                # 执行检测
-                detections = await self.detect(frame)
-                
-                # 处理结果图片
-                result_frame = frame.copy()
-                for det in detections:
-                    bbox = det['bbox']
-                    x1, y1 = bbox['x1'], bbox['y1']
-                    x2, y2 = bbox['x2'], bbox['y2']
-                    
-                    # 绘制边界框
-                    cv2.rectangle(result_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    
-                    # 绘制标签
-                    label = f"{det['class_name']} {det['confidence']:.2f}"
-                    cv2.putText(result_frame, label, (x1, y1 - 10),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                
-                # 写入输出视频
-                if writer:
-                    writer.write(result_frame)
-                
-                # 发送回调
-                if callback_urls:
-                    current_time = time.time()
-                    if (current_time - last_callback_time) >= callback_interval:
-                        # 编码结果帧
-                        _, buffer = cv2.imencode('.jpg', result_frame)
-                        frame_base64 = base64.b64encode(buffer).decode('utf-8')
-                        
-                        # 准备回调数据
-                        callback_data = {
-                            "task_id": task_id,
-                            "status": "processing",
-                            "stream_url": stream_url,
-                            "output_url": output_url,
-                            "detections": detections,
-                            "result_frame": frame_base64,
-                            "timestamp": current_time
-                        }
-                        
-                        await self._send_callbacks(callback_urls, callback_data)
-                        last_callback_time = current_time
-                    
-            # 发送停止回调
-            if callback_urls:
-                await self._send_callbacks(callback_urls, {
-                    "task_id": task_id,
-                    "status": "stopped",
-                    "stream_url": stream_url,
-                    "output_url": output_url,
-                    "stopped_at": time.time()
-                })
-                
-        except Exception as e:
-            task_crud.update_task_status(db, task_id, -1)  # 更新为异常状态
-            raise
-        
-        finally:
-            db.close()
-
     async def stop_task(self, task_id: str):
         """停止指定任务"""
         if task_id in self.stop_flags:
@@ -518,76 +438,3 @@ class YOLODetector:
             logger.info(f"Stop signal sent to task {task_id}")
             return True
         return False
-
-    async def _process_stream(self, task_id: str, stream_url: str, callback_urls: str = None):
-        """处理流分析任务"""
-        cap = None
-        try:
-            # 初始化停止标志
-            self.stop_flags[task_id] = False
-            
-            # 打开视频流
-            cap = cv2.VideoCapture(stream_url)
-            if not cap.isOpened():
-                raise Exception(f"Cannot open stream: {stream_url}")
-            
-            while not self.stop_flags.get(task_id, False):
-                ret, frame = cap.read()
-                if not ret:
-                    logger.warning("Failed to read frame")
-                    # 尝试重新连接
-                    cap.release()
-                    cap = cv2.VideoCapture(stream_url)
-                    continue
-                
-                try:
-                    # 执行检测
-                    detections = await self.detect(frame)
-                    
-                    # 处理结果图片
-                    result_frame = None
-                    if settings.OUTPUT["save_img"]:
-                        result_frame = await self._encode_result_image(frame, detections)
-                    
-                    # 发送回调
-                    if callback_urls:
-                        callback_data = {
-                            "task_id": task_id,
-                            "status": "processing",
-                            "detections": detections,
-                            "result_frame": result_frame,
-                            "timestamp": time.time()
-                        }
-                        await self._send_callbacks(callback_urls, callback_data)
-                    
-                except Exception as e:
-                    logger.error(f"Frame processing error: {str(e)}")
-                    continue
-                
-                await asyncio.sleep(0.01)  # 避免CPU占用过高
-            
-        except Exception as e:
-            logger.error(f"Stream processing error: {str(e)}")
-            # 发送错误回调
-            if callback_urls:
-                await self._send_callbacks(callback_urls, {
-                    "task_id": task_id,
-                    "status": "error",
-                    "error": str(e),
-                    "timestamp": time.time()
-                })
-            raise
-        
-        finally:
-            # 清理资源
-            if cap:
-                cap.release()
-            # 移除停止标志    
-            self.stop_flags.pop(task_id, None)
-            # 发送停止回调
-            if callback_urls:
-                await self._send_callbacks(callback_urls, {
-                    "task_id": task_id,
-                    "status": "stopped",
-                    "timestamp": time.time()
-                })

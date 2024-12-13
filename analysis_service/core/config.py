@@ -42,7 +42,8 @@ class AnalysisSettings(Settings):
     OUTPUT: Dict[str, Any] = {
         "save_dir": "results",  # 结果保存目录
         "save_txt": False,      # 是否保存文本结果
-        "save_img": True       # 是否保存图片结果
+        "save_img": False,      # 是否保存图片结果
+        "return_base64": False  # 是否在回调中返回base64图片
     }
 
     class Config:

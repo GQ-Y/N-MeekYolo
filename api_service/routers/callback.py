@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 from api_service.models.requests import CallbackCreate, CallbackUpdate, StreamStatus
 from api_service.models.responses import BaseResponse, CallbackResponse
-from api_service.models.database import Stream
+from api_service.models.database import Stream, SubTask
 from api_service.crud import callback
 from api_service.services.database import get_db
 from shared.utils.logger import setup_logger
@@ -115,27 +115,37 @@ async def analysis_callback(
         logger.info(f"Received analysis callback: {callback_data}")
         
         # 获取任务ID和状态
-        task_id = callback_data.get("task_id")
+        analysis_task_id = callback_data.get("task_id")
         status = callback_data.get("status")
         
-        if not task_id or not status:
+        if not analysis_task_id or not status:
             raise HTTPException(status_code=400, detail="Invalid callback data")
             
-        # 如果是停止状态,更新关联视频源状态
+        # 查找对应的子任务
+        sub_task = db.query(SubTask).filter(
+            SubTask.analysis_task_id == analysis_task_id
+        ).first()
+        
+        if not sub_task:
+            logger.warning(f"Sub task not found for analysis_task_id: {analysis_task_id}")
+            return BaseResponse(message="Sub task not found")
+            
+        # 更新子任务状态
+        sub_task.status = status
         if status == "stopped":
-            stream_url = callback_data.get("stream_url")
-            if stream_url:
-                # 查找对应的视频源
-                stream = db.query(Stream).filter(Stream.url == stream_url).first()
-                if stream:
-                    # 更新状态为断开连接
-                    stream.status = StreamStatus.DISCONNECTED
-                    stream.updated_at = datetime.now()
-                    db.commit()
-                    logger.info(f"Updated stream {stream.id} status to disconnected")
-                    
+            sub_task.completed_at = datetime.now()
+            
+            # 更新关联的视频源状态
+            stream = sub_task.stream
+            if stream:
+                stream.status = StreamStatus.DISCONNECTED
+                stream.updated_at = datetime.now()
+                logger.info(f"Updated stream {stream.id} status to disconnected")
+                
+        db.commit()
         return BaseResponse(message="Callback processed successfully")
         
     except Exception as e:
+        db.rollback()
         logger.error(f"Process analysis callback failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) 

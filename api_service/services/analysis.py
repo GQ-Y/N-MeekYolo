@@ -73,10 +73,9 @@ class AnalysisService:
             response = await client.post(
                 f"{self.analysis_url}/analyze/stream",
                 json={
-                    "task_id": task_id,
                     "model_code": model_code,
                     "stream_url": stream_url,
-                    "callback_url": callback_url,
+                    "callback_urls": callback_url,
                     "output_url": output_url,
                     "callback_interval": callback_interval
                 }
