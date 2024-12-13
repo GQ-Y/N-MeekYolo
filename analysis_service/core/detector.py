@@ -431,10 +431,25 @@ class YOLODetector:
             logger.error(f"停止任务失败: {str(e)}")
             raise
             
-    async def stop_task(self, task_id: str):
+    async def stop_task(self, task_id: str) -> bool:
         """停止指定任务"""
-        if task_id in self.stop_flags:
+        try:
+            if task_id not in self.stop_flags:
+                logger.warning(f"任务 {task_id} 不存在")
+                return False
+            
+            # 设置停止标志
             self.stop_flags[task_id] = True
-            logger.info(f"Stop signal sent to task {task_id}")
+            logger.info(f"已发送停止信号到任务 {task_id}")
+            
+            # 等待任务实际停止
+            for _ in range(10):  # 最多等待5秒
+                if task_id not in self.stop_flags:
+                    break
+                await asyncio.sleep(0.5)
+            
             return True
-        return False
+        
+        except Exception as e:
+            logger.error(f"停止任务失败: {str(e)}", exc_info=True)
+            return False

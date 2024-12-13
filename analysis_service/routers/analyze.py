@@ -209,7 +209,7 @@ async def stop_stream_analysis(
 ):
     """停止流分析任务"""
     try:
-        # 使用 with_for_update() 锁定记录
+        # 1. 查找并锁定任务记录
         task = db.query(TaskQueue).with_for_update().filter(
             TaskQueue.id == task_id
         ).first()
@@ -217,87 +217,62 @@ async def stop_stream_analysis(
         if not task:
             raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
 
-        # 确定是否为父任务
-        is_parent = task.parent_task_id is None
-        target_task_id = task.id if is_parent else task.parent_task_id
-
-        # 停止任务(包括子任务)
-        await queue.cancel_task(task_id)
-        
+        # 2. 停止任务进程
         try:
-            # 再次确认任务存在并锁定
-            tasks_to_delete = db.query(TaskQueue).with_for_update()
+            logger.info(f"正在停止任务进程: {task_id}")
+            stop_result = await queue.cancel_task(task_id)
+            logger.info(f"停止任务进程结果: {stop_result}")
             
-            # 无论是父任务还是子任务，都删除整个任务组
-            tasks_to_delete = tasks_to_delete.filter(
-                or_(
-                    TaskQueue.id == target_task_id,  # 父任务
-                    TaskQueue.parent_task_id == target_task_id  # 子任务
-                )
-            )
+            # 等待任务真正停止
+            for _ in range(10):  # 最多等待5秒
+                if not await queue.is_task_running(task_id):
+                    break
+                await asyncio.sleep(0.5)
+                
+        except Exception as e:
+            logger.error(f"停止任务进程失败: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"停止任务进程失败: {str(e)}")
 
-            # 获取要删除的任务ID列表
-            task_ids = [t.id for t in tasks_to_delete.all()]
-            logger.info(f"要删除的任务ID列表: {task_ids}")
+        # 3. 获取父任务ID
+        parent_task_id = task.parent_task_id
+
+        try:
+            # 4. 删除当前子任务
+            logger.info(f"删除子任务: {task_id}")
+            db.delete(task)
             
-            if not task_ids:
-                logger.warning(f"未找到要删除的任务记录")
-                return {
-                    "code": 200,
-                    "message": "没有找到需要删除的任务",
-                    "data": {
-                        "task_id": task_id,
-                        "parent_task_id": target_task_id,
-                        "deleted_count": 0
-                    }
-                }
-            
-            # 获取关联的主任务ID列表
-            main_task_ids = db.query(TaskQueue.task_id).filter(
-                TaskQueue.id.in_(task_ids)
-            ).distinct().all()
-            main_task_ids = [t[0] for t in main_task_ids]
-            logger.info(f"关联的主任务ID列表: {main_task_ids}")
+            # 5. 如果存在父任务，检查是否还有其他子任务
+            if parent_task_id:
+                remaining_sub_tasks = db.query(TaskQueue).filter(
+                    TaskQueue.parent_task_id == parent_task_id
+                ).all()
+                
+                # 如果没有其他子任务，删除父任务
+                if not remaining_sub_tasks:
+                    logger.info(f"父任务 {parent_task_id} 下没有其他子任务，删除父任务")
+                    parent_task = db.query(TaskQueue).filter(
+                        TaskQueue.id == parent_task_id
+                    ).first()
+                    if parent_task:
+                        db.delete(parent_task)
+                        
+                        # 删除关联的主任务记录
+                        if parent_task.task_id:
+                            db.query(Task).filter(
+                                Task.id == parent_task.task_id
+                            ).delete()
 
-            # 删除队列任务
-            delete_count = tasks_to_delete.delete(synchronize_session=False)
-            logger.info(f"删除了 {delete_count} 个队列任务记录")
-
-            # 删除关联的主任务记录
-            if main_task_ids:
-                task_delete_count = db.query(Task).filter(
-                    Task.id.in_(main_task_ids)
-                ).delete(synchronize_session=False)
-                logger.info(f"删除了 {task_delete_count} 个主任务记录")
-
+            # 6. 提交事务
             db.commit()
-            logger.info(f"成功提交删除操作")
-
-            # 验证删除结果
-            remaining_queue_tasks = db.query(TaskQueue).filter(
-                TaskQueue.id.in_(task_ids)
-            ).all()
-            remaining_main_tasks = db.query(Task).filter(
-                Task.id.in_(main_task_ids)
-            ).all()
-            
-            if remaining_queue_tasks or remaining_main_tasks:
-                logger.warning(
-                    f"删除后仍有残留记录:\n"
-                    f"- 队列任务: {[t.id for t in remaining_queue_tasks]}\n"
-                    f"- 主任务: {[t.id for t in remaining_main_tasks]}"
-                )
-            else:
-                logger.info("所有相关任务记录已成功删除")
+            logger.info(f"成功删除任务记录")
 
             return {
                 "code": 200,
                 "message": "任务已停止并删除",
                 "data": {
                     "task_id": task_id,
-                    "parent_task_id": target_task_id,
-                    "deleted_queue_tasks": delete_count,
-                    "deleted_main_tasks": task_delete_count if main_task_ids else 0
+                    "parent_task_id": parent_task_id,
+                    "parent_deleted": parent_task_id and not remaining_sub_tasks
                 }
             }
 
@@ -309,10 +284,10 @@ async def stop_stream_analysis(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"停止并删除任务失败: {str(e)}", exc_info=True)
+        logger.error(f"停止任务失败: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"停止并删除任务失败: {str(e)}"
+            detail=f"停止任务失败: {str(e)}"
         )
 
 @router.get("/stream/{task_id}/status", response_model=BaseResponse)

@@ -179,7 +179,7 @@ class TaskQueueManager:
             if task_id:
                 self.running_tasks.pop(task_id, None)
             
-            # 检查等待中的任务
+            # ���查等待中的任务
             try:
                 await self._check_pending_tasks()
             except Exception as e:
@@ -212,7 +212,7 @@ class TaskQueueManager:
         queue_task.priority = priority
         self.db.commit()
         
-        # 重新加入队列以更新优先级
+        # 重新加���队列以更新优先级
         await self.queue.put((-priority, queue_task_id))
         logger.info(f"Updated priority for task {queue_task_id} to {priority}")
         
@@ -238,33 +238,35 @@ class TaskQueueManager:
             "queue_position": position
         }
 
-    async def cancel_task(self, task_id: str):
+    async def cancel_task(self, task_id: str) -> bool:
         """取消任务"""
         try:
-            # 停止检测任务
-            await self.detector.stop_task(task_id)
+            # 1. 确认任务是否在运行
+            if not await self.is_task_running(task_id):
+                logger.warning(f"任务 {task_id} 不在运行状态")
+                return True
             
-            # 更新数据库状态
-            queue_task = self.db.query(TaskQueue).filter(TaskQueue.id == task_id).first()
-            if queue_task:
-                # 如果是父任务，停止所有子任务
-                if queue_task.parent_task_id is None:
-                    sub_tasks = self.db.query(TaskQueue).filter(
-                        TaskQueue.parent_task_id == queue_task.id
-                    ).all()
-                    for sub_task in sub_tasks:
-                        await self.detector.stop_task(sub_task.id)
-                        # 从运行中任务移除
-                        self.running_tasks.pop(sub_task.id, None)
-                        logger.info(f"子任务 {sub_task.id} 已停止")
-                
-                # 从运行中任务移除
-                self.running_tasks.pop(task_id, None)
-                logger.info(f"任务 {task_id} 已停止")
-                
-                # 检查等待中的任务
-                await self._check_pending_tasks()
-                
+            # 2. 停止检测任务
+            stop_result = await self.detector.stop_task(task_id)
+            if not stop_result:
+                raise Exception(f"停止检测任务失败")
+            
+            # 3. 等待任务实际停止
+            for _ in range(10):  # 最多等待5秒
+                if not await self.is_task_running(task_id):
+                    break
+                await asyncio.sleep(0.5)
+            
+            # 4. 从运行中任务列表移除
+            self.running_tasks.pop(task_id, None)
+            logger.info(f"任务 {task_id} 已从运行列表移除")
+            
+            return True
+        
         except Exception as e:
-            logger.error(f"停止任务失败: {str(e)}")
+            logger.error(f"取消任务失败: {str(e)}", exc_info=True)
             raise
+
+    async def is_task_running(self, task_id: str) -> bool:
+        """检查任务是否在运行"""
+        return task_id in self.running_tasks
