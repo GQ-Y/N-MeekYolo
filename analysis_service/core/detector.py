@@ -262,22 +262,31 @@ class YOLODetector:
         if not callback_urls:
             return
             
+        # 分割多个回调地址    
+        urls = callback_urls.split(';')
+        logger.info(f"准备发送回调到以下地址: {urls}")
+        
         try:
-            logger.info(f"Sending callback to: {callback_urls}")
             async with aiohttp.ClientSession() as session:
-                try:
-                    async with session.post(callback_urls, json=data, timeout=5) as response:
-                        if response.status == 200:
-                            logger.info(f"Callback successful: {callback_urls}")
-                        else:
-                            logger.warning(f"Callback failed: {callback_urls}, status: {response.status}")
-                except asyncio.TimeoutError:
-                    logger.warning(f"Callback timeout: {callback_urls}")
-                except Exception as e:
-                    logger.warning(f"Callback request failed: {callback_urls}, error: {str(e)}")
+                for url in urls:
+                    url = url.strip()  # 移除可能的空格
+                    if not url:  # 跳过空URL
+                        continue
+                        
+                    try:
+                        logger.info(f"正在发送回调到: {url}")
+                        async with session.post(url, json=data, timeout=5) as response:
+                            if response.status == 200:
+                                logger.info(f"回调成功: {url}")
+                            else:
+                                logger.warning(f"回调失败: {url}, 状态码: {response.status}")
+                    except asyncio.TimeoutError:
+                        logger.warning(f"回调超时: {url}")
+                    except Exception as e:
+                        logger.warning(f"回调请求失败: {url}, 错误: {str(e)}")
                     
         except Exception as e:
-            logger.warning(f"Error creating callback session to {callback_urls}: {str(e)}")
+            logger.warning(f"创建回调会话失败: {str(e)}")
             # 继续执行,不影响主任务
             pass
 

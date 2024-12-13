@@ -121,7 +121,7 @@ async def analysis_callback(
         if not task_id or not status:
             raise HTTPException(status_code=400, detail="Invalid callback data")
             
-        # 如果是停止状态,更新���关视频源状态
+        # 如果是停止状态,更新关联视频源状态
         if status == "stopped":
             stream_url = callback_data.get("stream_url")
             if stream_url:
