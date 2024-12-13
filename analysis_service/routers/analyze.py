@@ -3,7 +3,7 @@
 处理分析请求
 """
 from fastapi import APIRouter, HTTPException, Depends
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel
 from analysis_service.core.detector import YOLODetector
 from analysis_service.models.responses import (
@@ -55,8 +55,8 @@ class StreamAnalysisRequest(BaseModel):
     """流分析请求"""
     model_code: str
     stream_url: str
-    callback_urls: str = None
-    output_url: str = None
+    callback_urls: str
+    output_url: Optional[str] = None
     callback_interval: int = 1
 
 @router.post("/image", response_model=ImageAnalysisResponse)
