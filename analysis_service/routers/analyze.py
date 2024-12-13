@@ -30,14 +30,6 @@ router = APIRouter(prefix="/analyze")
 def get_detector():
     return detector
 
-# 依赖注入获取数据库会话
-def get_db():
-    db = get_db_dependency()
-    try:
-        yield db
-    finally:
-        db.close()
-
 class ImageAnalysisRequest(BaseModel):
     """图片分析请求"""
     model_code: str
@@ -157,7 +149,7 @@ async def stop_stream_analysis(task_id: str):
 @router.get("/stream/{task_id}/status", response_model=BaseResponse)
 async def get_stream_status(
     task_id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db_dependency)
 ):
     """获取流分析状态"""
     try:
@@ -175,4 +167,4 @@ async def get_stream_status(
         raise
     except Exception as e:
         logger.error(f"Get task status failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e)) 
+        raise HTTPException(status_code=500, detail=str(e))
