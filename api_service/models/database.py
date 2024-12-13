@@ -44,7 +44,7 @@ task_model_association = Table(
     Column('model_id', Integer, ForeignKey('models.id'))
 )
 
-# 任务与回调服务的对多关系表
+# 任务与回调服务的���多关系表
 task_callback_association = Table(
     'task_callback_association',
     Base.metadata,
@@ -174,11 +174,11 @@ class SubTask(Base):
     __tablename__ = "sub_tasks"
     
     id = Column(Integer, primary_key=True, index=True)
-    task_id = Column(Integer, ForeignKey('tasks.id'))  # 关联主任务
+    task_id = Column(Integer, ForeignKey('tasks.id', ondelete='CASCADE'))
     analysis_task_id = Column(String(50))  # Analysis Service的任务ID
-    stream_id = Column(Integer, ForeignKey('streams.id'))  # 关联视频源
-    model_id = Column(Integer, ForeignKey('models.id'))  # 关联模型
-    status = Column(String(20), default="created")  # created, running, completed, failed, stopped
+    stream_id = Column(Integer, ForeignKey('streams.id'))
+    model_id = Column(Integer, ForeignKey('models.id'))
+    status = Column(String(20), default="created")
     error_message = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
