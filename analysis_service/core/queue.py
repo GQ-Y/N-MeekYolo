@@ -117,29 +117,38 @@ class TaskQueueManager:
         
     async def _process_task(self, queue_task: TaskQueue):
         """处理单个任务"""
+        task_id = None
         try:
+            if not queue_task:
+                logger.error("队列任务对象为空")
+                return
+            
+            task_id = queue_task.id
+            
             # 重新获取任务对象，确保在当前session中
             queue_task = self.db.query(TaskQueue).filter(
-                TaskQueue.id == queue_task.id
+                TaskQueue.id == task_id
             ).first()
             if not queue_task:
+                logger.error(f"找不到队列任务: {task_id}")
                 return
-                
+            
             task = self.db.query(Task).filter(Task.id == queue_task.task_id).first()
             if not task:
+                logger.error(f"找不到关联的任务记录: {queue_task.task_id}")
                 return
-                
+            
             # 更新状态
             queue_task.status = 1
             queue_task.started_at = datetime.now()
             self.db.commit()
             
             # 记录到运行中的任务，使用ID而不是对象
-            self.running_tasks[queue_task.id] = queue_task.task_id
+            self.running_tasks[task_id] = queue_task.task_id
             
             # 执行任务
             await self.detector.start_stream_analysis(
-                task_id=queue_task.id,
+                task_id=task_id,
                 stream_url=task.stream_url,
                 callback_urls=task.callback_urls,
                 parent_task_id=queue_task.parent_task_id
@@ -147,7 +156,7 @@ class TaskQueueManager:
             
             # 更新状态
             queue_task = self.db.query(TaskQueue).filter(
-                TaskQueue.id == queue_task.id
+                TaskQueue.id == task_id
             ).first()
             if queue_task:
                 queue_task.status = 2
@@ -155,21 +164,26 @@ class TaskQueueManager:
                 self.db.commit()
             
         except Exception as e:
-            logger.error(f"Task failed: {str(e)}")
-            queue_task = self.db.query(TaskQueue).filter(
-                TaskQueue.id == queue_task.id
-            ).first()
-            if queue_task:
-                queue_task.status = -1
-                queue_task.error_message = str(e)
-                self.db.commit()
+            logger.error(f"任务处理失败: {str(e)}", exc_info=True)
+            if task_id:
+                queue_task = self.db.query(TaskQueue).filter(
+                    TaskQueue.id == task_id
+                ).first()
+                if queue_task:
+                    queue_task.status = -1
+                    queue_task.error_message = str(e)
+                    self.db.commit()
             
         finally:
-            # 从运行中任务移除，使用ID
-            self.running_tasks.pop(queue_task.id, None)
+            # 从运行中任务移除，使用安全的task_id
+            if task_id:
+                self.running_tasks.pop(task_id, None)
             
             # 检查等待中的任务
-            await self._check_pending_tasks()
+            try:
+                await self._check_pending_tasks()
+            except Exception as e:
+                logger.error(f"检查待处理任务失败: {str(e)}", exc_info=True)
             
     async def _check_pending_tasks(self):
         """检查并启动等待中的任务"""
@@ -226,21 +240,31 @@ class TaskQueueManager:
 
     async def cancel_task(self, task_id: str):
         """取消任务"""
-        # 停止检测任务
-        await self.detector.stop_task(task_id)
-        
-        # 更新数据库状态
-        queue_task = self.db.query(TaskQueue).filter(TaskQueue.id == task_id).first()
-        if queue_task:
-            queue_task.status = -1
-            queue_task.error_message = "Task cancelled"
-            queue_task.completed_at = datetime.now()
-            self.db.commit()
+        try:
+            # 停止检测任务
+            await self.detector.stop_task(task_id)
             
-            # ��运行中任务移除
-            self.running_tasks.pop(task_id, None)
-            
-            # 检查等待中的任务
-            await self._check_pending_tasks()
-            
-            logger.info(f"Task {task_id} cancelled")
+            # 更新数据库状态
+            queue_task = self.db.query(TaskQueue).filter(TaskQueue.id == task_id).first()
+            if queue_task:
+                # 如果是父任务，停止所有子任务
+                if queue_task.parent_task_id is None:
+                    sub_tasks = self.db.query(TaskQueue).filter(
+                        TaskQueue.parent_task_id == queue_task.id
+                    ).all()
+                    for sub_task in sub_tasks:
+                        await self.detector.stop_task(sub_task.id)
+                        # 从运行中任务移除
+                        self.running_tasks.pop(sub_task.id, None)
+                        logger.info(f"子任务 {sub_task.id} 已停止")
+                
+                # 从运行中任务移除
+                self.running_tasks.pop(task_id, None)
+                logger.info(f"任务 {task_id} 已停止")
+                
+                # 检查等待中的任务
+                await self._check_pending_tasks()
+                
+        except Exception as e:
+            logger.error(f"停止任务失败: {str(e)}")
+            raise

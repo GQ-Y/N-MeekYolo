@@ -57,6 +57,5 @@ class ResourceMonitor:
             
         if torch.cuda.is_available() and usage["gpu_memory_percent"] > self.gpu_memory_threshold:
             logger.warning("GPU memory usage exceeds threshold")
-            return False
-            
+            return False            
         return True 
