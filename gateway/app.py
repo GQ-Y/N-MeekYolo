@@ -3,11 +3,14 @@ API网关入口
 处理服务发现和请求路由
 """
 import asyncio
+from typing import List, Dict, Any
 from fastapi import FastAPI, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.staticfiles import StaticFiles
 from fastapi.openapi.utils import get_openapi
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from shared.utils.logger import setup_logger
 from gateway.discovery.service_registry import service_registry
 from gateway.router.api_router import router
@@ -15,6 +18,18 @@ from gateway.routers.admin import router as admin_router
 
 # 配置日志
 logger = setup_logger(__name__)
+
+# 定义基础响应模型
+class HTTPError(BaseModel):
+    detail: str
+
+class ValidationError(BaseModel):
+    loc: List[str]
+    msg: str
+    type: str
+
+class HTTPValidationError(BaseModel):
+    detail: List[ValidationError]
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -59,17 +74,97 @@ def custom_openapi():
         version="1.0.0",
         description=app.description,
         routes=app.routes,
-        tags=[
-            {
-                "name": "管理接口",
-                "description": "提供服务注册、发现和监控功能"
-            },
-            {
-                "name": "API路由",
-                "description": "处理API请求的路由和转发"
-            }
-        ]
     )
+    
+    # 确保components存在
+    if "components" not in openapi_schema:
+        openapi_schema["components"] = {}
+        
+    # 初始化各个组件
+    components = openapi_schema["components"]
+    if "schemas" not in components:
+        components["schemas"] = {}
+    if "responses" not in components:
+        components["responses"] = {}
+    if "securitySchemes" not in components:
+        components["securitySchemes"] = {}
+        
+    # 添加错误响应schemas
+    components["schemas"].update({
+        "HTTPError": {
+            "title": "HTTPError",
+            "type": "object",
+            "properties": {
+                "detail": {
+                    "title": "Detail",
+                    "type": "string"
+                }
+            },
+            "required": ["detail"]
+        },
+        "ValidationError": {
+            "title": "ValidationError",
+            "type": "object",
+            "properties": {
+                "loc": {
+                    "title": "Location",
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "msg": {
+                    "title": "Message",
+                    "type": "string"
+                },
+                "type": {
+                    "title": "Error Type",
+                    "type": "string"
+                }
+            },
+            "required": ["loc", "msg", "type"]
+        },
+        "HTTPValidationError": {
+            "title": "HTTPValidationError",
+            "type": "object",
+            "properties": {
+                "detail": {
+                    "title": "Detail",
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/ValidationError"}
+                }
+            }
+        }
+    })
+    
+    # 添加全局响应
+    components["responses"].update({
+        "HTTPValidationError": {
+            "description": "Validation Error",
+            "content": {
+                "application/json": {
+                    "schema": {"$ref": "#/components/schemas/HTTPValidationError"}
+                }
+            }
+        }
+    })
+    
+    # 添加安全配置
+    components["securitySchemes"].update({
+        "APIKeyHeader": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-API-Key"
+        }
+    })
+    
+    # 为所有路由添加422响应
+    for path in openapi_schema["paths"].values():
+        for operation in path.values():
+            if "responses" not in operation:
+                operation["responses"] = {}
+            if "422" not in operation["responses"]:
+                operation["responses"]["422"] = {
+                    "$ref": "#/components/responses/HTTPValidationError"
+                }
     
     # 添加服务说明
     openapi_schema["info"]["x-services"] = {
@@ -92,17 +187,6 @@ def custom_openapi():
             "name": "云服务",
             "description": "提供云服务",
             "url": "http://localhost:8004"
-        }
-    }
-    
-    # 添加安全配置
-    openapi_schema["components"] = {
-        "securitySchemes": {
-            "APIKeyHeader": {
-                "type": "apiKey",
-                "in": "header",
-                "name": "X-API-Key"
-            }
         }
     }
     

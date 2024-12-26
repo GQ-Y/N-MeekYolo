@@ -5,7 +5,7 @@
 from typing import Dict, List, Optional
 import asyncio
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from shared.utils.logger import setup_logger
 from shared.models.base import ServiceInfo
 from shared.utils.discovery import ServiceDiscovery
@@ -15,15 +15,18 @@ logger = setup_logger(__name__)
 
 class ServiceStats(BaseModel):
     """服务统计信息"""
-    total_requests: int = 0
-    success_requests: int = 0
-    failed_requests: int = 0
-    last_success: Optional[datetime] = None
-    last_failure: Optional[datetime] = None
-    avg_response_time: float = 0.0
-    status: str = "unknown"
-    uptime: Optional[float] = None
-    
+    total_requests: int = Field(default=0, description="总请求数")
+    success_requests: int = Field(default=0, description="成功请求数")
+    failed_requests: int = Field(default=0, description="失败请求数")
+    last_success: Optional[datetime] = Field(default=None, description="最后成功时间")
+    last_failure: Optional[datetime] = Field(default=None, description="最后失败时间")
+    avg_response_time: float = Field(default=0.0, description="平均响应时间")
+    status: str = Field(default="unknown", description="服务状态")
+    uptime: Optional[float] = Field(default=None, description="运行时间")
+
+    class Config:
+        from_attributes = True
+
 class ServiceRegistry:
     """服务注册中心"""
     
@@ -85,27 +88,58 @@ class ServiceRegistry:
             
     async def get_service(self, service_name: str) -> Optional[ServiceInfo]:
         """获取服务信息"""
-        return self.services.get(service_name)
+        try:
+            service = self.services.get(service_name)
+            if service:
+                return ServiceInfo.model_validate(service)
+            return None
+        except Exception as e:
+            logger.error(f"Error getting service {service_name}: {str(e)}")
+            return None
         
-    async def get_service_stats(self, service_name: str) -> Optional[ServiceStats]:
+    async def get_service_stats(self, service_name: str) -> Dict:
         """获取服务统计信息"""
-        return self.stats.get(service_name)
+        try:
+            if service_name not in self.stats:
+                self.stats[service_name] = ServiceStats()
+            
+            stats = self.stats[service_name]
+            
+            # 更新服务状态
+            service = self.services.get(service_name)
+            if service:
+                stats.status = service.status
+                if service.started_at:
+                    stats.uptime = (datetime.now() - service.started_at).total_seconds()
+            
+            # 转换为字典
+            return stats.model_dump()
+        except Exception as e:
+            logger.error(f"Error getting service stats for {service_name}: {str(e)}")
+            return ServiceStats().model_dump()  # 返回默认统计信息字典
         
     async def get_all_services(self) -> List[Dict]:
         """获取所有服务信息"""
-        services = []
-        for name, service in self.services.items():
-            stats = self.stats[name]
-            services.append({
-                "name": name,
-                "url": service.url,
-                "status": stats.status,
-                "uptime": stats.uptime,
-                "total_requests": stats.total_requests,
-                "success_rate": stats.success_requests / max(1, stats.total_requests),
-                "avg_response_time": stats.avg_response_time
-            })
-        return services
+        try:
+            result = []
+            for name, service in self.services.items():
+                stats = await self.get_service_stats(name)
+                success_rate = (stats["success_requests"] / stats["total_requests"] 
+                              if stats["total_requests"] > 0 else 0.0)
+                
+                result.append({
+                    "name": service.name,
+                    "url": service.url,
+                    "status": service.status,
+                    "uptime": stats["uptime"],
+                    "total_requests": stats["total_requests"],
+                    "success_rate": success_rate,
+                    "avg_response_time": stats["avg_response_time"]
+                })
+            return result
+        except Exception as e:
+            logger.error(f"Error getting all services: {str(e)}")
+            return []
         
     async def discover_services(self):
         """自动发现服务"""

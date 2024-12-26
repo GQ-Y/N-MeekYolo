@@ -106,18 +106,13 @@ check_dependencies() {
     
     echo -e "${YELLOW}正在安装 ${service} 的依赖...${NC}"
     
-    # 创建虚拟环境并安装依赖
-    python -m venv "${service}/.venv" 2>/dev/null || true
-    source "${service}/.venv/bin/activate"
-    
+    # 直接在主虚拟环境中安装依赖
     if pip install -r "${service}/requirements.txt"; then
         # 安装成功后生成lock文件
         pip freeze > "${service}/requirements.lock"
-        deactivate
         echo -e "${GREEN}${service} 依赖安装完成${NC}"
         return 0
     else
-        deactivate
         echo -e "${RED}${service} 依赖安装失败${NC}"
         return 1
     fi
