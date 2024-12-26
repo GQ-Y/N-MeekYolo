@@ -5,3 +5,6 @@
 ## 忽略
 results/
 *.DS_Store
+*/.venv/*
+*.lock
+venv/*
