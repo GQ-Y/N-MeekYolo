@@ -55,15 +55,11 @@ MeekYolo是一个基于YOLOv11的目标检测与跟踪系统，支持多种输�
 1. 配置config.yaml文件
 2. 运行程序：
    ```bash
-   python yolo_rtsp.py
+   ./scripts/start.sh start
    ```
 3. 输入命令控制程序：
    - `start` - 开始分析
    - `stop` - 停止分析
-   - `help` - 显示帮助信息
-   - `status` - 显示当前状态
-   - `config` - 显示当前配置
-   - `quit`/`exit` - 退出程序
 
 ## 使用说明
 
@@ -206,3 +202,7 @@ enabled: false # 是否允许任何打印输出
   - 完善可视化配置
   - 支持中文类别显示
   - 支持读取yolo配置文件描述
+- 2024.12.26:优化细节
+  - 优化启动环境检测
+  - 增强多终端系统适配
+  - 修复分析错误
