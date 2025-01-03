@@ -1,47 +1,29 @@
-# 基础配置
-PROJECT_NAME: "MeekYolo Service"
+# 项目基础配置
+PROJECT_NAME: "MeekYolo"
 VERSION: "1.0.0"
 
-# 服务配置
+# 网关服务配置
+SERVICE:
+  host: "0.0.0.0"
+  port: 8000
+
+# 服务发现配置
+DISCOVERY:
+  interval: 30  # 服务发现间隔(秒)
+  timeout: 5    # 请求超时时间(秒)
+  retry: 3      # 重试次数
+
+# 服务列表配置
 SERVICES:
-  model:
-    host: model-service
-    port: 8003
-  analysis:
-    host: analysis-service
-    port: 8002
   api:
-    host: api-service
-    port: 8001
-  gateway:
-    host: gateway
-    port: 8000
+    url: "http://localhost:8001"
+    description: "API服务"
+  analysis:
+    url: "http://localhost:8002"
+    description: "分析服务"
+  model:
+    url: "http://localhost:8003"
+    description: "模型服务"
   cloud:
-    host: cloud-service
-    port: 8004
-
-# 存储配置
-STORAGE:
-  base_dir: "models"  # 模型目录
-  model_dir: "models"  # 模型目录
-  temp_dir: "temp"
-  max_size: 1073741824  # 1GB
-  allowed_formats: [".pt", ".pth", ".onnx", ".yaml"]
-
-# 分析配置
-ANALYSIS:
-  confidence: 0.8  # 目标检测置信度阈值,低于此值的检测框将被过滤
-  iou: 0.45  # 非极大值抑制的IOU阈值,用于去除重叠检测框
-  max_det: 300  # 每张图像最大检测目标数量
-  device: "auto"  # 推理设备,auto表示自动选择可用的最佳设备(CPU/GPU)
-
-# 输出配置
-OUTPUT:
-  save_dir: "results"
-  save_img: true
-  save_txt: false
-
-# 日志配置
-LOGGING:
-  level: "INFO"
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    url: "http://localhost:8004"
+    description: "云服务"

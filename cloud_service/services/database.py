@@ -1,52 +1,46 @@
 """
 数据库服务
 """
-import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.declarative import declarative_base
 from cloud_service.core.config import settings
-from cloud_service.models.base import Base
 from shared.utils.logger import setup_logger
+import os
 
 logger = setup_logger(__name__)
 
-def ensure_db_directory():
-    """确保数据库目录存在"""
-    try:
-        # 从数据库URL中提取路径
-        db_path = settings.DATABASE.url.replace('sqlite:///', '')
-        db_dir = os.path.dirname(db_path)
-        
-        # 创建目录
-        if db_dir:
-            os.makedirs(db_dir, exist_ok=True)
-            logger.info(f"Database directory created: {db_dir}")
-            
-        return True
-    except Exception as e:
-        logger.error(f"Failed to create database directory: {str(e)}")
-        raise
+# 获取服务根目录
+SERVICE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# 数据库目录和文件
+DB_DIR = os.path.join(SERVICE_ROOT, "data")
+DB_FILE = "cloud_service.db"
+DB_PATH = os.path.join(DB_DIR, DB_FILE)
 
 # 确保数据库目录存在
-ensure_db_directory()
+os.makedirs(DB_DIR, exist_ok=True)
 
 # 创建数据库引擎
 engine = create_engine(
-    settings.DATABASE.url,
-    connect_args={"check_same_thread": False}  # SQLite特定配置
+    f"sqlite:///{DB_PATH}",
+    connect_args={"check_same_thread": False}
 )
 
 # 创建会话工厂
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+# 声明基类
+Base = declarative_base()
+
 def init_db():
     """初始化数据库"""
     try:
-        # 创建所有表
+        from cloud_service.models.database import Base
         Base.metadata.create_all(bind=engine)
-        logger.info("Database tables created successfully")
+        logger.info(f"Database initialized at: {DB_PATH}")
     except Exception as e:
-        logger.error(f"Database initialization failed: {str(e)}")
+        logger.error(f"Failed to initialize database: {str(e)}", exc_info=True)
         raise
 
 def get_db():
@@ -55,4 +49,7 @@ def get_db():
     try:
         yield db
     finally:
-        db.close() 
+        db.close()
+
+# 在模块导入时初始化数据库
+init_db() 

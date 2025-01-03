@@ -14,7 +14,12 @@ class MarketService:
     
     def __init__(self):
         self.key_service = KeyService()
-        self.base_url = settings.MARKET.base_url
+        self.base_url = settings.CLOUD.url
+        self.api_prefix = settings.CLOUD.api_prefix
+    
+    def _get_api_url(self, path: str) -> str:
+        """获取完整的API URL"""
+        return f"{self.base_url}{self.api_prefix}{path}"
     
     async def sync_models(self, db: Session):
         """同步模型"""
@@ -29,7 +34,7 @@ class MarketService:
             # 调用云市场API
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{self.base_url}/api/v1/models/available",
+                    self._get_api_url("/models/available"),
                     headers={"x-api-key": key.key}
                 )
                 response.raise_for_status()

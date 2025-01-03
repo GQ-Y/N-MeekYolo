@@ -1,0 +1,34 @@
+# 服务基础配置
+PROJECT_NAME: "MeekYolo Analysis Service"
+VERSION: "1.0.0"
+
+# 服务配置
+SERVICE:
+  host: "0.0.0.0"
+  port: 8002
+
+# 模型服务配置
+MODEL_SERVICE:
+  url: "http://localhost:8003"
+  api_prefix: "/api/v1"
+
+# 分析配置
+ANALYSIS:
+  confidence: 0.8
+  iou: 0.45
+  max_det: 300
+  device: "auto"
+
+# 存储配置
+STORAGE:
+  base_dir: "data"
+  model_dir: "models"
+  temp_dir: "temp"
+  max_size: 1073741824  # 1GB
+
+# 输出配置
+OUTPUT:
+  save_dir: "results"
+  save_txt: false
+  save_img: true
+  return_base64: true 

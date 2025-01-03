@@ -1,0 +1,29 @@
+# 服务基础配置
+PROJECT_NAME: "MeekYolo API Service"
+VERSION: "1.0.0"
+
+# 服务配置
+SERVICE:
+  host: "0.0.0.0"
+  port: 8001
+
+# 分析服务配置
+ANALYSIS_SERVICE:
+  url: "http://localhost:8002"
+  api_prefix: "/api/v1"
+
+# 模型服务配置
+MODEL_SERVICE:
+  url: "http://localhost:8003"
+  api_prefix: "/api/v1"
+
+# 数据库配置
+DATABASE:
+  url: "sqlite:///data/api_service.db"
+  dir: "data"
+  name: "api_service.db"
+
+# 默认分组配置
+DEFAULT_GROUP:
+  name: "默认分组"
+  description: "系统默认分组" 

@@ -2,10 +2,10 @@
 模型服务
 """
 import httpx
-from typing import Optional, Dict, List
 from sqlalchemy.orm import Session
-from api_service.models.database import Model
+from typing import List, Optional, Dict, Any
 from api_service.core.config import settings
+from api_service.models.database import Model
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -14,138 +14,92 @@ class ModelService:
     """模型服务"""
     
     def __init__(self):
-        self.model_service_url = f"http://{settings.SERVICES.model.host}:{settings.SERVICES.model.port}"
+        # 使用新的配置结构
+        self.base_url = settings.MODEL_SERVICE.url
+        self.api_prefix = settings.MODEL_SERVICE.api_prefix
+    
+    def _get_api_url(self, path: str) -> str:
+        """获取完整的API URL"""
+        return f"{self.base_url}{self.api_prefix}{path}"
     
     async def check_model_service(self) -> bool:
         """检查模型服务是否可用"""
         try:
-            logger.info(f"Checking model service at: {self.model_service_url}")
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                # 使用 list API 进行检查，因为根路由可能不存在
-                response = await client.get(f"{self.model_service_url}/api/v1/models/list")
-                if response.status_code == 200:
-                    logger.info("Model service is available")
-                    return True
-                logger.warning(f"Model service returned status code: {response.status_code}")
-                return False
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{self.base_url}/health")
+                return response.status_code == 200
         except Exception as e:
-            logger.warning(f"Model service is not available: {str(e)}")
+            logger.error(f"Check model service failed: {str(e)}")
             return False
     
     async def sync_models(self, db: Session) -> List[Model]:
         """同步模型列表"""
         try:
-            # 调用model_service获取模型列表
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                logger.info(f"Fetching models from: {self.model_service_url}/api/v1/models/list")
-                response = await client.get(
-                    f"{self.model_service_url}/api/v1/models/list"
-                )
+            async with httpx.AsyncClient() as client:
+                response = await client.get(self._get_api_url("/models"))
                 response.raise_for_status()
                 data = response.json()
                 
-                if not data.get("data") or not data["data"].get("items"):
-                    logger.warning("No models data received from model service")
-                    return []
-                
                 # 更新本地数据库
                 models = []
-                for item in data["data"]["items"]:
-                    try:
-                        model = db.query(Model).filter(Model.code == item["code"]).first()
-                        if not model:
-                            model = Model(
-                                code=item["code"],
-                                name=item["name"],
-                                description=item.get("description", ""),
-                                path=item.get("path", "")
-                            )
-                            db.add(model)
-                            logger.info(f"Created new model: {item['code']}")
-                        else:
-                            model.name = item["name"]
-                            model.description = item.get("description", "")
-                            model.path = item.get("path", "")
-                            logger.info(f"Updated existing model: {item['code']}")
-                        models.append(model)
-                    except Exception as e:
-                        logger.error(f"Failed to process model {item.get('code')}: {str(e)}")
-                        continue
-                
+                for item in data.get("data", {}).get("items", []):
+                    model = Model(
+                        code=item["code"],
+                        name=item["name"],
+                        path=item["path"],
+                        description=item.get("description")
+                    )
+                    models.append(model)
+                    
+                # 保存到数据库
+                db.query(Model).delete()
+                db.add_all(models)
                 db.commit()
-                logger.info(f"Successfully synced {len(models)} models")
+                
                 return models
                 
         except Exception as e:
-            logger.error(f"Failed to sync models: {str(e)}")
+            logger.error(f"Sync models failed: {str(e)}")
             db.rollback()
             raise
+    
+    async def get_model(self, db: Session, model_id: int) -> Optional[Model]:
+        """获取模型"""
+        return db.query(Model).filter(Model.id == model_id).first()
     
     async def get_model_by_code(self, db: Session, code: str) -> Optional[Model]:
         """通过代码获取模型"""
         try:
-            # 先检查本地数据库
+            # 先从本地数据库获取
             model = db.query(Model).filter(Model.code == code).first()
+            if model:
+                return model
             
-            # 如果model_service可用,从远程获取最新数据
-            if await self.check_model_service():
-                try:
-                    async with httpx.AsyncClient(timeout=5.0) as client:
-                        response = await client.get(
-                            f"{self.model_service_url}/api/v1/models/code/{code}"
-                        )
-                        if response.status_code == 200:
-                            data = response.json()
-                            if not data.get("data"):
-                                logger.warning(f"No data received for model code: {code}")
-                                return model
-                            
-                            model_data = data["data"]
-                            # 更新或创建模型
-                            if not model:
-                                model = Model(
-                                    code=model_data["code"],
-                                    name=model_data["name"],
-                                    description=model_data.get("description"),
-                                    path=model_data.get("path", "")
-                                )
-                                db.add(model)
-                            else:
-                                model.name = model_data["name"]
-                                model.description = model_data.get("description")
-                                model.path = model_data.get("path", "")
-                            db.commit()
-                except Exception as e:
-                    logger.error(f"Failed to get model from service: {str(e)}")
-                    # 发生错误时返回本地数据
-                    return model
-            else:
-                logger.warning(f"Model service not available, using local data for code: {code}")
-            
-            return model
-            
-        except Exception as e:
-            logger.error(f"Failed to get model by code: {str(e)}")
-            return model  # 返回本地数据
-    
-    async def get_model(self, db: Session, model_id: int) -> Optional[Model]:
-        """通过ID���取模型"""
-        try:
-            model = db.query(Model).filter(Model.id == model_id).first()
-            if not model:
-                return None
-            
-            # 如果找到模型且model_service可用，尝试通过code更新
-            if model and await self.check_model_service():
-                try:
-                    updated_model = await self.get_model_by_code(db, model.code)
-                    if updated_model:
-                        return updated_model
-                except Exception as e:
-                    logger.error(f"Failed to update model from service: {str(e)}")
+            # 如果本地没有，从模型服务获取
+            async with httpx.AsyncClient() as client:
+                response = await client.get(self._get_api_url(f"/models/code/{code}"))
+                if response.status_code == 404:
+                    return None
+                    
+                response.raise_for_status()
+                data = response.json().get("data", {})
                 
-            return model
-            
+                # 创建新模型记录
+                model = Model(
+                    code=data["code"],
+                    name=data["name"],
+                    path=data["path"],
+                    description=data.get("description")
+                )
+                
+                # 保存到数据库
+                db.add(model)
+                db.commit()
+                db.refresh(model)
+                
+                return model
+                
         except Exception as e:
-            logger.error(f"Failed to get model by id: {str(e)}")
+            logger.error(f"Get model by code failed: {str(e)}")
+            db.rollback()
             return None

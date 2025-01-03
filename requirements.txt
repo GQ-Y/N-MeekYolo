@@ -1,0 +1,25 @@
+# 基础依赖
+fastapi>=0.68.0
+uvicorn>=0.15.0
+pydantic>=1.8.0
+pydantic-settings>=2.0.0
+python-multipart>=0.0.5
+aiohttp>=3.8.0
+PyYAML>=5.4.0
+httpx>=0.24.0
+
+# 数据库
+sqlalchemy>=1.4.0
+alembic>=1.7.0
+
+# AI相关
+opencv-python>=4.8.1.78
+numpy>=1.26.2
+ultralytics>=8.0.0,<8.4.0
+
+# 监控
+psutil==5.9.6
+gputil==1.4.0
+
+# 工具
+email-validator>=2.0.0 

@@ -6,7 +6,7 @@ WORKDIR /app
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1 \
     TZ=Asia/Shanghai \
-    CONFIG_PATH=/app/config/config.yaml
+    CONFIG_PATH=/app/cloud_service/config/config.yaml
 
 # 安装基础依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -17,27 +17,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 创建必要的目录
-RUN mkdir -p /app/data /app/logs
+RUN mkdir -p /app/data /app/logs /app/models
 
-# 复制shared目录
-COPY shared /app/shared/
-
-# 复制cloud_service服务
-COPY cloud_service /app/cloud_service/
-
-# 复制配置文件
-COPY config /app/config/
+# 复制项目文件
+COPY . /app/
 
 # 安装Python依赖
-COPY cloud_service/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r cloud_service/requirements.txt
 
 # 暴露端口
 EXPOSE 8004
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://cloud_service:8004/health || exit 1
+    CMD curl -f http://localhost:8004/health || exit 1
 
 # 启动服务
 CMD ["python", "-m", "uvicorn", "cloud_service.app:app", "--host", "0.0.0.0", "--port", "8004"] 

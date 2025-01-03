@@ -13,7 +13,12 @@ class AnalysisService:
     """分析服务"""
     
     def __init__(self):
-        self.analysis_url = f"http://{settings.SERVICES.analysis.host}:{settings.SERVICES.analysis.port}"
+        self.base_url = settings.ANALYSIS_SERVICE.url
+        self.api_prefix = settings.ANALYSIS_SERVICE.api_prefix
+    
+    def _get_api_url(self, path: str) -> str:
+        """获取完整的API URL"""
+        return f"{self.base_url}{self.api_prefix}{path}"
     
     async def analyze_image(
         self,
@@ -26,7 +31,7 @@ class AnalysisService:
         task_id = str(uuid.uuid4())
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{self.analysis_url}/analyze/image",
+                self._get_api_url("/analyze/image"),
                 json={
                     "task_id": task_id,
                     "model_code": model_code,
@@ -48,7 +53,7 @@ class AnalysisService:
         task_id = str(uuid.uuid4())
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{self.analysis_url}/analyze/video",
+                self._get_api_url("/analyze/video"),
                 json={
                     "task_id": task_id,
                     "model_code": model_code,
@@ -71,7 +76,7 @@ class AnalysisService:
         task_id = str(uuid.uuid4())
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{self.analysis_url}/analyze/stream",
+                self._get_api_url("/analyze/stream"),
                 json={
                     "model_code": model_code,
                     "stream_url": stream_url,
@@ -87,6 +92,6 @@ class AnalysisService:
         """停止分析任务"""
         async with httpx.AsyncClient() as client:
             response = await client.delete(
-                f"{self.analysis_url}/analyze/stream/{task_id}/stop"
+                self._get_api_url(f"/analyze/stream/{task_id}/stop")
             )
             response.raise_for_status() 

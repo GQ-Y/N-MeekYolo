@@ -1,107 +1,91 @@
 """
-配置模块
+API服务配置
 """
-from typing import Dict, List, Optional, ClassVar
 from pydantic_settings import BaseSettings
+from typing import Dict, List, Optional
 from pydantic import BaseModel
 import os
+import yaml
+import logging
 
-class ServiceConfig(BaseModel):
-    """服务配置"""
-    host: str
-    port: int
+logger = logging.getLogger(__name__)
 
-class ServicesConfig(BaseModel):
-    """所有服务配置"""
-    model: ServiceConfig = ServiceConfig(
-        host="analysis_service",
-        port=8003
-    )
-    analysis: ServiceConfig
-    api: ServiceConfig
-    gateway: ServiceConfig
-    cloud: ServiceConfig
-
-class StorageConfig(BaseModel):
-    """存储配置"""
-    base_dir: str
-    model_dir: str
-    temp_dir: str
-    max_size: int
-    allowed_formats: List[str]
-
-class AnalysisConfig(BaseModel):
-    """分析配置"""
-    confidence: float
-    iou: float
-    max_det: int
-    device: str
-
-class OutputConfig(BaseModel):
-    """输出配置"""
-    save_dir: str
-    save_img: bool
-    save_txt: bool
-
-class LoggingConfig(BaseModel):
-    """日志配置"""
-    level: str
-    format: str
-
-class Settings(BaseSettings):
-    """应用配置"""
-    PROJECT_NAME: str = "MeekYolo Service"
+class APIServiceConfig(BaseSettings):
+    """API服务配置"""
+    
+    # 基础信息
+    PROJECT_NAME: str = "MeekYolo API Service"
     VERSION: str = "1.0.0"
     
-    # 数据库配置 - 使用相对路径 api_service 的路径
-    DATABASE_DIR: str = "data"  # api_service/data 目录
-    DATABASE_NAME: str = "api_service.db"
+    # 服务配置
+    class ServiceConfig(BaseModel):
+        host: str = "0.0.0.0"
+        port: int = 8001
     
-    # 默认分组配置 - 添加 ClassVar 类型注解
-    DEFAULT_GROUP: ClassVar[Dict[str, str]] = {
-        "name": "默认分组",
-        "description": "系统默认分组"
-    }
+    # 分析服务配置
+    class AnalysisServiceConfig(BaseModel):
+        url: str = "http://localhost:8002"  # 分析服务地址
+        api_prefix: str = "/api/v1"         # API前缀
     
-    @property
-    def DATABASE_URL(self) -> str:
-        # 获取 api_service 目录的绝对路径
-        api_service_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        # 构建数据库目录的绝对路径
-        db_dir = os.path.join(api_service_dir, self.DATABASE_DIR)
-        # 确保数据目录存在
-        os.makedirs(db_dir, exist_ok=True)
-        # 构建数据库文件的绝对路径
-        db_path = os.path.join(db_dir, self.DATABASE_NAME)
-        return f"sqlite:///{db_path}"
+    # 模型服务配置
+    class ModelServiceConfig(BaseModel):
+        url: str = "http://localhost:8003"  # 模型服务地址
+        api_prefix: str = "/api/v1"         # API前缀
     
-    # 其他配置
-    SERVICES: ServicesConfig
-    STORAGE: StorageConfig
-    ANALYSIS: AnalysisConfig
-    OUTPUT: OutputConfig
-    LOGGING: LoggingConfig
-
+    # 数据库配置
+    class DatabaseConfig(BaseModel):
+        url: str = "sqlite:///data/api_service.db"
+        dir: str = "data"
+        name: str = "api_service.db"
+    
+    # 默认分组配置
+    class DefaultGroupConfig(BaseModel):
+        name: str = "默认分组"
+        description: str = "系统默认分组"
+    
+    # 配置项
+    SERVICE: ServiceConfig = ServiceConfig()
+    ANALYSIS_SERVICE: AnalysisServiceConfig = AnalysisServiceConfig()
+    MODEL_SERVICE: ModelServiceConfig = ModelServiceConfig()
+    DATABASE: DatabaseConfig = DatabaseConfig()
+    DEFAULT_GROUP: DefaultGroupConfig = DefaultGroupConfig()
+    
     class Config:
         env_file = ".env"
-        env_file_encoding = "utf-8"
         case_sensitive = True
+    
+    @classmethod
+    def load_config(cls) -> "APIServiceConfig":
+        """加载配置"""
+        try:
+            config = {}
+            
+            # 获取配置文件路径
+            if "CONFIG_PATH" in os.environ:
+                config_path = os.environ["CONFIG_PATH"]
+            else:
+                current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                config_path = os.path.join(current_dir, "config", "config.yaml")
+            
+            logger.debug(f"Loading config from: {config_path}")
+            
+            if os.path.exists(config_path):
+                logger.debug(f"Config file exists: {config_path}")
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config.update(yaml.safe_load(f))
+                    logger.debug(f"Loaded config: {config}")
+            else:
+                logger.warning(f"Config file not found: {config_path}, using default values")
+            
+            return cls(**config)
+        except Exception as e:
+            logger.error(f"Failed to load config: {str(e)}")
+            raise
 
 # 加载配置
-def load_config() -> Settings:
-    """加载配置"""
-    import os
-    import yaml
-    
-    # 获取配置文件路径
-    config_path = os.getenv("CONFIG_PATH", "config/config.yaml")
-    
-    # 读取配置文件
-    with open(config_path, "r", encoding="utf-8") as f:
-        config_dict = yaml.safe_load(f)
-    
-    # 创建配置对象
-    return Settings(**config_dict)
-
-# 导出配置实例
-settings = load_config() 
+try:
+    settings = APIServiceConfig.load_config()
+    logger.debug(f"Settings loaded successfully: {settings}")
+except Exception as e:
+    logger.error(f"Failed to load config: {str(e)}")
+    raise 

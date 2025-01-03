@@ -1,105 +1,77 @@
 """
-云服务配置模块
+配置模块
 """
 from pydantic_settings import BaseSettings
-from typing import Dict, Any, Optional, List
+from typing import Dict, List, Optional
 from pydantic import BaseModel
-import yaml
 import os
+import yaml
 
-class DatabaseConfig(BaseModel):
-    """数据库配置"""
-    url: str = "sqlite:///data/cloud_market.db"
-
-class StorageConfig(BaseModel):
-    """存储配置"""
-    base_dir: str = "store"
-    max_size: int = 1024 * 1024 * 1024  # 1GB
-    allowed_formats: list = [".pt", ".pth", ".onnx", ".yaml"]
-
-class ServiceConfig(BaseModel):
-    """服务配置"""
-    host: str = "0.0.0.0"
-    port: int = 8004
-
-class LoggingConfig(BaseModel):
-    """日志配置"""
-    level: str = "INFO"
-    format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-
-class AnalysisConfig(BaseModel):
-    """分析配置"""
-    confidence: float = 0.5
-    iou: float = 0.45
-    max_det: int = 300
-    device: str = "auto"
-
-class OutputConfig(BaseModel):
-    """输出配置"""
-    save_dir: str = "results"
-    save_img: bool = True
-    save_txt: bool = False
-
-class ServicesConfig(BaseModel):
-    """服务配置组"""
-    model: Dict[str, Any]
-    analysis: Dict[str, Any]
-    api: Dict[str, Any]
-
-class AppSettings(BaseModel):
-    """应用配置"""
-    title: str = "Cloud Service"
-    version: str = "1.0.0"
-    description: str = "云服务"
-    base_url: str = "http://cloud-service:8004"
-
-class CloudSettings(BaseSettings):
+class CloudServiceConfig(BaseSettings):
     """云服务配置"""
     
-    PROJECT_NAME: str = "MeekYolo Service"
-    VERSION: str = "1.0.0"
-    
-    # 服务配置
-    SERVICE: ServiceConfig = ServiceConfig()
-    SERVICES: Optional[ServicesConfig] = None
-    
-    # 存储配置
-    STORAGE: StorageConfig = StorageConfig()
-    
-    # 数据库配置
-    DATABASE: DatabaseConfig = DatabaseConfig()
-    
-    # 日志配置
-    LOGGING: Optional[LoggingConfig] = None
-    
-    # 分析配置
-    ANALYSIS: Optional[AnalysisConfig] = None
-    
-    # 输出配置
-    OUTPUT: Optional[OutputConfig] = None
-    
-    # 应用配置 - 使用默认值
-    APP: AppSettings = AppSettings()
+    # 基础信息
     PROJECT_NAME: str = "MeekYolo Cloud Service"
     VERSION: str = "1.0.0"
+    
+    # 存储配置
+    class StorageConfig(BaseModel):
+        base_dir: str = "models"
+        max_size: int = 1024 * 1024 * 1024  # 1GB
+        allowed_formats: List[str] = [".pt", ".pth", ".onnx", ".yaml"]
+    
+    # 数据库配置
+    class DatabaseConfig(BaseModel):
+        url: str = "sqlite:///data/cloud_market.db"
+    
+    # 服务配置
+    class ServiceConfig(BaseModel):
+        host: str = "0.0.0.0"
+        port: int = 8004
+    
+    # 日志配置
+    class LoggingConfig(BaseModel):
+        level: str = "INFO"
+        format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    
+    # 配置项
+    SERVICE: ServiceConfig = ServiceConfig()
+    STORAGE: StorageConfig = StorageConfig()
+    DATABASE: DatabaseConfig = DatabaseConfig()
+    LOGGING: LoggingConfig = LoggingConfig()
     
     class Config:
         env_file = ".env"
         case_sensitive = True
-        extra = "allow"  # 允许额外字段
-
+        # 允许额外字段
+        extra = "ignore"  # 忽略配置文件中的额外字段
+    
+    def get_model_dir(self, model_code: str) -> str:
+        """获取模型目录"""
+        base_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            self.STORAGE.base_dir
+        )
+        return os.path.join(base_dir, model_code)
+    
     @classmethod
-    def load_from_yaml(cls):
-        """从YAML文件加载配置"""
-        # 获取配置文件路径
-        config_path = os.getenv("CONFIG_PATH", "config/config.yaml")
+    def load_config(cls) -> "CloudServiceConfig":
+        """加载配置"""
+        # 加载配置
+        config = {}
         
-        # 读取配置文件
+        # 从配置文件加载
+        config_path = os.getenv("CONFIG_PATH", "cloud_service/config/config.yaml")
         if os.path.exists(config_path):
             with open(config_path, "r", encoding="utf-8") as f:
-                config_dict = yaml.safe_load(f)
-                return cls(**config_dict)
-        return cls()
+                config.update(yaml.safe_load(f))
+        
+        return cls(**config)
 
-# 导出配置实例
-settings = CloudSettings.load_from_yaml() 
+# 加载配置
+try:
+    settings = CloudServiceConfig.load_config()
+except Exception as e:
+    import logging
+    logging.error(f"Failed to load config: {str(e)}")
+    raise

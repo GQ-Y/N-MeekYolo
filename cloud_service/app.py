@@ -1,30 +1,35 @@
 """
 应用主程序
 """
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from cloud_service.core.config import settings
-from cloud_service.services.database import init_db
-from cloud_service.routers import model, key
-from shared.utils.logger import setup_logger
+import sys
+import logging
+
+# 设置基本日志
+logging.basicConfig(level=logging.DEBUG, 
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                   stream=sys.stdout)
+
+logger = logging.getLogger(__name__)
+logger.debug("Starting application...")
+
+try:
+    from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
+    from cloud_service.core.config import settings
+    from cloud_service.services.database import init_db
+    from cloud_service.routers import model, key
+    from cloud_service.utils.logger import setup_logger
+except Exception as e:
+    logger.exception("Failed to import required modules")
+    sys.exit(1)
 
 logger = setup_logger(__name__)
 
 # 创建应用
 app = FastAPI(
-    title="MeekYolo Cloud Service",
-    description="""
-    云服务
-    
-    提供以下功能:
-    - 密钥管理
-    - 模型管理
-    - 云端存储
-    """,
-    version="1.0.0",
-    # 移除或注释掉这两行
-    # docs_url=None,
-    # redoc_url=None
+    title=settings.PROJECT_NAME,
+    version=settings.VERSION,
+    description="云服务"
 )
 
 # 添加CORS中间件

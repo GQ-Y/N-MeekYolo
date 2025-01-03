@@ -1,8 +1,8 @@
 """
-分析服务配置
+网关服务配置
 """
 from pydantic_settings import BaseSettings
-from typing import Dict, Any, List
+from typing import Dict, Any
 from pydantic import BaseModel
 import os
 import yaml
@@ -10,57 +10,54 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-class AnalysisServiceConfig(BaseSettings):
-    """分析服务配置"""
+class GatewayServiceConfig(BaseSettings):
+    """网关服务配置"""
     
     # 基础信息
-    PROJECT_NAME: str = "MeekYolo Analysis Service"
+    PROJECT_NAME: str = "MeekYolo Gateway"
     VERSION: str = "1.0.0"
     
     # 服务配置
     class ServiceConfig(BaseModel):
         host: str = "0.0.0.0"
-        port: int = 8002
+        port: int = 8000
     
-    # 模型服务配置
-    class ModelServiceConfig(BaseModel):
-        url: str = "http://localhost:8003"  # 模型服务地址
-        api_prefix: str = "/api/v1"         # API前缀
+    # 服务发现配置
+    class DiscoveryConfig(BaseModel):
+        interval: int = 30  # 服务发现间隔(秒)
+        timeout: int = 5    # 请求超时时间(秒)
+        retry: int = 3      # 重试次数
     
-    # 分析配置
-    class AnalysisConfig(BaseModel):
-        confidence: float = 0.8     # 置信度阈值
-        iou: float = 0.45          # IOU阈值
-        max_det: int = 300         # 最大检测数量
-        device: str = "auto"       # 设备选择 (auto/cpu/cuda)
-    
-    # 存储配置
-    class StorageConfig(BaseModel):
-        base_dir: str = "data"
-        model_dir: str = "models"
-        temp_dir: str = "temp"
-        max_size: int = 1024 * 1024 * 1024  # 1GB
-    
-    # 输出配置
-    class OutputConfig(BaseModel):
-        save_dir: str = "results"    # 结果保存目录
-        save_txt: bool = False       # 是否保存文本结果
-        save_img: bool = True        # 是否保存图片结果
-        return_base64: bool = True   # 是否返回base64图片
+    # 服务列表配置
+    class ServicesConfig(BaseModel):
+        api: Dict[str, Any] = {
+            "url": "http://localhost:8001",
+            "description": "API服务"
+        }
+        analysis: Dict[str, Any] = {
+            "url": "http://localhost:8002",
+            "description": "分析服务"
+        }
+        model: Dict[str, Any] = {
+            "url": "http://localhost:8003",
+            "description": "模型服务"
+        }
+        cloud: Dict[str, Any] = {
+            "url": "http://localhost:8004",
+            "description": "云服务"
+        }
     
     # 配置项
     SERVICE: ServiceConfig = ServiceConfig()
-    MODEL_SERVICE: ModelServiceConfig = ModelServiceConfig()
-    ANALYSIS: AnalysisConfig = AnalysisConfig()
-    STORAGE: StorageConfig = StorageConfig()
-    OUTPUT: OutputConfig = OutputConfig()
+    DISCOVERY: DiscoveryConfig = DiscoveryConfig()
+    SERVICES: ServicesConfig = ServicesConfig()
     
     class Config:
         env_file = ".env"
         case_sensitive = True
     
     @classmethod
-    def load_config(cls) -> "AnalysisServiceConfig":
+    def load_config(cls) -> "GatewayServiceConfig":
         """加载配置"""
         try:
             config = {}
@@ -69,7 +66,8 @@ class AnalysisServiceConfig(BaseSettings):
             if "CONFIG_PATH" in os.environ:
                 config_path = os.environ["CONFIG_PATH"]
             else:
-                current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                # 使用项目根目录的配置文件
+                current_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
                 config_path = os.path.join(current_dir, "config", "config.yaml")
             
             logger.debug(f"Loading config from: {config_path}")
@@ -89,7 +87,7 @@ class AnalysisServiceConfig(BaseSettings):
 
 # 加载配置
 try:
-    settings = AnalysisServiceConfig.load_config()
+    settings = GatewayServiceConfig.load_config()
     logger.debug(f"Settings loaded successfully: {settings}")
 except Exception as e:
     logger.error(f"Failed to load config: {str(e)}")

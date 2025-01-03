@@ -13,7 +13,12 @@ class CloudClient:
     """云市场客户端"""
     
     def __init__(self):
-        self.base_url = settings.MARKET.base_url
+        self.base_url = settings.CLOUD.url
+        self.api_prefix = settings.CLOUD.api_prefix
+    
+    def _get_api_url(self, path: str) -> str:
+        """获取完整的API URL"""
+        return f"{self.base_url}{self.api_prefix}{path}"
     
     async def create_key(self, data: dict) -> dict:
         """
@@ -28,7 +33,7 @@ class CloudClient:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{self.base_url}/api/v1/keys",
+                    self._get_api_url("/keys"),
                     json=data
                 )
                 response.raise_for_status()
