@@ -147,37 +147,40 @@ class ServiceRegistry:
             logger.info("Starting service discovery...")
             # 扫描常用端口查找服务
             ports = [8001, 8002, 8003, 8004]
-            for port in ports:
-                url = f"http://localhost:{port}"
-                try:
-                    logger.debug(f"Checking service at {url}")
-                    is_healthy = await self.discovery.check_service_health(url)
-                    if is_healthy:
-                        logger.info(f"Found healthy service at {url}")
-                        # 获取服务信息
-                        info = await self.discovery.get_service_info(url)
-                        # 添加详细日志
-                        logger.info(f"Service info from {url}:")
-                        logger.info(f"  - Name: {info.name if info else 'None'}")
-                        logger.info(f"  - URL: {info.url if info else 'None'}")
-                        logger.info(f"  - Description: {info.description if info else 'None'}")
-                        logger.info(f"  - Status: {info.status if info else 'None'}")
-                        logger.info(f"  - Started at: {info.started_at if info else 'None'}")
-                        logger.info(f"  - Raw response: {info}")
-                        
-                        if info and info.name not in self.services:
-                            logger.info(f"Registering new service: {info.name} at {url}")
-                            await self.register_service(info)
-                        elif not info:
-                            logger.warning(f"Got empty service info from {url}")
-                        elif info.name in self.services:
-                            logger.info(f"Service {info.name} already registered")
-                    else:
-                        logger.warning(f"Service at {url} is not healthy")
-                except Exception as e:
-                    logger.error(f"Error checking service at {url}: {str(e)}")
-                    logger.exception("Full traceback:")
-                    continue
+            hosts = ["analysis-service", "api-service", "model-service", "cloud-service"]
+            
+            for host in hosts:
+                for port in ports:
+                    url = f"http://{host}:{port}"
+                    try:
+                        logger.debug(f"Checking service at {url}")
+                        is_healthy = await self.discovery.check_service_health(url)
+                        if is_healthy:
+                            logger.info(f"Found healthy service at {url}")
+                            # 获取服务信息
+                            info = await self.discovery.get_service_info(url)
+                            # 添加详细日志
+                            logger.info(f"Service info from {url}:")
+                            logger.info(f"  - Name: {info.name if info else 'None'}")
+                            logger.info(f"  - URL: {info.url if info else 'None'}")
+                            logger.info(f"  - Description: {info.description if info else 'None'}")
+                            logger.info(f"  - Status: {info.status if info else 'None'}")
+                            logger.info(f"  - Started at: {info.started_at if info else 'None'}")
+                            logger.info(f"  - Raw response: {info}")
+                            
+                            if info and info.name not in self.services:
+                                logger.info(f"Registering new service: {info.name} at {url}")
+                                await self.register_service(info)
+                            elif not info:
+                                logger.warning(f"Got empty service info from {url}")
+                            elif info.name in self.services:
+                                logger.info(f"Service {info.name} already registered")
+                        else:
+                            logger.warning(f"Service at {url} is not healthy")
+                    except Exception as e:
+                        logger.error(f"Error checking service at {url}: {str(e)}")
+                        logger.exception("Full traceback:")
+                        continue
                     
             self._last_discovery = datetime.now()
             logger.info("Service discovery completed")

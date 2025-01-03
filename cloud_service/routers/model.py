@@ -217,13 +217,25 @@ async def download_model(
     if not model.status:
         raise HTTPException(status_code=403, detail="Model is not available")
     
-    file_path = model.file_path
+    # 构建完整的文件路径 - 包含模型代码子目录
+    base_dir = os.path.join("/app", "models")
+    model_dir = os.path.join(base_dir, code)  # 添加模型代码作为子目录
+    file_name = f"{code}.zip"
+    file_path = os.path.join(model_dir, file_name)
+    
+    print(f"Model code: {code}")                         # 打印模型代码
+    print(f"Model file_path from DB: {model.file_path}") # 打印数据库中的路径
+    print(f"Base directory: {base_dir}")                 # 打印基础目录
+    print(f"Model directory: {model_dir}")              # 打印模型目录
+    print(f"File name: {file_name}")                    # 打印文件名
+    print(f"Full file path: {file_path}")               # 打印完整文件路径
+    print(f"File exists: {os.path.exists(file_path)}")  # 打印文件是否存在
+    
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Model file not found")
     
     # 获取文件信息
     file_size = os.path.getsize(file_path)
-    file_name = f"{model.code}.zip"
     
     # 处理断点续传
     if range:

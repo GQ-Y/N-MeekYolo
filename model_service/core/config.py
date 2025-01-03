@@ -11,7 +11,7 @@ class DatabaseConfig(BaseModel):
 
 class MarketConfig(BaseModel):
     """市场配置"""
-    base_url: str = "http://localhost:8004"
+    base_url: str = "http://cloud-service:8004"
 
 class Settings(BaseSettings):
     """配置"""

@@ -14,7 +14,7 @@ class ServiceConfig(BaseModel):
 class ServicesConfig(BaseModel):
     """所有服务配置"""
     model: ServiceConfig = ServiceConfig(
-        host="localhost",
+        host="analysis_service",
         port=8003
     )
     analysis: ServiceConfig

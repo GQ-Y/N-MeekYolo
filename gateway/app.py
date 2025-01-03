@@ -48,9 +48,6 @@ app = FastAPI(
     redoc_url=None
 )
 
-# 挂载静态文件
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
 # 添加CORS中间件
 app.add_middleware(
     CORSMiddleware,

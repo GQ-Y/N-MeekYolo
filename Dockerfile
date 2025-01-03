@@ -91,7 +91,7 @@ WORKDIR /app
 
 # 复制项目文件和默认配置
 COPY . .
-COPY config/default_config.yaml /app/config/default_config.yaml
+COPY config/config.yaml /app/config/config.yaml
 
 # 安装Python依赖
 RUN pip install --no-cache-dir -r requirements.txt && \

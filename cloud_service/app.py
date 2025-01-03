@@ -12,11 +12,19 @@ logger = setup_logger(__name__)
 
 # 创建应用
 app = FastAPI(
-    title=settings.APP.title,
-    version=settings.APP.version,
-    description=settings.APP.description,
-    openapi_url="/api/v1/openapi.json",
-    docs_url="/api/v1/docs"
+    title="MeekYolo Cloud Service",
+    description="""
+    云服务
+    
+    提供以下功能:
+    - 密钥管理
+    - 模型管理
+    - 云端存储
+    """,
+    version="1.0.0",
+    # 移除或注释掉这两行
+    # docs_url=None,
+    # redoc_url=None
 )
 
 # 添加CORS中间件

@@ -51,7 +51,7 @@ class AppSettings(BaseModel):
     title: str = "Cloud Service"
     version: str = "1.0.0"
     description: str = "云服务"
-    base_url: str = "http://localhost:8004"
+    base_url: str = "http://cloud-service:8004"
 
 class CloudSettings(BaseSettings):
     """云服务配置"""
