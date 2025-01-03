@@ -143,7 +143,7 @@ async def analyze_stream(
         if not resource_monitor.has_available_resource():
             raise HTTPException(
                 status_code=503,
-                detail="资源不足,请稍后��试"
+                detail="资源不足,请稍后再试"
             )
             
         # 生成一个父任务ID但不创建记录

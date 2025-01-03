@@ -87,7 +87,7 @@ def cleanup_old_data():
         from datetime import datetime, timedelta
         from sqlalchemy import delete
         
-        # 清理30天前���已完成任务
+        # 清理30天前已完成任务
         threshold = datetime.now() - timedelta(days=30)
         
         with engine.connect() as conn:

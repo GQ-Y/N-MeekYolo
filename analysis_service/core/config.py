@@ -25,7 +25,7 @@ class AnalysisSettings(Settings):
     
     # 分析配置
     ANALYSIS: Dict[str, Any] = {
-        "confidence": 0.5,     # 置信度阈值
+        "confidence": 0.8,     # 置信度阈值
         "iou": 0.45,          # IOU阈值
         "max_det": 300,       # 最大检测数量
         "device": "auto"      # 设备选择 (auto/cpu/cuda)

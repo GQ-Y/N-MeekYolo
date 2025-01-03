@@ -343,7 +343,7 @@ class YOLODetector:
                         logger.debug(f"回调数据大小: {len(str(callback_data))}")
                         async with session.post(url, json=callback_data, timeout=5) as response:
                             if response.status == 200:
-                                logger.info(f"���调成功: {url}")
+                                logger.info(f"回调成功: {url}")
                             else:
                                 logger.warning(f"回调失败: {url}, 状态码: {response.status}")
                     except asyncio.TimeoutError:
@@ -487,7 +487,7 @@ class YOLODetector:
                                     callback_data["parent_task_id"] = parent_task_id
                                     
                                 # 发送回调前检查数据
-                                logger.debug(f"回调数据包含的��: {list(callback_data.keys())}")
+                                logger.debug(f"回调数据包含的: {list(callback_data.keys())}")
                                 logger.debug(f"回调数据中的base64图片长度: {len(callback_data['result_image']['data'])}")
                                 
                                 # 发送回调
@@ -523,7 +523,7 @@ class YOLODetector:
         try:
             if task_id in self.stop_flags:
                 self.stop_flags[task_id] = True
-                logger.info(f"发送���止信号到任务 {task_id}")
+                logger.info(f"发送停止信号到任务 {task_id}")
                 return {
                     "task_id": task_id,
                     "status": "stopping",
@@ -539,7 +539,7 @@ class YOLODetector:
         """停止指定任务"""
         try:
             if task_id not in self.stop_flags:
-                logger.warning(f"任�� {task_id} 不存在")
+                logger.warning(f"任务 {task_id} 不存在")
                 return False
             
             # 设置停止志
