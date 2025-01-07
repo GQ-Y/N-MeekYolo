@@ -1,0 +1,83 @@
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    ports:
+      - "8000:8000"
+    networks:
+      - meekyolo_network
+    depends_on:
+      - api_service
+      - analysis_service
+      - model_service
+      - cloud_service
+    volumes:
+      - ./logs/gateway:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Shanghai
+
+  api_service:
+    build:
+      context: .
+      dockerfile: api_service/Dockerfile
+    ports:
+      - "8001:8001"
+    networks:
+      - meekyolo_network
+    volumes:
+      - ./logs/api_service:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Shanghai
+
+  analysis_service:
+    build:
+      context: .
+      dockerfile: analysis_service/Dockerfile
+    ports:
+      - "8002:8002"
+    networks:
+      - meekyolo_network
+    volumes:
+      - ./logs/analysis_service:/app/logs
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Shanghai
+
+  model_service:
+    build:
+      context: .
+      dockerfile: model_service/Dockerfile
+    ports:
+      - "8003:8003"
+    networks:
+      - meekyolo_network
+    volumes:
+      - ./logs/model_service:/app/logs
+      - ./models:/app/models
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Shanghai
+      - MODEL_PATH=/app/models
+
+  cloud_service:
+    build:
+      context: .
+      dockerfile: cloud_service/Dockerfile
+    ports:
+      - "8004:8004"
+    networks:
+      - meekyolo_network
+    volumes:
+      - ./logs/cloud_service:/app/logs
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Shanghai
+
+networks:
+  meekyolo_network:
+    driver: bridge

@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y \
     libmysqlclient-dev \
     libx264-dev \
     libfaac-dev \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # 设置工作目录
@@ -48,10 +49,10 @@ RUN cd ZLMediaKit && \
     find ../src -name "*.h"
 
 # 第二阶段: Python运行环境
-FROM python:3.9-slim
+FROM python:3.11-slim
 
 # 安装运行时依赖
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl3 \
     libmariadb3 \
     libgl1-mesa-glx \
@@ -59,6 +60,8 @@ RUN apt-get update && apt-get install -y \
     libsm6 \
     libxext6 \
     libxrender-dev \
+    logrotate \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # 创建非root用户
@@ -114,11 +117,14 @@ RUN mkdir -p /home/appuser/ZLMediaKit/release/linux/Release && \
     chown -R appuser:appuser /app/logs && \
     ln -s /usr/local/lib/libmk_api.so /home/appuser/ZLMediaKit/release/linux/Release/libmk_api.so
 
+# 配置日志轮转
+RUN echo "/app/logs/*.log {\n  daily\n  rotate 7\n  compress\n  missingok\n  notifempty\n}" > /etc/logrotate.d/app
+
 # 切换到非root用户
 USER appuser
 
 # 设置Python路径
-ENV PYTHONPATH=/usr/local/lib/python3.9/site-packages:/home/appuser/.local/lib/python3.9/site-packages:$PYTHONPATH
+ENV PYTHONPATH=/usr/local/lib/python3.11/site-packages:/home/appuser/.local/lib/python3.11/site-packages:$PYTHONPATH
 ENV PATH=/home/appuser/.local/bin:$PATH
 
 # 设置环境变量
