@@ -44,7 +44,7 @@ task_model_association = Table(
     Column('model_id', Integer, ForeignKey('models.id'))
 )
 
-# 任务与回调服务的���多关系表
+# 任务与回调服务的多关系表
 task_callback_association = Table(
     'task_callback_association',
     Base.metadata,
@@ -85,7 +85,7 @@ class Stream(Base):
     name = Column(String(100), nullable=False)
     url = Column(String(500), unique=True, nullable=False)
     description = Column(Text, nullable=True)
-    status = Column(String(20), default="inactive")  # inactive, active, error
+    status = Column(Integer, default=0)  # 修改为Integer类型,默认为离线(0)
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

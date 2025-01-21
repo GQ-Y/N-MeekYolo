@@ -3,7 +3,7 @@
 """
 from typing import List, Dict, Optional
 from pydantic import BaseModel, Field
-from enum import Enum
+from enum import Enum, IntEnum
 
 # 分析请求模型
 class AnalysisRequest(BaseModel):
@@ -47,14 +47,10 @@ class StreamCreate(BaseModel):
     description: Optional[str] = Field(None, description="视频源描述")
     group_ids: Optional[List[int]] = Field(None, description="分组ID列表")
 
-class StreamStatus(str, Enum):
-    """视频源状态枚举"""
-    ACTIVE = "active"        # 正在运行
-    INACTIVE = "inactive"    # 未运行
-    ERROR = "error"         # 发生错误
-    CONNECTING = "connecting" # 正在连接
-    DISCONNECTED = "disconnected" # 连接断开
-    PAUSED = "paused"       # 已暂停
+class StreamStatus(IntEnum):
+    """视频源状态"""
+    OFFLINE = 0  # 离线
+    ONLINE = 1   # 在线
 
 class StreamUpdate(BaseModel):
     """更新视频源请求"""

@@ -50,11 +50,20 @@ stream_monitor = StreamMonitor()
 async def startup_event():
     """启动事件"""
     try:
-        # 启动视频源监控
+        # 先初始化数据库
+        logger.info("正在初始化数据库...")
+        from api_service.services.database import init_db
+        init_db()
+        
+        logger.info("正在启动API服务...")
+        
+        # 启动视频源监控服务(不等待初始化完成)
         await stream_monitor.start()
-        logger.info("Stream monitor started successfully")
+        logger.info("视频源监控服务启动成功")
+        
     except Exception as e:
-        logger.error(f"Failed to start stream monitor: {str(e)}")
+        logger.error(f"启动失败: {str(e)}")
+        raise
 
 @app.on_event("shutdown")
 async def shutdown_event():

@@ -4,6 +4,7 @@
 from typing import Dict, Optional, List, Any
 from pydantic import BaseModel, Field
 from datetime import datetime
+from api_service.models.requests import StreamStatus
 
 class BaseResponse(BaseModel):
     """基础响应"""
@@ -29,7 +30,7 @@ class StreamResponse(BaseModel):
     name: str
     url: str
     description: Optional[str] = None
-    status: str = "inactive"
+    status: StreamStatus  # 使用StreamStatus枚举
     error_message: Optional[str] = None
     
     class Config:

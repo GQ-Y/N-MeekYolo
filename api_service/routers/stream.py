@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from api_service.models.requests import StreamCreate, StreamUpdate, StreamStatus
 from api_service.models.responses import BaseResponse, StreamResponse
+from api_service.models.database import Stream  # 添加Stream模型导入
 from api_service.services.stream import StreamService
 from api_service.services.database import get_db
 from shared.utils.logger import setup_logger
@@ -36,71 +37,60 @@ async def create_stream(
             detail=str(e)
         )
 
-@router.get("", response_model=BaseResponse,
-    description="获取视频源列表",
-    responses={
-        200: {
-            "description": "成功获取视频源列表",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "code": 200,
-                        "message": "Success",
-                        "data": {
-                            "total": 1,
-                            "items": [{
-                                "id": 1,
-                                "name": "测试视频源",
-                                "url": "rtsp://example.com/stream",
-                                "description": "测试用视频源",
-                                "status": "active",
-                                "error_message": None
-                            }]
-                        }
-                    }
-                }
-            }
-        }
-    }
-)
+@router.get("", response_model=BaseResponse)
 async def get_streams(
     skip: int = 0,
     limit: int = 100,
-    status: Optional[StreamStatus] = None,
     db: Session = Depends(get_db)
 ):
-    """
-    获取视频源列表
-    
-    可用状态:
-    - active: 正在运行
-    - inactive: 未运行
-    - error: 发生错误
-    - connecting: 正在连接
-    - disconnected: 连接断开
-    - paused: 已暂停
-    """
+    """获取视频源列表"""
     try:
-        streams = stream_service.get_streams(db, skip, limit, status)
+        # 强制刷新会话
+        db.expire_all()
+        
+        # 获取总数
+        total = db.query(Stream).count()
+        
+        # 获取分页数据
+        streams = db.query(Stream).offset(skip).limit(limit).all()
+        
+        # 添加状态验证日志
+        online_count = db.query(Stream).filter(Stream.status == int(StreamStatus.ONLINE)).count()
+        offline_count = db.query(Stream).filter(Stream.status == int(StreamStatus.OFFLINE)).count()
+        
+        logger.info(
+            f"视频源状态统计:\n"
+            f"- 总数: {total}\n"
+            f"- 在线: {online_count}\n"
+            f"- 离线: {offline_count}\n"
+        )
+        
+        # 构造响应数据
+        stream_list = []
+        for stream in streams:
+            stream_data = StreamResponse.from_orm(stream).dict()
+            # 添加单个视频源状态日志
+            logger.debug(
+                f"视频源 {stream.id} ({stream.name}) "
+                f"状态值: {stream.status}, "
+                f"状态: {'在线' if int(stream.status) == int(StreamStatus.ONLINE) else '离线'}"
+            )
+            stream_list.append(stream_data)
+        
         return BaseResponse(
+            code=200,
             message="获取成功",
             data={
-                "total": len(streams),
-                "items": [
-                    {
-                        "id": s.id,
-                        "name": s.name,
-                        "url": s.url,
-                        "description": s.description,
-                        "status": s.status,
-                        "error_message": s.error_message
-                    } for s in streams
-                ]
+                "total": total,
+                "items": stream_list
             }
         )
     except Exception as e:
-        logger.error(f"Get streams failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"获取视频源列表失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 @router.get("/{stream_id}", response_model=BaseResponse)
 async def get_stream(stream_id: int, db: Session = Depends(get_db)):

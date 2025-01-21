@@ -1,7 +1,7 @@
 """
 数据库服务
 """
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 from api_service.core.config import settings
@@ -37,13 +37,29 @@ def init_db():
     """初始化数据库"""
     try:
         # 导入所有模型
-        from api_service.models.database import Base, StreamGroup
+        from api_service.models.database import Base, StreamGroup, Stream
+        from api_service.models.requests import StreamStatus
         
         # 创建表
         Base.metadata.create_all(bind=engine)
         
-        # 创建默认分组
-        with SessionLocal() as db:
+        # 使用显式的事务管理
+        db = SessionLocal()
+        try:
+            # 方案1: 使用ORM API
+            affected = db.query(Stream).update(
+                {Stream.status: StreamStatus.OFFLINE},
+                synchronize_session=False
+            )
+            
+            # 或者方案2: 使用text()包装SQL
+            # result = db.execute(
+            #     text("UPDATE streams SET status = :status"),
+            #     {"status": StreamStatus.OFFLINE}
+            # )
+            # affected = result.rowcount
+            
+            # 创建默认分组
             default_group = db.query(StreamGroup).filter(
                 StreamGroup.name == settings.DEFAULT_GROUP.name
             ).first()
@@ -54,28 +70,48 @@ def init_db():
                     description=settings.DEFAULT_GROUP.description
                 )
                 db.add(default_group)
-                try:
-                    db.commit()
-                    logger.info(f"Created default stream group: {default_group.name}")
-                except Exception as e:
-                    db.rollback()
-                    logger.error(f"Failed to create default group: {str(e)}")
-            else:
-                logger.info("Default stream group already exists")
-        
-        logger.info(f"Database initialized at: {DB_PATH}")
+            
+            # 提交事务
+            db.commit()
+            
+            # 验证状态
+            online_count = db.query(Stream).filter(
+                Stream.status == StreamStatus.ONLINE
+            ).count()
+            
+            if online_count > 0:
+                logger.warning(f"发现 {online_count} 个视频源状态未被重置为离线")
+                # 再次尝试重置
+                db.query(Stream).update(
+                    {Stream.status: StreamStatus.OFFLINE},
+                    synchronize_session=False
+                )
+                db.commit()
+            
+            logger.info(f"数据库初始化完成, 重置了 {affected} 个视频源状态")
+            
+        except Exception as e:
+            db.rollback()
+            logger.error(f"数据库初始化失败: {str(e)}")
+            raise
+        finally:
+            db.close()
+            
+        logger.info(f"数据库已初始化: {DB_PATH}")
         
     except Exception as e:
-        logger.error(f"Failed to initialize database: {str(e)}", exc_info=True)
+        logger.error(f"数据库初始化失败: {str(e)}")
         raise
 
 def get_db():
     """获取数据库会话"""
     db = SessionLocal()
     try:
+        # 设置会话选项
+        db.expire_on_commit = True  # 提交后过期缓存
         yield db
     finally:
         db.close()
 
-# 在模块导入时初始化数据库
-init_db() 
+# 移除自动初始化
+# init_db()
