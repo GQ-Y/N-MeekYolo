@@ -2,7 +2,7 @@
 任务队列管理
 """
 import asyncio
-from typing import Optional
+from typing import Optional, Tuple
 from datetime import datetime, timedelta
 import uuid
 from sqlalchemy.orm import Session
@@ -87,7 +87,16 @@ class TaskQueueManager:
         except Exception as e:
             logger.error(f"Task recovery failed: {str(e)}")
             
-    async def add_task(self, task: Task, parent_task_id: str = None) -> TaskQueue:
+    async def add_task(
+        self, 
+        task: Task,
+        parent_task_id: str = None,
+        analyze_interval: int = None,
+        alarm_interval: int = None,
+        random_interval: Tuple[int, int] = None,
+        confidence_threshold: float = None,
+        push_interval: int = None
+    ) -> TaskQueue:
         """添加并立即执行任务"""
         # 检查资源
         if not self.resource_monitor.has_available_resource():
@@ -111,11 +120,18 @@ class TaskQueueManager:
             
         # 立即启动任务
         if self.is_running:  # 只有在管理器运行时才启动新任务
-            asyncio.create_task(self._process_task(queue_task))
+            asyncio.create_task(self._process_task(
+                queue_task,
+                analyze_interval=analyze_interval,
+                alarm_interval=alarm_interval,
+                random_interval=random_interval,
+                confidence_threshold=confidence_threshold,
+                push_interval=push_interval
+            ))
         
         return queue_task
         
-    async def _process_task(self, queue_task: TaskQueue):
+    async def _process_task(self, queue_task: TaskQueue, analyze_interval: int = None, alarm_interval: int = None, random_interval: Tuple[int, int] = None, confidence_threshold: float = None, push_interval: int = None):
         """处理单个任务"""
         task_id = None
         try:
@@ -150,8 +166,13 @@ class TaskQueueManager:
             await self.detector.start_stream_analysis(
                 task_id=task_id,
                 stream_url=task.stream_url,
+                model_code=task.model_code,
                 callback_urls=task.callback_urls,
-                parent_task_id=queue_task.parent_task_id
+                analyze_interval=analyze_interval,
+                alarm_interval=alarm_interval,
+                random_interval=random_interval,
+                confidence_threshold=confidence_threshold,
+                push_interval=push_interval
             )
             
             # 更新状态

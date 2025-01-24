@@ -18,6 +18,12 @@ ANALYSIS:
   iou: 0.45
   max_det: 300
   device: "auto"
+  
+  # 新增配置
+  analyze_interval: 1  # 默认分析间隔
+  alarm_interval: 60   # 默认报警间隔
+  random_interval: [0, 0]  # 默认随机间隔范围
+  push_interval: 5     # 默认推送间隔
 
 # 存储配置
 STORAGE:

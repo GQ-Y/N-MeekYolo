@@ -10,7 +10,7 @@ import numpy as np
 import aiohttp
 import torch
 from ultralytics import YOLO
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Tuple
 from shared.utils.logger import setup_logger
 from analysis_service.core.config import settings
 import time
@@ -18,6 +18,7 @@ import asyncio
 from analysis_service.services.database import get_db
 from analysis_service.crud import task as task_crud
 from PIL import Image, ImageDraw, ImageFont
+import random
 
 logger = setup_logger(__name__)
 
@@ -73,6 +74,8 @@ class YOLODetector:
             try:
                 async with aiohttp.ClientSession() as session:
                     url = self._get_api_url(f"/models/{model_code}/download")
+                    logger.info(f"Trying to download model from: {url}")
+                    
                     async with session.get(url) as response:
                         if response.status == 200:
                             # 确保目录存在
@@ -83,7 +86,10 @@ class YOLODetector:
                             logger.info(f"Downloaded model to: {model_path}")
                             return str(model_path)
                         else:
-                            raise Exception(f"Failed to download model: {response.status}")
+                            error_msg = f"Failed to download model: {response.status}"
+                            if response.status == 404:
+                                error_msg = f"Model {model_code} not found on server (URL: {url})"
+                            raise Exception(error_msg)
             except Exception as e:
                 logger.error(f"Failed to download model: {str(e)}")
                 raise
@@ -242,57 +248,38 @@ class YOLODetector:
             return None
 
     async def detect(self, image) -> List[Dict[str, Any]]:
-        """
-        执行检测
-        
-        Args:
-            image: OpenCV格式的图像(BGR)
-            
-        Returns:
-            List[Dict]: 检测结果列表，每个结果包含:
-                - bbox: [x1, y1, x2, y2]
-                - confidence: float
-                - class_id: int
-                - class_name: str
-        """
+        """执行检测"""
         try:
             if self.model is None:
-                # 如果模型未加载，使用默认模型
-                await self.load_model("default")
+                # 如果模型未加载，使用请求中指定的模型代码
+                model_code = self.current_model_code
+                if not model_code:
+                    raise Exception("No model code specified")
+                await self.load_model(model_code)
             
-            # 执行推理
+            # 执行推理 - 修改这里的配置访问方式
             results = self.model(
                 image,
-                conf=settings.ANALYSIS["confidence"],
-                iou=settings.ANALYSIS["iou"],
-                max_det=settings.ANALYSIS["max_det"]
+                conf=settings.ANALYSIS.confidence,  # 使用点号访问
+                iou=settings.ANALYSIS.iou,         # 使用点号访问
+                max_det=settings.ANALYSIS.max_det  # 使用点号访问
             )
             
-            # 处理结果
+            # 处理检测结果
             detections = []
             for result in results:
                 boxes = result.boxes
                 for box in boxes:
-                    # 获取边界框坐标
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    
-                    # 获取类别信息
-                    class_id = int(box.cls[0].item())
-                    class_name = result.names[class_id]
-                    
-                    # 获取置信度
-                    confidence = float(box.conf[0].item())
+                    bbox = box.xyxy[0].cpu().numpy()
+                    conf = float(box.conf[0])
+                    cls = int(box.cls[0])
+                    name = result.names[cls]
                     
                     detections.append({
-                        "bbox": {
-                            "x1": int(x1),
-                            "y1": int(y1),
-                            "x2": int(x2),
-                            "y2": int(y2)
-                        },
-                        "confidence": confidence,
-                        "class_id": class_id,
-                        "class_name": class_name
+                        "bbox": bbox.tolist(),
+                        "confidence": conf,
+                        "class_id": cls,
+                        "class_name": name
                     })
             
             return detections
@@ -395,20 +382,50 @@ class YOLODetector:
         self,
         task_id: str,
         stream_url: str,
+        model_code: str,
         callback_urls: Optional[str] = None,
-        parent_task_id: Optional[str] = None
+        parent_task_id: Optional[str] = None,
+        analyze_interval: int = 1,
+        alarm_interval: int = 60,
+        random_interval: Tuple[int, int] = (0, 0),
+        confidence_threshold: float = 0.8,
+        push_interval: int = 5
     ):
         """启动流分析任务"""
+        cap = None  # 初始化cap变量
         try:
+            # 设置当前模型代码
+            self.current_model_code = model_code
+            
             # 初始化停止标志
             self.stop_flags[task_id] = False
+            
+            # 确保模型已加载
+            await self.load_model(model_code)
             
             # 打开视频流
             cap = cv2.VideoCapture(stream_url)
             if not cap.isOpened():
                 raise Exception(f"Cannot open stream: {stream_url}")
             
+            # 初始化时间记录
+            last_analyze_time = 0
+            last_alarm_time = 0
+            last_push_time = 0
+            
             while not self.stop_flags.get(task_id, False):
+                current_time = time.time()
+                
+                # 检查分析间隔
+                if current_time - last_analyze_time < analyze_interval:
+                    await asyncio.sleep(0.1)
+                    continue
+                
+                # 添加随机延迟
+                if random_interval[1] > random_interval[0]:
+                    delay = random.uniform(random_interval[0], random_interval[1])
+                    await asyncio.sleep(delay)
+                
                 ret, frame = cap.read()
                 if not ret:
                     logger.warning("Failed to read frame")
@@ -420,69 +437,31 @@ class YOLODetector:
                     # 执行检测
                     detections = await self.detect(frame)
                     
-                    # 只在检测到目标时发送回调
-                    if detections and callback_urls:
-                        try:
-                            # 先生成带有检测框的图片
-                            result_frame = await self._encode_result_image(frame, detections, return_image=True)
-                            if result_frame is not None:
-                                # 将结果图片编码为base64
-                                try:
-                                    _, buffer = cv2.imencode('.jpg', result_frame)
-                                    if buffer is None:
-                                        raise Exception("图片编码失败")
-                                    base64_image = base64.b64encode(buffer).decode('utf-8')
-                                    logger.debug(f"成功生成base64图片，长度: {len(base64_image)}")
-                                except Exception as e:
-                                    logger.error(f"图片编码为base64失败: {str(e)}", exc_info=True)
-                                    continue
-                                
-                                # 构建回调数据
-                                callback_data = {
-                                    "task_id": task_id,
-                                    "status": "processing",
-                                    "detections": detections,
-                                    "timestamp": time.time(),
-                                    "result_image": {
-                                        "format": "base64",
-                                        "data": base64_image
-                                    }
-                                }
-                                
-                                # 如果需要保存图片
-                                if settings.OUTPUT.get("save_img", False):
-                                    try:
-                                        save_dir = Path(settings.OUTPUT["save_dir"])
-                                        save_dir.mkdir(parents=True, exist_ok=True)
-                                        
-                                        timestamp = int(time.time() * 1000)
-                                        filename = f"{task_id}_{timestamp}.jpg"
-                                        file_path = save_dir / filename
-                                        
-                                        cv2.imwrite(str(file_path), result_frame)
-                                        callback_data["result_image_url"] = str(file_path)
-                                        logger.debug(f"已保存图片到: {file_path}")
-                                    except Exception as e:
-                                        logger.error(f"保存图片失败: {str(e)}", exc_info=True)
-                                
-                                # 添加父任务ID
-                                if parent_task_id:
-                                    callback_data["parent_task_id"] = parent_task_id
-                                    
-                                # 发送回调前检查数据
-                                logger.debug(f"回调数据包含的: {list(callback_data.keys())}")
-                                logger.debug(f"回调数据中的base64图片长度: {len(callback_data['result_image']['data'])}")
+                    # 过滤低置信度目标
+                    detections = [d for d in detections if d["confidence"] >= confidence_threshold]
+                    
+                    if detections:
+                        # 检查报警间隔
+                        if current_time - last_alarm_time >= alarm_interval:
+                            last_alarm_time = current_time
+                            
+                            # 检查推送间隔
+                            if current_time - last_push_time >= push_interval:
+                                last_push_time = current_time
                                 
                                 # 发送回调
-                                await self._send_callbacks(callback_urls, callback_data)
-                                
-                        except Exception as e:
-                            logger.error(f"处理回调数据失败: {str(e)}", exc_info=True)
+                                await self._send_callbacks(callback_urls, {
+                                    "task_id": task_id,
+                                    "parent_task_id": parent_task_id,
+                                    "detections": detections,
+                                    "timestamp": current_time
+                                })
                 
                 except Exception as e:
                     logger.error(f"Frame processing error: {str(e)}")
                     continue
                 
+                last_analyze_time = current_time
                 await asyncio.sleep(0.01)
                 
         except Exception as e:
@@ -490,7 +469,7 @@ class YOLODetector:
             raise
             
         finally:
-            if cap:
+            if cap is not None:  # 检查cap是否已初始化
                 cap.release()
 
     async def stop_stream_analysis(self, task_id: str) -> Dict[str, Any]:

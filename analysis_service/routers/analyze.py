@@ -17,7 +17,7 @@ from analysis_service.models.responses import (
     SubTaskInfo,
     StreamBatchResponse
 )
-from analysis_service.models.requests import StreamTask
+from analysis_service.models.requests import StreamTask, StreamAnalysisRequest
 from shared.utils.logger import setup_logger
 from analysis_service.services.database import get_db_dependency
 from analysis_service.crud import task as task_crud
@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 import uuid
 from analysis_service.models.database import TaskQueue, Task  # 添加导入
 from sqlalchemy import or_
+from analysis_service.core.config import settings
 
 logger = setup_logger(__name__)
 
@@ -57,45 +58,6 @@ class VideoAnalysisRequest(BaseModel):
     model_code: str
     video_url: str
     callback_urls: str = None
-
-class StreamAnalysisRequest(BaseModel):
-    """流分析请求"""
-    tasks: List[StreamTask] = Field(
-        ...,
-        description="任务列表",
-        min_items=1
-    )
-    callback_urls: Optional[str] = Field(
-        None,
-        description="回调地址,多个用逗号分隔",
-        example="http://callback1,http://callback2"
-    )
-    callback_interval: int = Field(
-        1,
-        description="回调间隔(秒)",
-        ge=1
-    )
-
-    model_config = {
-        "json_schema_extra": {
-            "examples": [
-                {
-                    "callback_interval": 1,
-                    "callback_urls": "http://127.0.0.1:8081,http://192.168.1.1:8081",
-                    "tasks": [
-                        {
-                            "model_code": "model-gcc",
-                            "stream_url": "rtsp://example.com/stream1"
-                        },
-                        {
-                            "model_code": "model-gcc", 
-                            "stream_url": "rtsp://example.com/stream2"
-                        }
-                    ]
-                }
-            ]
-        }
-    }
 
 @router.post("/image", response_model=ImageAnalysisResponse)
 async def analyze_image(request: ImageAnalysisRequest):
@@ -137,7 +99,15 @@ async def analyze_stream(
     queue: TaskQueueManager = Depends(get_task_queue),
     db: Session = Depends(get_db_dependency)
 ) -> StreamResponse:
-    """处理流分析请求"""
+    """处理流分析请求
+    
+    参数:
+        - analyze_interval: 分析间隔(秒)
+        - alarm_interval: 报警间隔(秒)
+        - random_interval: 随机间隔范围(秒)
+        - confidence_threshold: 目标置信度阈值
+        - push_interval: 推送间隔(秒)
+    """
     try:
         # 检查资源是否足够
         if not resource_monitor.has_available_resource():
@@ -146,8 +116,22 @@ async def analyze_stream(
                 detail="资源不足,请稍后再试"
             )
             
-        # 生成一个父任务ID但不创建记录
+        # 生成父任务ID
         parent_task_id = str(uuid.uuid4())
+        
+        # 从配置获取默认值
+        default_analyze_interval = settings.ANALYSIS.analyze_interval
+        default_alarm_interval = settings.ANALYSIS.alarm_interval
+        default_random_interval = tuple(settings.ANALYSIS.random_interval)
+        default_confidence = settings.ANALYSIS.confidence
+        default_push_interval = settings.ANALYSIS.push_interval
+        
+        # 使用请求参数覆盖默认值
+        analyze_interval = request.analyze_interval or default_analyze_interval
+        alarm_interval = request.alarm_interval or default_alarm_interval
+        random_interval = request.random_interval or default_random_interval
+        confidence_threshold = request.confidence_threshold or default_confidence
+        push_interval = request.push_interval or default_push_interval
         
         # 创建子任务
         sub_tasks = []
@@ -164,10 +148,15 @@ async def analyze_stream(
             )
             sub_tasks.append(sub_task)
             
-            # 将任务加入队列，使用生成的父任务ID
+            # 将任务加入队列,传递所有参数
             queue_task = await queue.add_task(
                 task=sub_task,
-                parent_task_id=parent_task_id
+                parent_task_id=parent_task_id,
+                analyze_interval=analyze_interval,
+                alarm_interval=alarm_interval,
+                random_interval=random_interval,
+                confidence_threshold=confidence_threshold,
+                push_interval=push_interval
             )
             queue_tasks.append(queue_task)
             
@@ -175,7 +164,7 @@ async def analyze_stream(
         sub_task_infos = [
             SubTaskInfo(
                 task_id=qt.id,
-                status=0,  # 使用数字状态: 0 表示等待中
+                status=0,
                 stream_url=st.stream_url,
                 output_url=st.output_url
             )

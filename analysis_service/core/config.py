@@ -33,6 +33,12 @@ class AnalysisServiceConfig(BaseSettings):
         iou: float = 0.45          # IOU阈值
         max_det: int = 300         # 最大检测数量
         device: str = "auto"       # 设备选择 (auto/cpu/cuda)
+        
+        # 新增配置项
+        analyze_interval: int = 1   # 分析间隔(秒)
+        alarm_interval: int = 60    # 报警间隔(秒)
+        random_interval: List[int] = [0, 0]  # 随机间隔范围(秒)
+        push_interval: int = 5      # 推送间隔(秒)
     
     # 存储配置
     class StorageConfig(BaseModel):
