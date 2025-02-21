@@ -10,6 +10,7 @@ from model_service.core.config import settings
 from model_service.services.cloud_client import CloudClient
 from model_service.services.base import get_api_key
 from shared.utils.logger import setup_logger
+from model_service.models.models import ModelInfo
 
 logger = setup_logger(__name__)
 
@@ -150,4 +151,20 @@ class ModelService:
             if os.path.exists(model_dir):
                 shutil.rmtree(model_dir)
             logger.error(f"Failed to sync model {model_code}: {str(e)}")
+            raise
+
+    async def get_model_by_code(self, db: Session, code: str):
+        """通过代码获取模型"""
+        try:
+            # 从数据库中获取模型信息
+            model = db.query(ModelInfo).filter(ModelInfo.code == code).first()
+            if not model:
+                logger.error(f"Model {code} not found in database")
+                return None
+            
+            logger.info(f"Found model: {model.code}")
+            return model
+            
+        except Exception as e:
+            logger.error(f"Failed to get model by code: {str(e)}")
             raise

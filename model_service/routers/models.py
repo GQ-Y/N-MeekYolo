@@ -3,6 +3,7 @@
 处理模型管理相关的请求
 """
 from fastapi import APIRouter, File, UploadFile, Form, HTTPException, Depends
+from fastapi.responses import FileResponse
 from typing import List, Dict, Any
 from sqlalchemy.orm import Session
 from shared.utils.logger import setup_logger
@@ -11,6 +12,8 @@ from model_service.models.schemas import BaseResponse, ModelResponse, ModelListR
 from model_service.manager.model_manager import ModelManager
 from model_service.services.model import ModelService
 from model_service.services.database import get_db
+import os
+from model_service.core.config import settings
 
 logger = setup_logger(__name__)
 router = APIRouter()
@@ -106,4 +109,32 @@ async def sync_model(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to sync model: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/{code}/download", response_class=FileResponse)
+async def download_model(
+    code: str,
+    db: Session = Depends(get_db)
+):
+    """下载模型文件"""
+    try:
+        # 直接检查文件是否存在
+        base_dir = os.path.join("/app", "models")
+        model_dir = os.path.join(base_dir, code)
+        file_path = os.path.join(model_dir, "best.pt")
+        
+        logger.info(f"Attempting to download model from: {file_path}")
+        
+        if not os.path.exists(file_path):
+            logger.error(f"Model file not found: {file_path}")
+            raise HTTPException(status_code=404, detail="Model file not found")
+        
+        return FileResponse(
+            file_path,
+            filename=f"{code}.pt",
+            media_type="application/octet-stream"
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to download model: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

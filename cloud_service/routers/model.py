@@ -216,87 +216,35 @@ async def sync_model(
         logger.error(f"Failed to sync model: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/{code}/download")
+@router.get("/{code}/download", response_class=FileResponse)
 async def download_model(
     code: str,
-    db: Session = Depends(get_db),
-    range: Optional[str] = Header(None)
+    db: Session = Depends(get_db)
 ):
-    """下载模型文件
-    
-    支持:
-    1. 直接下载
-    2. 断点续传
-    3. 分块下载
-    """
-    # 获取模型信息
-    model = await model_service.get_model_by_code(db, code)
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
-    
-    # 检查模型状态
-    if not model.status:
-        raise HTTPException(status_code=403, detail="Model is not available")
-    
-    # 构建完整的文件路径 - 包含模型代码子目录
-    base_dir = os.path.join("/app", "models")
-    model_dir = os.path.join(base_dir, code)  # 添加模型代码作为子目录
-    file_name = f"{code}.zip"
-    file_path = os.path.join(model_dir, file_name)
-    
-    print(f"Model code: {code}")                         # 打印模型代码
-    print(f"Model file_path from DB: {model.file_path}") # 打印数据库中的路径
-    print(f"Base directory: {base_dir}")                 # 打印基础目录
-    print(f"Model directory: {model_dir}")              # 打印模型目录
-    print(f"File name: {file_name}")                    # 打印文件名
-    print(f"Full file path: {file_path}")               # 打印完整文件路径
-    print(f"File exists: {os.path.exists(file_path)}")  # 打印文件是否存在
-    
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Model file not found")
-    
-    # 获取文件信息
-    file_size = os.path.getsize(file_path)
-    
-    # 处理断点续传
-    if range:
-        try:
-            start_bytes = int(range.replace("bytes=", "").split("-")[0])
-            end_bytes = file_size - 1
-            
-            # 创建文件流
-            async def file_stream():
-                with open(file_path, "rb") as f:
-                    f.seek(start_bytes)
-                    while True:
-                        chunk = f.read(8192)  # 8KB chunks
-                        if not chunk:
-                            break
-                        yield chunk
-            
-            # 返回部分内容
-            headers = {
-                "Content-Range": f"bytes {start_bytes}-{end_bytes}/{file_size}",
-                "Accept-Ranges": "bytes",
-                "Content-Disposition": f'attachment; filename="{file_name}"',
-                "Content-Type": "application/zip",
-            }
-            return StreamingResponse(
-                file_stream(),
-                status_code=206,
-                headers=headers
-            )
-            
-        except (IndexError, ValueError):
-            pass  # 如果解析失败，回退到普通下载
-    
-    # 普通下载
-    return FileResponse(
-        file_path,
-        filename=file_name,
-        media_type="application/zip",
-        headers={
-            "Accept-Ranges": "bytes",
-            "Content-Length": str(file_size)
-        }
-    ) 
+    """下载模型文件"""
+    try:
+        # 检查模型是否存在
+        model = db.query(CloudModel).filter(CloudModel.code == code).first()
+        if not model:
+            raise HTTPException(status_code=404, detail="Model not found")
+        
+        # 构建文件路径
+        file_path = os.path.join(settings.STORAGE.base_dir, code, "best.pt")
+        
+        logger.info(f"Downloading model from: {file_path}")
+        
+        if not os.path.exists(file_path):
+            logger.error(f"Model file not found: {file_path}")
+            raise HTTPException(status_code=404, detail="Model file not found")
+        
+        return FileResponse(
+            file_path,
+            filename=f"{code}.pt",
+            media_type="application/octet-stream"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to download model: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) 

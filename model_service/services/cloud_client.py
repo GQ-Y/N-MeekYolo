@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from model_service.core.config import settings
 from model_service.services.base import get_api_key
 from shared.utils.logger import setup_logger
+import os
 
 logger = setup_logger(__name__)
 
@@ -66,36 +67,61 @@ class CloudClient:
             raise
 
     async def sync_model(self, db: Session, model_code: str) -> dict:
-        """
-        同步模型
-        
-        Args:
-            db: 数据库会话
-            model_code: 模型代码
-            
-        Returns:
-            dict: 同步结果
-        """
+        """同步模型"""
         try:
             # 获取API密钥
             api_key = await get_api_key(db)
             if not api_key:
                 raise ValueError("No valid API key found")
             
-            # 调用云市场API
+            # 调用云服务API
+            url = f"{self.base_url}{self.api_prefix}/models/{model_code}/sync"
+            headers = {"x-api-key": api_key}
+            
+            logger.info(f"Syncing model {model_code} from cloud service: {url}")
+            
             async with aiohttp.ClientSession() as session:
-                response = await session.post(
-                    f"{self.base_url}/api/v1/models/{model_code}/sync",
-                    headers={"x-api-key": api_key}
-                )
-                if response.status == 200:
+                # 1. 获取模型信息
+                async with session.post(url, headers=headers) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Failed to sync model. Status: {response.status}, Response: {error_text}")
+                        raise Exception(f"Failed to sync model: {response.status}")
+                    
                     result = await response.json()
-                    logger.info(f"Successfully synced model: {model_code}")
-                    return result["data"]
-                else:
-                    error_text = await response.text()
-                    logger.error(f"Failed to sync model {model_code}. Status: {response.status}, Response: {error_text}")
-                    raise Exception(f"Failed to sync model: {response.status}")
+                    download_url = result["data"]["download_url"]
+                    logger.info(f"Model sync successful, download URL: {download_url}")
+                    
+                    # 2. 下载模型文件
+                    async with session.get(download_url, headers=headers) as download_response:
+                        if download_response.status != 200:
+                            error_text = await download_response.text()
+                            logger.error(f"Failed to download model. Status: {download_response.status}, Response: {error_text}")
+                            raise Exception(f"Failed to download model: {download_response.status}")
+                        
+                        # 3. 保存模型文件
+                        model_dir = os.path.join(settings.STORAGE.base_dir, model_code)
+                        os.makedirs(model_dir, exist_ok=True)
+                        file_path = os.path.join(model_dir, f"{model_code}.zip")
+                        
+                        with open(file_path, "wb") as f:
+                            while True:
+                                chunk = await download_response.content.read(8192)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
+                        
+                        logger.info(f"Model file saved to: {file_path}")
+                        
+                        # 4. 解压模型文件
+                        import zipfile
+                        with zipfile.ZipFile(file_path, "r") as zip_ref:
+                            zip_ref.extractall(model_dir)
+                        
+                        logger.info(f"Model file extracted to: {model_dir}")
+                        
+                        return result["data"]
+                    
         except Exception as e:
             logger.error(f"Failed to sync model {model_code}: {str(e)}")
             raise
