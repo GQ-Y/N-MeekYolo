@@ -14,7 +14,7 @@ services:
     environment:
       - MODEL_SERVICE_ENV=production
     networks:
-      - meekyolo-network
+      - meekyolo-net
     healthcheck:
       test: ["CMD", "/app/healthcheck.sh"]
       interval: 30s
@@ -27,6 +27,6 @@ volumes:
     name: meekyolo_model_data
 
 networks:
-  meekyolo-network:
-    name: meekyolo-network
-    driver: bridge 
+  meekyolo-net:
+    name: meekyolo-net
+    external: false 
