@@ -1,0 +1,31 @@
+services:
+  cloud-service:
+    build:
+      context: ..
+      dockerfile: cloud_service/Dockerfile
+    image: cloud-service:latest
+    container_name: cloud-service
+    ports:
+      - "8004:8004"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./models:/app/models
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8004
+      - WORKERS=1
+    networks:
+      - meekyolo-net
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+networks:
+  meekyolo-net:
+    name: meekyolo-net
+    external: false 

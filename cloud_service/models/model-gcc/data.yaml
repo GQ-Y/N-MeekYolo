@@ -1,6 +1,6 @@
 author: AI Team
 code: model-gcc
-create_time: '2024-12-11T11:29:41.823295'
+create_time: '2025-02-21T07:35:35.496105'
 description: 用于检测渣土车、挖掘机、吊车等工程车辆
 name: 工地车辆检测模型
 names:
@@ -8,5 +8,5 @@ names:
   1: 挖掘机
   2: 吊车
 nc: 3
-update_time: '2024-12-11T11:29:41.823309'
+update_time: '2025-02-21T07:35:35.496121'
 version: 1.0.0
