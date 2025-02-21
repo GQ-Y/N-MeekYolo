@@ -1,0 +1,32 @@
+services:
+  model-service:
+    build:
+      context: ..
+      dockerfile: model_service/Dockerfile
+    image: meekyolo/model-service:latest
+    container_name: model-service
+    restart: unless-stopped
+    ports:
+      - "8003:8003"
+    volumes:
+      - model_data:/app/data/models
+      - ./logs:/app/logs
+    environment:
+      - MODEL_SERVICE_ENV=production
+    networks:
+      - meekyolo-network
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  model_data:
+    name: meekyolo_model_data
+
+networks:
+  meekyolo-network:
+    name: meekyolo-network
+    driver: bridge 
