@@ -11,8 +11,14 @@ services:
     volumes:
       - model_data:/app/data/models
       - ./logs:/app/logs
+      - ../config:/app/config
     environment:
       - MODEL_SERVICE_ENV=production
+      - HOST=0.0.0.0
+      - PORT=8003
+      - WORKERS=1
+      - CLOUD_SERVICE_URL=http://cloud-service:8004
+      - CONFIG_PATH=/app/config/config.yaml
     networks:
       - meekyolo-net
     healthcheck:

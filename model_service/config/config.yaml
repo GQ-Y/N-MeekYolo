@@ -23,6 +23,6 @@ LOGGING:
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 # 云服务配置
-CLOUD:
-  url: "http://localhost:8004"  # 本地开发环境
+CLOUD_SERVICE:
+  url: "http://cloud-service:8004"
   api_prefix: "/api/v1"

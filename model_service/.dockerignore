@@ -20,4 +20,7 @@ coverage.xml
 venv/
 ENV/
 .git
-.gitignore 
+.gitignore
+data/
+logs/
+-config/ 

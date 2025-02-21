@@ -1,7 +1,8 @@
 """
-云市场客户端
+云服务客户端
 """
-import httpx
+import aiohttp
+from typing import Dict, Any
 from sqlalchemy.orm import Session
 from model_service.core.config import settings
 from model_service.services.base import get_api_key
@@ -10,7 +11,7 @@ from shared.utils.logger import setup_logger
 logger = setup_logger(__name__)
 
 class CloudClient:
-    """云市场客户端"""
+    """云服务客户端"""
     
     def __init__(self):
         self.base_url = settings.CLOUD.url
@@ -20,53 +21,48 @@ class CloudClient:
         """获取完整的API URL"""
         return f"{self.base_url}{self.api_prefix}{path}"
     
-    async def create_key(self, data: dict) -> dict:
-        """
-        创建密钥
-        
-        Args:
-            data: 密钥信息
-            
-        Returns:
-            dict: 创建结果
-        """
+    async def create_key(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """创建密钥"""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    self._get_api_url("/keys"),
-                    json=data
-                )
-                response.raise_for_status()
-                result = response.json()
-                logger.info(f"Successfully created key in cloud market for user: {data['name']}")
-                return result["data"]
+            url = self._get_api_url("/keys")
+            logger.info(f"Creating key at: {url}")
+            logger.info(f"Request data: {data}")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=data) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        logger.info(f"Key created successfully: {result}")
+                        return result["data"]
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"Failed to create key. Status: {response.status}, Response: {error_text}")
+                        raise Exception(f"Failed to create key: {response.status}")
+                        
         except Exception as e:
-            logger.error(f"Failed to create key in cloud market: {str(e)}")
+            logger.error(f"Failed to create key: {str(e)}")
             raise
-
-    async def update_key(self, key_id: int, data: dict) -> dict:
-        """
-        更新密钥
-        
-        Args:
-            key_id: 密钥ID
-            data: 密钥信息
-            
-        Returns:
-            dict: 更新结果
-        """
+    
+    async def update_key(self, key_id: int, data: Dict[str, Any]) -> Dict[str, Any]:
+        """更新密钥"""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.put(
-                    f"{self.base_url}/api/v1/keys/{key_id}",
-                    json=data
-                )
-                response.raise_for_status()
-                result = response.json()
-                logger.info(f"Successfully updated key in cloud market for user: {data['name']}")
-                return result["data"]
+            url = self._get_api_url(f"/keys/{key_id}")
+            logger.info(f"Updating key at: {url}")
+            logger.info(f"Request data: {data}")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.put(url, json=data) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        logger.info(f"Key updated successfully: {result}")
+                        return result["data"]
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"Failed to update key. Status: {response.status}, Response: {error_text}")
+                        raise Exception(f"Failed to update key: {response.status}")
+                        
         except Exception as e:
-            logger.error(f"Failed to update key in cloud market: {str(e)}")
+            logger.error(f"Failed to update key: {str(e)}")
             raise
 
     async def sync_model(self, db: Session, model_code: str) -> dict:
@@ -87,15 +83,19 @@ class CloudClient:
                 raise ValueError("No valid API key found")
             
             # 调用云市场API
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
+            async with aiohttp.ClientSession() as session:
+                response = await session.post(
                     f"{self.base_url}/api/v1/models/{model_code}/sync",
                     headers={"x-api-key": api_key}
                 )
-                response.raise_for_status()
-                result = response.json()
-                logger.info(f"Successfully synced model: {model_code}")
-                return result["data"]
+                if response.status == 200:
+                    result = await response.json()
+                    logger.info(f"Successfully synced model: {model_code}")
+                    return result["data"]
+                else:
+                    error_text = await response.text()
+                    logger.error(f"Failed to sync model {model_code}. Status: {response.status}, Response: {error_text}")
+                    raise Exception(f"Failed to sync model: {response.status}")
         except Exception as e:
             logger.error(f"Failed to sync model {model_code}: {str(e)}")
             raise

@@ -58,38 +58,35 @@ class YOLODetector:
         return f"{self.model_service_url}{self.api_prefix}{path}"
         
     async def get_model_path(self, model_code: str) -> str:
-        """获取模型文件路径"""
+        """获取模型路径"""
         try:
-            # 构建模型目录路径
-            model_dir = self.model_dir / model_code
-            model_path = model_dir / "best.pt"
+            # 检查本地模型
+            model_dir = os.path.join("data", "models", model_code)
+            model_path = os.path.join(model_dir, "best.pt")
             
-            logger.info(f"Looking for model at: {model_path}")
+            if os.path.exists(model_path):
+                logger.info(f"Found local model at: {model_path}")
+                return model_path
             
-            if model_path.exists():
-                logger.info(f"Found model at: {model_path}")
-                return str(model_path)
+            # 如果本地不存在，从模型服务下载
+            os.makedirs(model_dir, exist_ok=True)
+            url = f"{settings.MODEL_SERVICE.url}{settings.MODEL_SERVICE.api_prefix}/models/{model_code}/download"
             
-            # 如果模型不存在，从模型服务下载
+            logger.info(f"Trying to download model from: {url}")
+            
             try:
                 async with aiohttp.ClientSession() as session:
-                    url = self._get_api_url(f"/models/{model_code}/download")
-                    logger.info(f"Trying to download model from: {url}")
-                    
                     async with session.get(url) as response:
                         if response.status == 200:
-                            # 确保目录存在
-                            os.makedirs(model_dir, exist_ok=True)
-                            # 保存模型文件
-                            with open(model_path, 'wb') as f:
+                            with open(model_path, "wb") as f:
                                 f.write(await response.read())
-                            logger.info(f"Downloaded model to: {model_path}")
-                            return str(model_path)
+                            logger.info(f"Model downloaded successfully to: {model_path}")
+                            return model_path
                         else:
-                            error_msg = f"Failed to download model: {response.status}"
-                            if response.status == 404:
-                                error_msg = f"Model {model_code} not found on server (URL: {url})"
-                            raise Exception(error_msg)
+                            error_text = await response.text()
+                            logger.error(f"Failed to download model. Status: {response.status}, Response: {error_text}")
+                            raise Exception(f"Failed to download model: {response.status}")
+                            
             except Exception as e:
                 logger.error(f"Failed to download model: {str(e)}")
                 raise
@@ -394,6 +391,10 @@ class YOLODetector:
         """启动流分析任务"""
         cap = None  # 初始化cap变量
         try:
+            logger.info(f"Starting stream analysis task: {task_id}")
+            logger.info(f"Model code: {model_code}")
+            logger.info(f"Stream URL: {stream_url}")
+            
             # 设置当前模型代码
             self.current_model_code = model_code
             
@@ -401,7 +402,9 @@ class YOLODetector:
             self.stop_flags[task_id] = False
             
             # 确保模型已加载
+            logger.info("Loading model...")
             await self.load_model(model_code)
+            logger.info("Model loaded successfully")
             
             # 打开视频流
             cap = cv2.VideoCapture(stream_url)

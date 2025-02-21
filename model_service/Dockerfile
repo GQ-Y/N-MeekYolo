@@ -51,13 +51,18 @@ COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # 创建必要的目录
-RUN mkdir -p /app/data/models /app/data/temp /app/logs
+RUN mkdir -p /app/data /app/logs \
+    && mkdir -p /app/config \
+    && chmod -R 755 /app/data \
+    && chmod -R 755 /app/logs \
+    && chmod -R 755 /app/config
 
 # 设置环境变量
 ENV PYTHONPATH=/app
 ENV MODEL_SERVICE_ENV=production
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV CONFIG_PATH=/app/config/config.yaml
 
 # 复制应用代码
 COPY model_service /app/model_service
