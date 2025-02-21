@@ -10,7 +10,6 @@ SERVICE:
 # 分析服务配置
 ANALYSIS_SERVICE:
   url: "http://analysis-service:8002"
-  api_prefix: "/api/v1"
 
 # 模型服务配置
 MODEL_SERVICE:

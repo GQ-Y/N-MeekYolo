@@ -21,6 +21,10 @@ class TaskController:
     def __init__(self):
         self.analysis_service = AnalysisService()
         
+    def _get_api_url(self, path: str) -> str:
+        """获取完整的API URL"""
+        return self.analysis_service._get_api_url(path)
+        
     async def start_task(self, db: Session, task_id: int) -> bool:
         """启动任务"""
         try:
@@ -55,18 +59,20 @@ class TaskController:
                 "callback_interval": task.callback_interval
             }
             
-            logger.info(f"正在发送分析请求到 {self._get_api_url('/analyze/stream')}")
+            target_url = self._get_api_url('/analyze/stream')
+            logger.info(f"正在发送分析请求到 {target_url}")
             logger.info(f"请求数据: {analysis_request}")
             
             try:
                 # 调用Analysis Service创建分析任务
                 async with httpx.AsyncClient() as client:
                     response = await client.post(
-                        self._get_api_url("/analyze/stream"),
+                        target_url,
                         json=analysis_request
                     )
                     response.raise_for_status()
                     result = response.json()
+                    logger.info(f"分析服务响应状态码: {response.status_code}")
                     logger.info(f"分析服务原始响应: {response.text}")
                     logger.info(f"分析服务解析响应: {result}")
                     
@@ -166,6 +172,11 @@ class TaskController:
                         logger.error("提交更改失败", exc_info=True)
                         raise
                 
+            except httpx.HTTPError as e:
+                logger.error(f"HTTP请求失败: {str(e)}")
+                logger.error(f"响应状态码: {e.response.status_code if hasattr(e, 'response') else 'N/A'}")
+                logger.error(f"响应内容: {e.response.text if hasattr(e, 'response') else 'N/A'}")
+                raise
             except Exception as e:
                 logger.error(f"创建分析任务失败: {str(e)}")
                 logger.error(f"请求详情: {analysis_request}")
@@ -339,7 +350,3 @@ class TaskController:
                 logger.error(f"回退任务状态失败: {str(e2)}", exc_info=True)
         finally:
             db.close()
-
-    def _get_api_url(self, path: str) -> str:
-        """获取完整的API URL"""
-        return f"{self.analysis_service.base_url}{self.analysis_service.api_prefix}{path}"

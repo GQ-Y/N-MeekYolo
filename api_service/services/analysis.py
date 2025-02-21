@@ -14,11 +14,10 @@ class AnalysisService:
     
     def __init__(self):
         self.base_url = settings.ANALYSIS_SERVICE.url
-        self.api_prefix = settings.ANALYSIS_SERVICE.api_prefix
     
     def _get_api_url(self, path: str) -> str:
         """获取完整的API URL"""
-        return f"{self.base_url}{self.api_prefix}{path}"
+        return f"{self.base_url}{path}"
     
     async def analyze_image(
         self,
