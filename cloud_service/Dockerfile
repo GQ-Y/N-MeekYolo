@@ -88,10 +88,10 @@ COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # 创建必要的目录
-RUN mkdir -p /app/data /app/logs /app/models \
+RUN mkdir -p /app/data /app/logs /app/config \
     && chmod -R 755 /app/data \
     && chmod -R 755 /app/logs \
-    && chmod -R 755 /app/models \
+    && chmod -R 755 /app/config \
     && touch /app/data/cloud_market.db \
     && chmod 644 /app/data/cloud_market.db
 
@@ -100,6 +100,7 @@ ENV PYTHONPATH=/app
 ENV CLOUD_SERVICE_ENV=production
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV CONFIG_PATH=/app/config/config.yaml
 
 # 复制应用代码
 COPY cloud_service /app/cloud_service

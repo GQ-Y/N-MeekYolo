@@ -22,14 +22,18 @@ from cloud_service.models.schemas import (
     CloudModelUpdate,
     CloudModelResponse
 )
+from cloud_service.models.database import CloudModel
 from cloud_service.services.model import ModelService
 from cloud_service.services.key import KeyService
 from cloud_service.services.database import get_db
 from cloud_service.core.config import settings
+from datetime import datetime
+import logging
 
 router = APIRouter(prefix="/models", tags=["模型"])
 model_service = ModelService()
 key_service = KeyService()
+logger = logging.getLogger(__name__)
 
 # 验证API密钥
 async def verify_api_key(
@@ -161,7 +165,7 @@ async def get_available_models(
 @router.get("/code/{code}", response_model=BaseResponse)
 async def get_model_by_code(code: str, db: Session = Depends(get_db)):
     """通过代码获取模型"""
-    model = await model_service.get_model_by_code(db, code)
+    model = db.query(CloudModel).filter(CloudModel.code == code).first()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
     return BaseResponse(data=CloudModelResponse.from_orm(model).model_dump())
@@ -178,22 +182,39 @@ async def get_model(model_id: int, db: Session = Depends(get_db)):
 async def sync_model(
     code: str,
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_api_key)
+    api_key: str = Depends(verify_api_key)
 ):
-    """同步模型(需要API密钥)"""
-    model = await model_service.get_model_by_code(db, code)
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
-    
-    # 构建下载URL
-    download_url = f"{settings.APP.base_url}/api/v1/models/{code}/download"
-    
-    # 返回模型信息
-    return BaseResponse(data={
-        "code": model.code,
-        "file_path": model.file_path,
-        "download_url": download_url
-    })
+    """同步模型"""
+    try:
+        # 检查模型是否存在
+        model = db.query(CloudModel).filter(CloudModel.code == code).first()
+        if not model:
+            logger.error(f"Model {code} not found in database")
+            raise HTTPException(status_code=404, detail=f"Model {code} not found")
+        
+        logger.info(f"Found model: {model.code} ({model.name})")
+        
+        # 构建下载URL
+        download_url = f"{settings.SERVICE.base_url}/api/v1/models/{code}/download"
+        logger.info(f"Model download URL: {download_url}")
+        
+        # 返回同步结果
+        return BaseResponse(
+            message="Model synced successfully",
+            data={
+                "code": code,
+                "name": model.name,
+                "version": model.version,
+                "download_url": download_url,
+                "synced_at": datetime.now().isoformat()
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to sync model: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/{code}/download")
 async def download_model(

@@ -1,7 +1,7 @@
 """
 数据库模型
 """
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, JSON
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, JSON, Text
 from sqlalchemy.sql import func
 from cloud_service.models.base import Base
 
@@ -61,3 +61,30 @@ class ApiKey(Base):
         onupdate=func.now(),
         nullable=False
     )
+
+class MarketKey(Base):
+    """云市场密钥"""
+    __tablename__ = "market_keys"
+    
+    id = Column(Integer, primary_key=True)
+    key = Column(String, unique=True, index=True)  # API密钥
+    name = Column(String, nullable=False)          # 用户名称
+    phone = Column(String, nullable=False)         # 手机号
+    email = Column(String, nullable=False)         # 邮箱
+    status = Column(Boolean, default=True)         # 状态
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+class Model(Base):
+    """模型"""
+    __tablename__ = "models"
+    
+    id = Column(Integer, primary_key=True)
+    code = Column(String, unique=True, index=True)  # 模型代码
+    name = Column(String, nullable=False)           # 模型名称
+    version = Column(String, nullable=False)        # 版本
+    description = Column(Text)                      # 描述
+    file_path = Column(String)                     # 文件路径
+    status = Column(Boolean, default=True)         # 状态
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())

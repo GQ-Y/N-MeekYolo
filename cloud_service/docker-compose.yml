@@ -10,11 +10,13 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - ./models:/app/models
+      - ../config:/app/config
     environment:
+      - CLOUD_SERVICE_ENV=production
       - HOST=0.0.0.0
       - PORT=8004
       - WORKERS=1
+      - CONFIG_PATH=/app/config/config.yaml
     networks:
       - meekyolo-net
     healthcheck:

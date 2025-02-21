@@ -22,12 +22,13 @@ class CloudServiceConfig(BaseSettings):
     
     # 数据库配置
     class DatabaseConfig(BaseModel):
-        url: str = "sqlite:///data/cloud_market.db"
+        url: str = "sqlite:///data/cloud_service.db"
     
     # 服务配置
     class ServiceConfig(BaseModel):
         host: str = "0.0.0.0"
         port: int = 8004
+        base_url: str = "http://cloud-service:8004"  # 添加 base_url
     
     # 日志配置
     class LoggingConfig(BaseModel):
