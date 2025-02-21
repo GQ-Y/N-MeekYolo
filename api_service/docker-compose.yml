@@ -1,0 +1,32 @@
+services:
+  api-service:
+    build:
+      context: ..
+      dockerfile: api_service/Dockerfile
+    image: api-service:latest
+    container_name: api-service
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8001
+      - WORKERS=1
+      - ANALYSIS_SERVICE_URL=http://analysis-service:8002
+      - MODEL_SERVICE_URL=http://model-service:8003
+    networks:
+      - meekyolo-net
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+networks:
+  meekyolo-net:
+    name: meekyolo-net
+    external: false 
