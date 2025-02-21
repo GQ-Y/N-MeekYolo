@@ -1,0 +1,33 @@
+services:
+  gateway-service:
+    build:
+      context: ..
+      dockerfile: gateway/Dockerfile
+    image: gateway-service:latest
+    container_name: gateway-service
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./static:/app/static
+      - ../config:/app/config
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - WORKERS=1
+      - CONFIG_PATH=/app/config/config.yaml
+    networks:
+      - meekyolo-net
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+networks:
+  meekyolo-net:
+    name: meekyolo-net
+    external: false 

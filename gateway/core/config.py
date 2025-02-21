@@ -66,9 +66,8 @@ class GatewayServiceConfig(BaseSettings):
             if "CONFIG_PATH" in os.environ:
                 config_path = os.environ["CONFIG_PATH"]
             else:
-                # 使用项目根目录的配置文件
-                current_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-                config_path = os.path.join(current_dir, "config", "config.yaml")
+                # 使用默认配置文件路径
+                config_path = "/app/config/config.yaml"
             
             logger.debug(f"Loading config from: {config_path}")
             

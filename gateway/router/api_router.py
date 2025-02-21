@@ -12,39 +12,7 @@ import aiohttp
 logger = setup_logger(__name__)
 router = APIRouter(tags=["API路由"])
 
-@router.api_route("/api/{path:path}", 
-    methods=["GET", "POST", "PUT", "DELETE"],
-    summary="API服务路由"
-)
-async def route_api_request(
-    path: str = Path(..., description="API路径"),
-    request: Request = None
-):
-    """路由API服务请求"""
-    return await route_request("api", path, request)
-
-@router.api_route("/model/{path:path}",
-    methods=["GET", "POST", "PUT", "DELETE"],
-    summary="模型服务路由"
-)
-async def route_model_request(
-    path: str = Path(..., description="API路径"),
-    request: Request = None
-):
-    """路由模型服务请求"""
-    return await route_request("model", path, request)
-
-@router.api_route("/analysis/{path:path}",
-    methods=["GET", "POST", "PUT", "DELETE"],
-    summary="分析服务路由"
-)
-async def route_analysis_request(
-    path: str = Path(..., description="API路径"),
-    request: Request = None
-):
-    """路由分析服务请求"""
-    return await route_request("analysis", path, request)
-
+# 定义路由处理函数
 async def route_request(service_name: str, path: str, request: Request):
     """通用请求路由处理"""
     try:
@@ -57,7 +25,7 @@ async def route_request(service_name: str, path: str, request: Request):
             raise HTTPException(status_code=503, detail=f"Service {service_name} is unhealthy")
             
         # 获取服务URL
-        service_url = await service_registry.discovery.get_service_url(service_name)
+        service_url = service.url  # 直接从服务信息获取URL
         if not service_url:
             raise HTTPException(status_code=404, detail=f"Service URL not found")
             
@@ -79,8 +47,59 @@ async def route_request(service_name: str, path: str, request: Request):
             ) as response:
                 return await response.json()
                 
-    except HTTPException as e:
-        raise e
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Route request error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e)) 
+        raise HTTPException(status_code=500, detail=str(e))
+
+# API服务路由
+@router.get("/api/{path:path}", operation_id="route_api_request_get")
+async def route_api_request_get(path: str = Path(...), request: Request = None):
+    return await route_request("api", path, request)
+
+@router.post("/api/{path:path}", operation_id="route_api_request_post")
+async def route_api_request_post(path: str = Path(...), request: Request = None):
+    return await route_request("api", path, request)
+
+@router.put("/api/{path:path}", operation_id="route_api_request_put")
+async def route_api_request_put(path: str = Path(...), request: Request = None):
+    return await route_request("api", path, request)
+
+@router.delete("/api/{path:path}", operation_id="route_api_request_delete")
+async def route_api_request_delete(path: str = Path(...), request: Request = None):
+    return await route_request("api", path, request)
+
+# 模型服务路由
+@router.get("/model/{path:path}", operation_id="route_model_request_get")
+async def route_model_request_get(path: str = Path(...), request: Request = None):
+    return await route_request("model", path, request)
+
+@router.post("/model/{path:path}", operation_id="route_model_request_post")
+async def route_model_request_post(path: str = Path(...), request: Request = None):
+    return await route_request("model", path, request)
+
+@router.put("/model/{path:path}", operation_id="route_model_request_put")
+async def route_model_request_put(path: str = Path(...), request: Request = None):
+    return await route_request("model", path, request)
+
+@router.delete("/model/{path:path}", operation_id="route_model_request_delete")
+async def route_model_request_delete(path: str = Path(...), request: Request = None):
+    return await route_request("model", path, request)
+
+# 分析服务路由
+@router.get("/analysis/{path:path}", operation_id="route_analysis_request_get")
+async def route_analysis_request_get(path: str = Path(...), request: Request = None):
+    return await route_request("analysis", path, request)
+
+@router.post("/analysis/{path:path}", operation_id="route_analysis_request_post")
+async def route_analysis_request_post(path: str = Path(...), request: Request = None):
+    return await route_request("analysis", path, request)
+
+@router.put("/analysis/{path:path}", operation_id="route_analysis_request_put")
+async def route_analysis_request_put(path: str = Path(...), request: Request = None):
+    return await route_request("analysis", path, request)
+
+@router.delete("/analysis/{path:path}", operation_id="route_analysis_request_delete")
+async def route_analysis_request_delete(path: str = Path(...), request: Request = None):
+    return await route_request("analysis", path, request) 

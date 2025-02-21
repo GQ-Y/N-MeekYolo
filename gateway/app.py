@@ -61,6 +61,9 @@ app.add_middleware(
 app.include_router(admin_router)
 app.include_router(router)
 
+# 挂载静态文件
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 # 自定义OpenAPI文档
 def custom_openapi():
     if app.openapi_schema:
@@ -199,9 +202,8 @@ async def custom_swagger_ui_html():
         openapi_url=app.openapi_url,
         title=app.title + " - API文档",
         oauth2_redirect_url=app.swagger_ui_oauth2_redirect_url,
-        swagger_js_url="/static/swagger-ui-bundle.js",
-        swagger_css_url="/static/swagger-ui.css",
-        swagger_favicon_url="/static/favicon.png",
+        swagger_js_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js",
+        swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
         init_oauth={
             "clientId": "your-client-id",
             "clientSecret": "your-client-secret"

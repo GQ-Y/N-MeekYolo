@@ -16,14 +16,14 @@ DISCOVERY:
 # 服务列表配置
 SERVICES:
   api:
-    url: "http://localhost:8001"
+    url: "http://api-service:8001"
     description: "API服务"
   analysis:
-    url: "http://localhost:8002"
+    url: "http://analysis-service:8002"
     description: "分析服务"
   model:
-    url: "http://localhost:8003"
+    url: "http://model-service:8003"
     description: "模型服务"
   cloud:
-    url: "http://localhost:8004"
+    url: "http://cloud-service:8004"
     description: "云服务"
