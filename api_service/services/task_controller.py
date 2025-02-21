@@ -55,14 +55,14 @@ class TaskController:
                 "callback_interval": task.callback_interval
             }
             
-            logger.info(f"正在发送分析请求到 {self.analysis_service.analysis_url}/analyze/stream")
+            logger.info(f"正在发送分析请求到 {self._get_api_url('/analyze/stream')}")
             logger.info(f"请求数据: {analysis_request}")
             
             try:
                 # 调用Analysis Service创建分析任务
                 async with httpx.AsyncClient() as client:
                     response = await client.post(
-                        f"{self.analysis_service.analysis_url}/analyze/stream",
+                        self._get_api_url("/analyze/stream"),
                         json=analysis_request
                     )
                     response.raise_for_status()
@@ -75,7 +75,7 @@ class TaskController:
                     logger.info(f"提取到父任务ID: {parent_task_id}")
                     task.analysis_task_id = parent_task_id
                     
-                    # ���建子任务记录
+                    # 构建子任务记录
                     sub_tasks = result["data"]["sub_tasks"]
                     logger.info(f"从响应中提取到 {len(sub_tasks)} 个子任务:")
                     for idx, st in enumerate(sub_tasks):
@@ -145,7 +145,7 @@ class TaskController:
                     # 更新流状态
                     for stream in task.streams:
                         stream.status = "active"
-                        logger.info(f"已更新���频流 {stream.id} 状态为活动")
+                        logger.info(f"已更新视频流 {stream.id} 状态为活动")
                     
                     # 最终提交
                     try:
@@ -229,7 +229,7 @@ class TaskController:
                         # 调用Analysis Service停止任务
                         try:
                             async with httpx.AsyncClient(timeout=10.0) as client:
-                                stop_url = f"{self.analysis_service.analysis_url}/analyze/stream/{sub_task.analysis_task_id}/stop"
+                                stop_url = f"{self._get_api_url('/analyze/stream')}/{sub_task.analysis_task_id}/stop"
                                 logger.info(f"发送停止请求到: {stop_url}")
                                 
                                 for retry in range(3):
@@ -262,7 +262,7 @@ class TaskController:
                             # 更新流状态
                             if sub_task.stream:
                                 sub_task.stream.status = "inactive"
-                                logger.info(f"已更新视频流 {sub_task.stream.id} 状��为非活动")
+                                logger.info(f"已更新视频流 {sub_task.stream.id} 状态为非活动")
                             
                             # 添加到已停止列表
                             stopped_sub_tasks.append(sub_task)
@@ -339,3 +339,7 @@ class TaskController:
                 logger.error(f"回退任务状态失败: {str(e2)}", exc_info=True)
         finally:
             db.close()
+
+    def _get_api_url(self, path: str) -> str:
+        """获取完整的API URL"""
+        return f"{self.analysis_service.base_url}{self.analysis_service.api_prefix}{path}"

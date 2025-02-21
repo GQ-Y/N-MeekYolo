@@ -73,20 +73,20 @@ class AnalysisService:
         callback_interval: int = 1
     ) -> str:
         """流分析"""
-        task_id = str(uuid.uuid4())
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 self._get_api_url("/analyze/stream"),
                 json={
                     "model_code": model_code,
                     "stream_url": stream_url,
-                    "callback_urls": callback_url,
+                    "callback_url": callback_url,
                     "output_url": output_url,
                     "callback_interval": callback_interval
                 }
             )
             response.raise_for_status()
-        return task_id
+            data = response.json()
+            return data.get("task_id")
     
     async def stop_task(self, task_id: str):
         """停止分析任务"""

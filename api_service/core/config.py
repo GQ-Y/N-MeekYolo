@@ -2,7 +2,7 @@
 API服务配置
 """
 from pydantic_settings import BaseSettings
-from typing import Dict, List, Optional
+from typing import Dict, Any, Optional
 from pydantic import BaseModel
 import os
 import yaml
@@ -24,13 +24,13 @@ class APIServiceConfig(BaseSettings):
     
     # 分析服务配置
     class AnalysisServiceConfig(BaseModel):
-        url: str = "http://localhost:8002"  # 分析服务地址
-        api_prefix: str = "/api/v1"         # API前缀
+        url: str = "http://analysis-service:8002"
+        api_prefix: str = "/api/v1"
     
     # 模型服务配置
     class ModelServiceConfig(BaseModel):
-        url: str = "http://localhost:8003"  # 模型服务地址
-        api_prefix: str = "/api/v1"         # API前缀
+        url: str = "http://model-service:8003"
+        api_prefix: str = "/api/v1"
     
     # 数据库配置
     class DatabaseConfig(BaseModel):
@@ -43,16 +43,45 @@ class APIServiceConfig(BaseSettings):
         name: str = "默认分组"
         description: str = "系统默认分组"
     
+    # 服务发现配置
+    class DiscoveryConfig(BaseModel):
+        interval: int = 30
+        timeout: int = 5
+        retry: int = 3
+    
+    # 服务列表配置
+    class ServicesConfig(BaseModel):
+        api: Dict[str, Any] = {
+            "url": "http://api-service:8001",
+            "description": "API服务"
+        }
+        analysis: Dict[str, Any] = {
+            "url": "http://analysis-service:8002",
+            "description": "分析服务"
+        }
+        model: Dict[str, Any] = {
+            "url": "http://model-service:8003",
+            "description": "模型服务"
+        }
+        cloud: Dict[str, Any] = {
+            "url": "http://cloud-service:8004",
+            "description": "云服务"
+        }
+    
     # 配置项
     SERVICE: ServiceConfig = ServiceConfig()
     ANALYSIS_SERVICE: AnalysisServiceConfig = AnalysisServiceConfig()
     MODEL_SERVICE: ModelServiceConfig = ModelServiceConfig()
     DATABASE: DatabaseConfig = DatabaseConfig()
     DEFAULT_GROUP: DefaultGroupConfig = DefaultGroupConfig()
+    DISCOVERY: DiscoveryConfig = DiscoveryConfig()
+    SERVICES: ServicesConfig = ServicesConfig()
     
     class Config:
         env_file = ".env"
         case_sensitive = True
+        # 允许额外字段
+        extra = "allow"  # 允许配置文件中的额外字段
     
     @classmethod
     def load_config(cls) -> "APIServiceConfig":
@@ -64,8 +93,7 @@ class APIServiceConfig(BaseSettings):
             if "CONFIG_PATH" in os.environ:
                 config_path = os.environ["CONFIG_PATH"]
             else:
-                current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                config_path = os.path.join(current_dir, "config", "config.yaml")
+                config_path = "/app/config/config.yaml"
             
             logger.debug(f"Loading config from: {config_path}")
             

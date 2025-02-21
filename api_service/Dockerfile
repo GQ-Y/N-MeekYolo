@@ -89,8 +89,10 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 # 创建必要的目录
 RUN mkdir -p /app/data /app/logs \
+    && mkdir -p /app/config \
     && chmod -R 755 /app/data \
     && chmod -R 755 /app/logs \
+    && chmod -R 755 /app/config \
     && touch /app/data/api_service.db \
     && chmod 644 /app/data/api_service.db
 

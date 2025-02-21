@@ -10,12 +10,14 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+      - ../config:/app/config
     environment:
       - HOST=0.0.0.0
       - PORT=8001
       - WORKERS=1
       - ANALYSIS_SERVICE_URL=http://analysis-service:8002
       - MODEL_SERVICE_URL=http://model-service:8003
+      - CONFIG_PATH=/app/config/config.yaml
     networks:
       - meekyolo-net
     healthcheck:
