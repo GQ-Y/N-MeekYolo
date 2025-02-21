@@ -1,0 +1,36 @@
+services:
+  analysis-service:
+    build:
+      context: ..
+      dockerfile: analysis_service/Dockerfile.cpu  # 或 Dockerfile.gpu
+    image: meekyolo/analysis-service:latest
+    container_name: analysis-service
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+    volumes:
+      - model_data:/app/data/models
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./results:/app/results
+    environment:
+      - ANALYSIS_SERVICE_ENV=production
+      - MODEL_SERVICE_HOST=model-service
+    networks:
+      - meekyolo-network
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  model_data:
+    name: meekyolo_model_data
+    external: true  # 使用已存在的模型数据卷
+
+networks:
+  meekyolo-network:
+    name: meekyolo-network
+    external: true  # 使用已存在的网络 
