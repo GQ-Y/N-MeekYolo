@@ -206,3 +206,162 @@ enabled: false # 是否允许任何打印输出
   - 优化启动环境检测
   - 增强多终端系统适配
   - 修复分析错误
+
+## Docker 部署
+
+### 环境要求
+
+- Docker 20.10+
+- Docker Compose 2.0+
+- NVIDIA Container Toolkit (GPU版本需要)
+- 对于 M1/M2/M3 Mac: macOS 12.0+
+
+### 1. CPU 版本部署 (Intel/AMD)
+
+适用于普通 x86_64 架构 CPU。
+
+```bash
+# 启动服务
+docker-compose up --build -d
+
+# 查看服务状态
+docker-compose ps
+
+# 查看日志
+docker-compose logs -f analysis-service
+
+# 停止服务
+docker-compose down
+```
+
+### 2. Apple Silicon 部署 (M1/M2/M3)
+
+适用于搭载 Apple Silicon 芯片的 Mac 设备。
+
+```bash
+# 启动服务
+docker-compose -f docker-compose.yml -f docker-compose.m1.yml up --build -d
+
+# 查看服务状态
+docker-compose ps
+
+# 查看日志
+docker-compose logs -f analysis-service
+
+# 停止服务
+docker-compose down
+```
+
+注意事项：
+- 确保 Docker Desktop for Mac (Apple Silicon) 已安装
+- 建议在 Docker Desktop 设置中分配至少 4GB 内存
+- 首次构建可能需要较长时间，因为需要构建 ARM 版本的依赖
+
+### 3. GPU 版本部署 (NVIDIA)
+
+适用于配备 NVIDIA GPU 的设备。
+
+```bash
+# 检查 NVIDIA 驱动和 CUDA
+nvidia-smi
+
+# 检查 nvidia-docker
+docker run --rm --gpus all nvidia/cuda:12.1.0-base-ubuntu22.04 nvidia-smi
+
+# 启动服务
+docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up --build -d
+
+# 查看服务状态
+docker-compose ps
+
+# 查看日志
+docker-compose logs -f analysis-service
+
+# 检查 GPU 使用情况
+docker exec -it analysis-service nvidia-smi
+
+# 停止服务
+docker-compose down
+```
+
+前置要求：
+1. 安装 NVIDIA 驱动和 CUDA：
+```bash
+sudo apt install nvidia-driver-535 cuda-toolkit-12-1
+```
+
+2. 安装 NVIDIA Container Toolkit：
+```bash
+distribution=$(. /etc/os-release;echo $ID$VERSION_ID) \
+   && curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add - \
+   && curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+
+sudo apt-get update
+sudo apt-get install -y nvidia-docker2
+sudo systemctl restart docker
+```
+
+### 资源清理
+
+对于所有版本，清理命令都是一样的：
+
+```bash
+# 停止并删除容器、网络
+docker-compose down
+
+# 同时删除构建的镜像
+docker-compose down --rmi all
+
+# 同时删除数据卷
+docker-compose down --volumes
+
+# 清理所有未使用的资源（慎用）
+docker system prune -a
+```
+
+### 常见问题处理
+
+1. 构建失败：
+```bash
+# 清理构建缓存后重试
+docker builder prune
+docker-compose build --no-cache
+```
+
+2. 容器无法启动：
+```bash
+# 检查端口占用
+lsof -i :8002
+
+# 查看详细日志
+docker-compose logs -f
+```
+
+3. GPU 版本问题：
+```bash
+# 检查 GPU 是否可用
+docker exec -it analysis-service python3 -c "import torch; print(torch.cuda.is_available())"
+```
+
+4. M1/M2/M3 版本问题：
+```bash
+# 确认使用正确的平台
+docker inspect analysis-service | grep Platform
+```
+
+### 性能优化建议
+
+1. CPU 版本：
+   - 适当调整 `cpus` 和 `memory` 限制
+   - 使用 volume 而不是 bind mount
+   - 考虑使用 tmpfs 挂载临时目录
+
+2. GPU 版本：
+   - 确保 CUDA 版本匹配
+   - 监控 GPU 内存使用
+   - 适当调整批处理大小
+
+3. Apple Silicon 版本：
+   - 在 Docker Desktop 中分配足够资源
+   - 使用 buildx 进行多平台构建
+   - 注意 ARM 兼容性问题
