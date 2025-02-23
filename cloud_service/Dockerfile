@@ -107,9 +107,17 @@ COPY cloud_service /app/cloud_service
 COPY shared /app/shared
 
 # 复制启动脚本和健康检查脚本
-COPY cloud_service/docker/entrypoint.sh /app/entrypoint.sh
-COPY cloud_service/docker/healthcheck.sh /app/healthcheck.sh
-RUN chmod +x /app/entrypoint.sh /app/healthcheck.sh
+COPY cloud_service/docker/entrypoint.sh /app/
+COPY cloud_service/docker/healthcheck.sh /app/
+RUN chmod +x /app/entrypoint.sh /app/healthcheck.sh \
+    && sed -i 's/\r//g' /app/*.sh
+
+# 创建非 root 用户并设置权限
+RUN groupadd -r cloud && useradd -r -g cloud cloud \
+    && chown -R cloud:cloud /app
+
+# 切换到非 root 用户
+USER cloud
 
 # 设置健康检查
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \

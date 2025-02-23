@@ -3,8 +3,9 @@ services:
     build:
       context: ..
       dockerfile: gateway/Dockerfile
-    image: gateway-service:latest
+    image: meekyolo/gateway-service:latest
     container_name: gateway-service
+    restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
@@ -13,10 +14,15 @@ services:
       - ./static:/app/static
       - ../config:/app/config
     environment:
+      - GATEWAY_SERVICE_ENV=production
       - HOST=0.0.0.0
       - PORT=8000
       - WORKERS=1
       - CONFIG_PATH=/app/config/config.yaml
+      - API_SERVICE_URL=http://api-service:8001
+      - ANALYSIS_SERVICE_URL=http://analysis-service:8002
+      - MODEL_SERVICE_URL=http://model-service:8003
+      - CLOUD_SERVICE_URL=http://cloud-service:8004
     networks:
       - meekyolo-net
     healthcheck:
@@ -25,9 +31,8 @@ services:
       timeout: 30s
       retries: 3
       start_period: 5s
-    restart: unless-stopped
 
 networks:
   meekyolo-net:
     name: meekyolo-net
-    external: false 
+    external: true 

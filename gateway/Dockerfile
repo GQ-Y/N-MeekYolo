@@ -107,9 +107,10 @@ COPY gateway /app/gateway
 COPY shared /app/shared
 
 # 复制启动脚本和健康检查脚本
-COPY gateway/docker/entrypoint.sh /app/entrypoint.sh
-COPY gateway/docker/healthcheck.sh /app/healthcheck.sh
-RUN chmod +x /app/entrypoint.sh /app/healthcheck.sh
+COPY gateway/docker/entrypoint.sh /app/
+COPY gateway/docker/healthcheck.sh /app/
+RUN chmod +x /app/entrypoint.sh /app/healthcheck.sh \
+    && sed -i 's/\r//g' /app/*.sh
 
 # 设置健康检查
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
@@ -117,6 +118,13 @@ HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
 
 # 暴露端口
 EXPOSE 8000
+
+# 创建非 root 用户并设置权限
+RUN groupadd -r gateway && useradd -r -g gateway gateway \
+    && chown -R gateway:gateway /app
+
+# 切换到非 root 用户
+USER gateway
 
 # 启动服务
 ENTRYPOINT ["/app/entrypoint.sh"] 

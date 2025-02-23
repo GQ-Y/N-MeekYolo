@@ -107,9 +107,10 @@ COPY api_service /app/api_service
 COPY shared /app/shared
 
 # 复制启动脚本和健康检查脚本
-COPY api_service/docker/entrypoint.sh /app/entrypoint.sh
-COPY api_service/docker/healthcheck.sh /app/healthcheck.sh
-RUN chmod +x /app/entrypoint.sh /app/healthcheck.sh
+COPY api_service/docker/entrypoint.sh /app/
+COPY api_service/docker/healthcheck.sh /app/
+RUN chmod +x /app/entrypoint.sh /app/healthcheck.sh \
+    && sed -i 's/\r//g' /app/*.sh
 
 # 设置健康检查
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
@@ -117,6 +118,12 @@ HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
 
 # 暴露端口
 EXPOSE 8001
+
+# 创建非 root 用户并设置权限
+RUN groupadd -r api && useradd -r -g api api \
+    && chown -R api:api /app
+
+USER api
 
 # 启动服务
 ENTRYPOINT ["/app/entrypoint.sh"] 

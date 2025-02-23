@@ -3,8 +3,9 @@ services:
     build:
       context: ..
       dockerfile: api_service/Dockerfile
-    image: api-service:latest
+    image: meekyolo/api-service:latest
     container_name: api-service
+    restart: unless-stopped
     ports:
       - "8001:8001"
     volumes:
@@ -12,6 +13,7 @@ services:
       - ./logs:/app/logs
       - ../config:/app/config
     environment:
+      - API_SERVICE_ENV=production
       - HOST=0.0.0.0
       - PORT=8001
       - WORKERS=1
@@ -26,9 +28,8 @@ services:
       timeout: 30s
       retries: 3
       start_period: 5s
-    restart: unless-stopped
 
 networks:
   meekyolo-net:
     name: meekyolo-net
-    external: false 
+    external: true 

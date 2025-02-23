@@ -3,8 +3,9 @@ services:
     build:
       context: ..
       dockerfile: cloud_service/Dockerfile
-    image: cloud-service:latest
+    image: meekyolo/cloud-service:latest
     container_name: cloud-service
+    restart: unless-stopped
     ports:
       - "8004:8004"
     volumes:
@@ -25,9 +26,8 @@ services:
       timeout: 30s
       retries: 3
       start_period: 5s
-    restart: unless-stopped
 
 networks:
   meekyolo-net:
     name: meekyolo-net
-    external: false 
+    external: true 
