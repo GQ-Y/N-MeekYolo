@@ -24,46 +24,60 @@ class AnalysisServiceConfig(BaseSettings):
     
     # 模型服务配置
     class ModelServiceConfig(BaseModel):
-        url: str = "http://localhost:8003"  # 模型服务地址
-        api_prefix: str = "/api/v1"         # API前缀
+        url: str = "http://localhost:8003"
+        api_prefix: str = "/api/v1"
     
     # 分析配置
     class AnalysisConfig(BaseModel):
-        confidence: float = 0.8     # 置信度阈值
-        iou: float = 0.45          # IOU阈值
-        max_det: int = 300         # 最大检测数量
-        device: str = "auto"       # 设备选择 (auto/cpu/cuda)
-        
-        # 新增配置项
-        analyze_interval: int = 1   # 分析间隔(秒)
-        alarm_interval: int = 60    # 报警间隔(秒)
-        random_interval: List[int] = [0, 0]  # 随机间隔范围(秒)
-        push_interval: int = 5      # 推送间隔(秒)
+        confidence: float = 0.8
+        iou: float = 0.45
+        max_det: int = 300
+        device: str = "auto"
+        analyze_interval: int = 1
+        alarm_interval: int = 60
+        random_interval: List[int] = [0, 0]
+        push_interval: int = 5
     
     # 存储配置
     class StorageConfig(BaseModel):
         base_dir: str = "data"
         model_dir: str = "models"
         temp_dir: str = "temp"
-        max_size: int = 1024 * 1024 * 1024  # 1GB
+        max_size: int = 1073741824  # 1GB
     
     # 输出配置
     class OutputConfig(BaseModel):
-        save_dir: str = "results"    # 结果保存目录
-        save_txt: bool = False       # 是否保存文本结果
-        save_img: bool = True        # 是否保存图片结果
-        return_base64: bool = True   # 是否返回base64图片
+        save_dir: str = "results"
+        save_txt: bool = False
+        save_img: bool = True
+        return_base64: bool = True
     
-    # 配置项
+    # 服务发现配置
+    class DiscoveryConfig(BaseModel):
+        interval: int = 30
+        timeout: int = 5
+        retry: int = 3
+    
+    # 服务配置
+    class ServicesConfig(BaseModel):
+        class ServiceApiConfig(BaseModel):
+            url: str
+            description: str
+        api: ServiceApiConfig
+    
+    # 配置实例
     SERVICE: ServiceConfig = ServiceConfig()
     MODEL_SERVICE: ModelServiceConfig = ModelServiceConfig()
     ANALYSIS: AnalysisConfig = AnalysisConfig()
     STORAGE: StorageConfig = StorageConfig()
     OUTPUT: OutputConfig = OutputConfig()
+    DISCOVERY: DiscoveryConfig = DiscoveryConfig()
+    SERVICES: ServicesConfig
     
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "allow"  # 允许额外的字段
     
     @classmethod
     def load_config(cls) -> "AnalysisServiceConfig":
@@ -83,12 +97,15 @@ class AnalysisServiceConfig(BaseSettings):
             if os.path.exists(config_path):
                 logger.debug(f"Config file exists: {config_path}")
                 with open(config_path, "r", encoding="utf-8") as f:
-                    config.update(yaml.safe_load(f))
-                    logger.debug(f"Loaded config: {config}")
+                    config_content = f.read()
+                    logger.debug(f"Config content:\n{config_content}")
+                    config.update(yaml.safe_load(config_content))
             else:
                 logger.warning(f"Config file not found: {config_path}, using default values")
             
+            logger.debug(f"Final config dict: {config}")
             return cls(**config)
+            
         except Exception as e:
             logger.error(f"Failed to load config: {str(e)}")
             raise

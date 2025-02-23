@@ -6,6 +6,8 @@ services:
     image: meekyolo/model-service:latest
     container_name: model-service
     restart: unless-stopped
+    tty: true
+    stdin_open: true
     ports:
       - "8003:8003"
     volumes:
@@ -22,7 +24,7 @@ services:
     networks:
       - meekyolo-net
     healthcheck:
-      test: ["CMD", "/app/healthcheck.sh"]
+      test: ["CMD", "/bin/bash", "/app/healthcheck.sh"]
       interval: 30s
       timeout: 30s
       retries: 3
@@ -35,4 +37,4 @@ volumes:
 networks:
   meekyolo-net:
     name: meekyolo-net
-    external: false 
+    external: true 

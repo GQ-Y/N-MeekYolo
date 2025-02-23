@@ -4,10 +4,10 @@ FROM python:3.10-slim AS downloader
 # 避免交互式提示
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 配置腾讯源
-RUN echo "deb https://mirrors.cloud.tencent.com/debian/ bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list \
-    && echo "deb https://mirrors.cloud.tencent.com/debian/ bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list \
-    && echo "deb https://mirrors.cloud.tencent.com/debian-security bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list
+# 配置腾讯云镜像源
+RUN echo "deb https://mirrors.cloud.tencent.com/debian bullseye main" > /etc/apt/sources.list \
+    && echo "deb https://mirrors.cloud.tencent.com/debian-security bullseye-security main" >> /etc/apt/sources.list \
+    && echo "deb https://mirrors.cloud.tencent.com/debian bullseye-updates main" >> /etc/apt/sources.list
 
 # 设置 pip 源为腾讯源
 RUN pip config set global.index-url https://mirrors.cloud.tencent.com/pypi/simple \
@@ -38,10 +38,9 @@ FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04 AS builder
 # 避免交互式提示
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 配置腾讯源
-RUN echo "deb https://mirrors.cloud.tencent.com/debian/ bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list \
-    && echo "deb https://mirrors.cloud.tencent.com/debian/ bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list \
-    && echo "deb https://mirrors.cloud.tencent.com/debian-security bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list
+# 配置腾讯云 Ubuntu 镜像源
+RUN sed -i 's/archive.ubuntu.com/mirrors.cloud.tencent.com/g' /etc/apt/sources.list \
+    && sed -i 's/security.ubuntu.com/mirrors.cloud.tencent.com/g' /etc/apt/sources.list
 
 # 设置工作目录
 WORKDIR /build
@@ -77,10 +76,9 @@ FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04 AS runner
 # 避免交互式提示
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 配置腾讯源
-RUN echo "deb https://mirrors.cloud.tencent.com/debian/ bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list \
-    && echo "deb https://mirrors.cloud.tencent.com/debian/ bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list \
-    && echo "deb https://mirrors.cloud.tencent.com/debian-security bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list
+# 配置腾讯云 Ubuntu 镜像源
+RUN sed -i 's/archive.ubuntu.com/mirrors.cloud.tencent.com/g' /etc/apt/sources.list \
+    && sed -i 's/security.ubuntu.com/mirrors.cloud.tencent.com/g' /etc/apt/sources.list
 
 # 安装运行必要的工具
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -106,7 +104,11 @@ COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # 创建必要的目录
-RUN mkdir -p /app/data/models /app/data/temp /app/logs /app/results
+RUN mkdir -p /app/data/models /app/data/temp /app/logs /app/results /app/config \
+    && chmod -R 755 /app/data \
+    && chmod -R 755 /app/logs \
+    && chmod -R 755 /app/config \
+    && chmod -R 755 /app/results
 
 # 设置环境变量
 ENV PYTHONPATH=/app
@@ -118,17 +120,21 @@ ENV PYTHONUNBUFFERED=1
 COPY analysis_service /app/analysis_service
 COPY shared /app/shared
 
-# 复制启动脚本和健康检查脚本
-COPY analysis_service/docker/entrypoint.sh /app/entrypoint.sh
-COPY analysis_service/docker/healthcheck.sh /app/healthcheck.sh
-RUN chmod +x /app/entrypoint.sh /app/healthcheck.sh
+# 复制启动脚本和健康检查脚本（使用绝对路径）
+COPY ["analysis_service/docker/entrypoint.sh", "/app/entrypoint.sh"]
+COPY ["analysis_service/docker/healthcheck.sh", "/app/healthcheck.sh"]
+
+# 确保脚本具有执行权限并转换行尾
+RUN chmod +x /app/entrypoint.sh /app/healthcheck.sh && \
+    sed -i -e 's/\r$//' /app/entrypoint.sh && \
+    sed -i -e 's/\r$//' /app/healthcheck.sh
 
 # 设置健康检查
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD [ "/app/healthcheck.sh" ]
+    CMD [ "/bin/bash", "/app/healthcheck.sh" ]
 
 # 暴露端口
 EXPOSE 8002
 
-# 启动服务
-ENTRYPOINT ["/app/entrypoint.sh"] 
+# 修改启动命令
+ENTRYPOINT ["/bin/bash", "/app/entrypoint.sh"] 

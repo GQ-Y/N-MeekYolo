@@ -68,17 +68,21 @@ ENV CONFIG_PATH=/app/config/config.yaml
 COPY model_service /app/model_service
 COPY shared /app/shared
 
-# 复制启动脚本和健康检查脚本
-COPY model_service/docker/entrypoint.sh /app/entrypoint.sh
-COPY model_service/docker/healthcheck.sh /app/healthcheck.sh
-RUN chmod +x /app/entrypoint.sh /app/healthcheck.sh
+# 复制启动脚本和健康检查脚本（使用绝对路径）
+COPY ["model_service/docker/entrypoint.sh", "/app/entrypoint.sh"]
+COPY ["model_service/docker/healthcheck.sh", "/app/healthcheck.sh"]
+
+# 确保脚本具有执行权限并转换行尾
+RUN chmod +x /app/entrypoint.sh /app/healthcheck.sh && \
+    sed -i -e 's/\r$//' /app/entrypoint.sh && \
+    sed -i -e 's/\r$//' /app/healthcheck.sh
 
 # 设置健康检查
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD [ "/app/healthcheck.sh" ]
+    CMD [ "/bin/bash", "/app/healthcheck.sh" ]
 
 # 暴露端口
 EXPOSE 8003
 
-# 启动服务
-ENTRYPOINT ["/app/entrypoint.sh"] 
+# 修改启动命令
+ENTRYPOINT ["/bin/bash", "/app/entrypoint.sh"] 
