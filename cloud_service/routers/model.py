@@ -29,6 +29,8 @@ from cloud_service.services.database import get_db
 from cloud_service.core.config import settings
 from datetime import datetime
 import logging
+import io
+import zipfile
 
 router = APIRouter(prefix="/models", tags=["模型"])
 model_service = ModelService()
@@ -221,30 +223,41 @@ async def download_model(
     code: str,
     db: Session = Depends(get_db)
 ):
-    """下载模型文件"""
+    """下载模型文件
+    
+    返回一个包含模型文件(.pt)和配置文件(.yaml)的zip压缩包
+    """
     try:
+        logger.info(f"开始处理模型下载请求: {code}")
+        
         # 检查模型是否存在
         model = db.query(CloudModel).filter(CloudModel.code == code).first()
         if not model:
+            logger.error(f"模型未找到: {code}")
             raise HTTPException(status_code=404, detail="Model not found")
         
-        # 构建文件路径
-        file_path = os.path.join(settings.STORAGE.base_dir, code, "best.pt")
+        logger.info(f"找到模型: {model.code} (版本: {model.version})")
         
-        logger.info(f"Downloading model from: {file_path}")
+        # 获取zip文件路径
+        zip_path = model.file_path
+        logger.info(f"模型zip文件路径: {zip_path}")
         
-        if not os.path.exists(file_path):
-            logger.error(f"Model file not found: {file_path}")
+        if not os.path.exists(zip_path):
+            logger.error(f"模型zip文件不存在: {zip_path}")
             raise HTTPException(status_code=404, detail="Model file not found")
         
+        logger.info(f"准备返回zip文件: {zip_path}")
+        
+        # 直接返回zip文件
         return FileResponse(
-            file_path,
-            filename=f"{code}.pt",
-            media_type="application/octet-stream"
+            zip_path,
+            filename=f"{code}.zip",
+            media_type="application/zip"
         )
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to download model: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e)) 
+        error_msg = f"模型下载失败: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise HTTPException(status_code=500, detail=error_msg) 
