@@ -13,9 +13,13 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./results:/app/results
+      - ../config:/app/config
     environment:
       - ANALYSIS_SERVICE_ENV=production
       - MODEL_SERVICE_HOST=model-service
+      - NVIDIA_VISIBLE_DEVICES=all
+      - DEVICE=cuda
+      - CONFIG_PATH=/app/config/config.yaml
     networks:
       - meekyolo-net
     healthcheck:
@@ -33,4 +37,4 @@ volumes:
 networks:
   meekyolo-net:
     name: meekyolo-net
-    external: false 
+    external: true 
