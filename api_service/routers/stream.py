@@ -55,8 +55,8 @@ async def get_streams(
         streams = db.query(Stream).offset(skip).limit(limit).all()
         
         # 添加状态验证日志
-        online_count = db.query(Stream).filter(Stream.status == int(StreamStatus.ONLINE)).count()
-        offline_count = db.query(Stream).filter(Stream.status == int(StreamStatus.OFFLINE)).count()
+        online_count = db.query(Stream).filter(Stream.status == StreamStatus.ONLINE).count()
+        offline_count = db.query(Stream).filter(Stream.status == StreamStatus.OFFLINE).count()
         
         logger.info(
             f"视频源状态统计:\n"
@@ -68,24 +68,29 @@ async def get_streams(
         # 构造响应数据
         stream_list = []
         for stream in streams:
-            # 创建一个新的Stream对象以确保状态值正确
-            stream_obj = Stream(
-                id=stream.id,
-                name=stream.name,
-                url=stream.url,
-                description=stream.description,
-                status=int(stream.status),  # 确保是整数
-                error_message=stream.error_message
-            )
-            
-            stream_data = StreamResponse.from_orm(stream_obj).dict()
-            # 添加单个视频源状态日志
-            logger.debug(
-                f"视频源 {stream.id} ({stream.name}) "
-                f"状态值: {stream_data['status']}, "
-                f"状态: {'在线' if stream_data['status'] == int(StreamStatus.ONLINE) else '离线'}"
-            )
-            stream_list.append(stream_data)
+            try:
+                stream_data = StreamResponse.from_orm(stream).dict()
+                # 添加单个视频源状态日志
+                logger.debug(
+                    f"视频源 {stream.id} ({stream.name}) "
+                    f"状态值: {stream_data['status']}, "
+                    f"状态: {'在线' if stream_data['status'] == StreamStatus.ONLINE else '离线'}"
+                )
+                stream_list.append(stream_data)
+            except Exception as e:
+                logger.error(f"处理视频源 {stream.id} 数据时出错: {str(e)}")
+                # 创建一个带有默认状态的响应
+                stream_data = {
+                    "id": stream.id,
+                    "name": stream.name,
+                    "url": stream.url,
+                    "description": stream.description,
+                    "status": StreamStatus.OFFLINE,  # 默认离线
+                    "error_message": str(e),
+                    "created_at": stream.created_at,
+                    "updated_at": stream.updated_at
+                }
+                stream_list.append(stream_data)
         
         return BaseResponse(
             code=200,

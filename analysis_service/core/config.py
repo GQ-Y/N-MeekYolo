@@ -60,10 +60,8 @@ class AnalysisServiceConfig(BaseSettings):
     
     # 服务配置
     class ServicesConfig(BaseModel):
-        class ServiceApiConfig(BaseModel):
-            url: str
-            description: str
-        api: ServiceApiConfig
+        host: str = "0.0.0.0"
+        port: int = 8002
     
     # 配置实例
     SERVICE: ServiceConfig = ServiceConfig()
@@ -72,7 +70,7 @@ class AnalysisServiceConfig(BaseSettings):
     STORAGE: StorageConfig = StorageConfig()
     OUTPUT: OutputConfig = OutputConfig()
     DISCOVERY: DiscoveryConfig = DiscoveryConfig()
-    SERVICES: ServicesConfig
+    SERVICES: ServicesConfig = ServicesConfig()
     
     class Config:
         env_file = ".env"

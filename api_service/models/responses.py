@@ -25,22 +25,38 @@ class StreamGroupResponse(BaseModel):
         from_attributes = True
 
 class StreamResponse(BaseModel):
-    """流响应模型"""
+    """视频源响应"""
     id: int
     name: str
     url: str
     description: Optional[str] = None
-    status: int  # 修改为int类型
+    status: int = Field(default=0, description="状态: 0-离线, 1-在线")
     error_message: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
     
     class Config:
         from_attributes = True
-        
+
     @classmethod
     def from_orm(cls, obj):
-        # 确保status是整数
+        # 确保status是整数，处理可能的字符串值
         if hasattr(obj, 'status'):
-            obj.status = int(obj.status)
+            try:
+                if isinstance(obj.status, str):
+                    # 处理字符串状态
+                    status_map = {
+                        'active': 1,
+                        'online': 1,
+                        'inactive': 0,
+                        'offline': 0
+                    }
+                    obj.status = status_map.get(obj.status.lower(), 0)
+                else:
+                    # 确保是整数
+                    obj.status = int(obj.status)
+            except (ValueError, TypeError):
+                obj.status = 0  # 默认离线
         return super().from_orm(obj)
 
 class CreateStreamResponse(BaseModel):

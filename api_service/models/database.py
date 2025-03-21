@@ -85,7 +85,7 @@ class Stream(Base):
     name = Column(String(100), nullable=False)
     url = Column(String(500), unique=True, nullable=False)
     description = Column(Text, nullable=True)
-    status = Column(Integer, default=0)  # 修改为Integer类型,默认为离线(0)
+    status = Column(Integer, default=0)  # 0: 离线, 1: 在线
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
