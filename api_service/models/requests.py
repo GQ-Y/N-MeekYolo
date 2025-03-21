@@ -138,7 +138,7 @@ class UpdateStreamRequest(BaseModel):
     name: Optional[str] = None
     url: Optional[str] = None
     description: Optional[str] = None
-    status: Optional[str] = None
+    status: Optional[int] = None
     group_ids: Optional[List[int]] = None
 
 class CreateStreamGroupRequest(BaseModel):
