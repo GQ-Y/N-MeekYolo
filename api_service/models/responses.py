@@ -30,11 +30,18 @@ class StreamResponse(BaseModel):
     name: str
     url: str
     description: Optional[str] = None
-    status: StreamStatus  # 使用StreamStatus枚举
+    status: int  # 修改为int类型
     error_message: Optional[str] = None
     
     class Config:
         from_attributes = True
+        
+    @classmethod
+    def from_orm(cls, obj):
+        # 确保status是整数
+        if hasattr(obj, 'status'):
+            obj.status = int(obj.status)
+        return super().from_orm(obj)
 
 class CreateStreamResponse(BaseModel):
     """创建流响应"""

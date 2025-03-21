@@ -68,12 +68,22 @@ async def get_streams(
         # 构造响应数据
         stream_list = []
         for stream in streams:
-            stream_data = StreamResponse.from_orm(stream).dict()
+            # 创建一个新的Stream对象以确保状态值正确
+            stream_obj = Stream(
+                id=stream.id,
+                name=stream.name,
+                url=stream.url,
+                description=stream.description,
+                status=int(stream.status),  # 确保是整数
+                error_message=stream.error_message
+            )
+            
+            stream_data = StreamResponse.from_orm(stream_obj).dict()
             # 添加单个视频源状态日志
             logger.debug(
                 f"视频源 {stream.id} ({stream.name}) "
-                f"状态值: {stream.status}, "
-                f"状态: {'在线' if int(stream.status) == int(StreamStatus.ONLINE) else '离线'}"
+                f"状态值: {stream_data['status']}, "
+                f"状态: {'在线' if stream_data['status'] == int(StreamStatus.ONLINE) else '离线'}"
             )
             stream_list.append(stream_data)
         
