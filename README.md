@@ -365,3 +365,16 @@ docker inspect analysis-service | grep Platform
    - 在 Docker Desktop 中分配足够资源
    - 使用 buildx 进行多平台构建
    - 注意 ARM 兼容性问题
+
+## 子模块
+
+本项目使用了以下子模块：
+
+- ZLMediaKit: 流媒体服务器框架
+  ```bash
+  # 克隆项目时包含子模块
+  git clone --recursive https://github.com/your/project.git
+
+  # 或者在克隆后初始化子模块
+  git submodule update --init --recursive
+  ```

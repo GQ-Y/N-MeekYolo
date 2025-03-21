@@ -1,3 +1,10 @@
+# Git
+.git
+.gitignore
+.gitmodules
+.github
+
+# Python
 __pycache__
 *.pyc
 *.pyo
@@ -18,4 +25,34 @@ coverage.xml
 .env
 .venv
 venv/
-ENV/ 
+ENV/
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Build
+build/
+dist/
+*.egg-info
+
+# Logs
+logs/
+*.log
+
+# Data
+data/
+models/
+results/
+
+# Docker
+.docker/
+docker-compose*.yml
+Dockerfile*
+
+# Documentation
+docs/
+*.md
+LICENSE 
