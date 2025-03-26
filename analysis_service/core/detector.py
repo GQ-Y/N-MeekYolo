@@ -21,6 +21,7 @@ from PIL import Image, ImageDraw, ImageFont
 import random
 from datetime import datetime
 from loguru import logger
+import httpx
 
 logger = setup_logger(__name__)
 
@@ -137,27 +138,47 @@ class YOLODetector:
     """YOLO检测器"""
     
     def __init__(self):
+        """初始化检测器"""
         self.model = None
         self.current_model_code = None
         # 使用配置中的设备设置
         self.device = torch.device("cuda" if torch.cuda.is_available() and settings.ANALYSIS.device != "cpu" else "cpu")
         self.stop_flags = {}
+        self.tasks = {}  # 存储任务信息
         
         # 使用新的配置结构构建model_service_url
         self.model_service_url = settings.MODEL_SERVICE.url
         self.api_prefix = settings.MODEL_SERVICE.api_prefix
         
-        # 使用配置中的存储目录
-        self.base_dir = Path(settings.STORAGE.base_dir)
-        self.model_dir = self.base_dir / settings.STORAGE.model_dir
-        self.temp_dir = self.base_dir / settings.STORAGE.temp_dir
-        self.results_dir = self.base_dir / "results"  # 添加结果保存目录
+        # 获取项目根目录
+        self.project_root = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        
+        # 设置各个目录
+        self.base_dir = self.project_root / "data"
+        self.model_dir = self.base_dir / "models"
+        self.temp_dir = self.base_dir / "temp"
+        self.videos_dir = self.base_dir / "videos"  # 新增：视频存储目录
+        self.results_dir = self.project_root / "results"
         
         # 创建必要的目录
-        os.makedirs(self.base_dir, exist_ok=True)
-        os.makedirs(self.model_dir, exist_ok=True)
-        os.makedirs(self.temp_dir, exist_ok=True)
-        os.makedirs(self.results_dir, exist_ok=True)  # 创建结果保存目录
+        try:
+            logger.info("创建必要的目录...")
+            for directory in [self.base_dir, self.model_dir, self.temp_dir, self.videos_dir, self.results_dir]:  # 添加videos_dir
+                if not directory.exists():
+                    directory.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"创建目录: {directory}")
+                else:
+                    logger.info(f"目录已存在: {directory}")
+                    
+            # 检查目录权限
+            for directory in [self.base_dir, self.model_dir, self.temp_dir, self.videos_dir, self.results_dir]:  # 添加videos_dir
+                if not os.access(directory, os.W_OK):
+                    logger.error(f"目录无写入权限: {directory}")
+                    raise PermissionError(f"目录无写入权限: {directory}")
+                    
+        except Exception as e:
+            logger.error(f"创建目录失败: {str(e)}", exc_info=True)
+            raise
         
         # 保存默认配置
         self.default_confidence = settings.ANALYSIS.confidence
@@ -168,9 +189,11 @@ class YOLODetector:
         logger.info(f"使用设备: {self.device}")
         logger.info(f"Model service URL: {self.model_service_url}")
         logger.info(f"Model service API prefix: {self.api_prefix}")
+        logger.info(f"Project root: {self.project_root}")
         logger.info(f"Base directory: {self.base_dir}")
         logger.info(f"Model directory: {self.model_dir}")
         logger.info(f"Temp directory: {self.temp_dir}")
+        logger.info(f"Videos directory: {self.videos_dir}")
         logger.info(f"Results directory: {self.results_dir}")
         logger.info(f"Default confidence: {self.default_confidence}")
         
@@ -273,14 +296,13 @@ class YOLODetector:
                         response_text = await response.text()
                         logger.error(f"响应内容: {response_text[:200]}")  # 只记录前200个字符
                         return None
-                        
         except aiohttp.ClientError as e:
             logger.error(f"网络请求错误: {str(e)}")
             return None
         except Exception as e:
             logger.error(f"下载图片出错: {url}, 错误: {str(e)}", exc_info=True)
             return None
-            
+
     async def _encode_result_image(self, image: np.ndarray, detections: List[Dict], return_image: bool = False) -> Union[str, np.ndarray, None]:
         """将检测结果绘制到图片上"""
         try:
@@ -430,6 +452,12 @@ class YOLODetector:
             imgsz = config.get('imgsz', None)
             nested_detection = config.get('nested_detection', False)
             
+            # 确保置信度和IoU阈值有效
+            if conf is None:
+                conf = self.default_confidence
+            if iou is None:
+                iou = self.default_iou
+                
             logger.info(f"检测配置 - 置信度: {conf}, IoU: {iou}, 类别: {classes}, ROI: {roi}, 图片大小: {imgsz}, 嵌套检测: {nested_detection}")
             
             # 处理ROI
@@ -502,103 +530,77 @@ class YOLODetector:
                     
                     # 检查其他目标是否在当前目标内部
                     for j, child in enumerate(detections):
-                        if i == j or child['parent_idx'] is not None:  # 跳过自身和已有父级的目标
-                            continue
+                        if i != j:  # 不与自己比较
+                            child_bbox = child['bbox']
                             
-                        child_bbox = child['bbox']
-                        
-                        # 计算重叠区域
-                        x_left = max(parent_bbox['x1'], child_bbox['x1'])
-                        y_top = max(parent_bbox['y1'], child_bbox['y1'])
-                        x_right = min(parent_bbox['x2'], child_bbox['x2'])
-                        y_bottom = min(parent_bbox['y2'], child_bbox['y2'])
-                        
-                        if x_right > x_left and y_bottom > y_top:
-                            overlap_area = (x_right - x_left) * (y_bottom - y_top)
-                            overlap_ratio = overlap_area / child['area']
+                            # 计算重叠区域
+                            overlap_x1 = max(parent_bbox['x1'], child_bbox['x1'])
+                            overlap_y1 = max(parent_bbox['y1'], child_bbox['y1'])
+                            overlap_x2 = min(parent_bbox['x2'], child_bbox['x2'])
+                            overlap_y2 = min(parent_bbox['y2'], child_bbox['y2'])
                             
-                            # 判断嵌套关系：重叠面积占子目标面积的比例大于0.9
-                            if overlap_ratio > 0.9:
-                                logger.debug(f"发现嵌套关系: {parent['class_name']} 包含 {child['class_name']}, "
-                                           f"重叠率: {overlap_ratio:.2f}")
-                                child['parent_idx'] = i  # 记录父目标的索引
-                                parent['children'].append(j)  # 记录子目标的索引
+                            # 如果有重叠
+                            if overlap_x1 < overlap_x2 and overlap_y1 < overlap_y2:
+                                # 计算重叠区域面积
+                                overlap_area = (overlap_x2 - overlap_x1) * (overlap_y2 - overlap_y1)
+                                child_area = (child_bbox['x2'] - child_bbox['x1']) * (child_bbox['y2'] - child_bbox['y1'])
+                                
+                                # 如果子目标的90%以上区域在父目标内部
+                                if overlap_area / child_area > 0.9:
+                                    child['parent_idx'] = i
+                                    parent['children'].append(child)
                 
-                # 构建最终的检测结果
-                final_detections = []
-                for i, det in enumerate(detections):
-                    # 如果目标没有父级，则处理它及其子目标
-                    if det['parent_idx'] is None:
-                        # 处理子目标
-                        if det['children']:
-                            children_list = []
-                            for child_idx in det['children']:
-                                child = detections[child_idx].copy()
-                                # 移除子目标中的不必要字段
-                                child.pop('parent_idx', None)
-                                child.pop('children', None)
-                                child.pop('area', None)
-                                children_list.append(child)
-                            det['children'] = children_list
-                        else:
-                            det['children'] = []
-                        
-                        # 移除临时字段
-                        det.pop('parent_idx', None)
-                        det.pop('area', None)
-                        
-                        final_detections.append(det)
-                
-                logger.info(f"嵌套检测完成，共 {len(final_detections)} 个父目标")
-                detections = final_detections
-            else:
-                # 如果不进行嵌套检测，清理所有检测结果中的临时字段
-                for det in detections:
-                    det.pop('parent_idx', None)
-                    det.pop('area', None)
-                    det['children'] = []
+                # 只保留没有父目标的检测结果
+                detections = [det for det in detections if det['parent_idx'] is None]
             
             return detections
-            
+                    
         except Exception as e:
-            logger.error(f"检测失败: {str(e)}")
+            logger.error(f"检测失败: {str(e)}", exc_info=True)
             raise
 
     async def _save_result_image(self, image: np.ndarray, detections: List[Dict], task_name: Optional[str] = None) -> str:
-        """保存带有检测结果的图片
-        
-        Args:
-            image: 原始图片
-            detections: 检测结果
-            task_name: 任务名称
-            
-        Returns:
-            str: 保存的文件路径
-        """
+        """保存带有检测结果的图片"""
         try:
             # 生成带检测结果的图片
+            logger.info("开始生成检测结果图片...")
             result_image = await self._encode_result_image(image, detections, return_image=True)
             if result_image is None:
+                logger.error("生成检测结果图片失败")
                 return None
                 
             # 生成文件名
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             task_prefix = f"{task_name}_" if task_name else ""
             filename = f"{task_prefix}{timestamp}.jpg"
+            logger.info(f"生成文件名: {filename}")
             
             # 确保每天的结果保存在单独的目录中
             date_dir = self.results_dir / datetime.now().strftime("%Y%m%d")
             os.makedirs(date_dir, exist_ok=True)
+            logger.info(f"创建保存目录: {date_dir}")
             
             # 保存图片
             file_path = date_dir / filename
-            cv2.imwrite(str(file_path), result_image)
+            logger.info(f"完整文件路径: {file_path}")
+            logger.info(f"项目根目录: {self.project_root}")
             
-            logger.info(f"分析结果已保存到: {file_path}")
-            return str(file_path)
+            # 确保目录存在
+            if not os.path.exists(os.path.dirname(file_path)):
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
             
+            # 保存图片
+            success = cv2.imwrite(str(file_path), result_image)
+            if not success:
+                logger.error("保存图片失败")
+                return None
+            
+            # 返回相对于项目根目录的路径
+            relative_path = file_path.relative_to(self.project_root)
+            logger.info(f"相对路径: {relative_path}")
+            return str(relative_path)
         except Exception as e:
-            logger.error(f"保存结果图片失败: {str(e)}")
+            logger.error(f"保存结果图片失败: {str(e)}", exc_info=True)
             return None
 
     async def detect_images(
@@ -612,29 +614,17 @@ class YOLODetector:
         enable_callback: bool = True,
         save_result: bool = False
     ) -> Dict[str, Any]:
-        """
-        检测图片
-        
-        Args:
-            model_code: 模型代码
-            image_urls: 图片URL列表
-            callback_urls: 回调URL
-            is_base64: 是否返回base64编码的结果图片
-            config: 检测配置参数
-            task_name: 任务名称
-            enable_callback: 是否启用回调
-            save_result: 是否保存分析结果
-        """
+        """检测图片"""
         try:
             # 记录开始时间
             start_time = time.time()
+            logger.info(f"开始图片分析任务, save_result={save_result}")
             
             # 加载模型
             if not self.model:
                 await self.load_model(model_code)
                 
             results = []
-            saved_paths = []
             for url in image_urls:
                 # 下载图片
                 image = await self._download_image(url)
@@ -648,49 +638,59 @@ class YOLODetector:
                 result_image = None
                 if is_base64:
                     result_image = await self._encode_result_image(image, detections)
-                
+                    
                 # 保存结果
                 saved_path = None
                 if save_result:
+                    logger.info("尝试保存检测结果图片...")
                     saved_path = await self._save_result_image(image, detections, task_name)
                     if saved_path:
-                        saved_paths.append(saved_path)
+                        logger.info(f"成功保存检测结果图片，路径: {saved_path}")
+                    else:
+                        logger.error("保存检测结果图片失败")
                     
-                results.append({
+                result_dict = {
+                    'image_url': url,
                     'detections': detections,
                     'result_image': result_image,
                     'saved_path': saved_path
-                })
+                }
+                logger.info(f"单个结果: {result_dict}")
+                results.append(result_dict)
             
             # 计算分析耗时
             end_time = time.time()
             analysis_duration = end_time - start_time
             
-            result = results[0] if results else {'detections': [], 'result_image': None, 'saved_path': None}
+            # 构建返回结果
+            result = results[0] if results else {
+                'image_url': image_urls[0] if image_urls else None,
+                'detections': [],
+                'result_image': None,
+                'saved_path': None
+            }
             
             # 添加时间信息和任务名称
             result.update({
                 'task_name': task_name,
                 'start_time': start_time,
                 'end_time': end_time,
-                'analysis_duration': analysis_duration,
-                'saved_paths': saved_paths if save_result else None
+                'analysis_duration': analysis_duration
             })
             
+            logger.info(f"最终返回结果: {result}")
+            
             # 发送回调
-            if enable_callback:
-                if callback_urls:
-                    logger.info(f"发送回调到: {callback_urls}")
-                    await self._send_callbacks(callback_urls, result)
-                else:
-                    logger.info("回调已启用但未提供回调地址，跳过回调")
+            if enable_callback and callback_urls:
+                logger.info(f"发送回调到: {callback_urls}")
+                await self._send_callbacks(callback_urls, result)
             else:
-                logger.info("回调已禁用，跳过回调")
+                logger.info("回调已禁用或未提供回调地址，跳过回调")
                 
             return result
             
         except Exception as e:
-            logger.error(f"Image detection failed: {str(e)}")
+            logger.error(f"Image detection failed: {str(e)}", exc_info=True)
             raise
 
     async def start_stream_analysis(
@@ -742,6 +742,20 @@ class YOLODetector:
             await self.load_model(model_code)
             logger.info("Model loaded successfully")
             
+            # 使用配置参数或默认值
+            config = config or {}
+            conf = config.get('confidence', self.default_confidence)
+            iou = config.get('iou', self.default_iou)
+            
+            # 确保置信度和IoU阈值有效
+            if conf is None:
+                conf = self.default_confidence
+            if iou is None:
+                iou = self.default_iou
+            
+            config['confidence'] = conf
+            config['iou'] = iou
+            
             # 打开视频流
             cap = cv2.VideoCapture(stream_url)
             if not cap.isOpened():
@@ -752,6 +766,13 @@ class YOLODetector:
             last_analyze_time = current_time
             last_alarm_time = current_time
             last_push_time = current_time
+            
+            # 如果需要保存结果，创建保存目录
+            date_dir = None
+            if save_result:
+                date_dir = self.results_dir / datetime.now().strftime("%Y%m%d")
+                os.makedirs(date_dir, exist_ok=True)
+                logger.info(f"创建结果保存目录: {date_dir}")
             
             while not self.stop_flags.get(task_id, False):
                 current_time = time.time()
@@ -794,30 +815,38 @@ class YOLODetector:
                                 # 保存结果
                                 saved_path = None
                                 if save_result:
-                                    saved_path = await self._save_result_image(frame, detections, task_name)
+                                    # 生成文件名
+                                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                    task_prefix = f"{task_name}_" if task_name else ""
+                                    filename = f"{task_prefix}{timestamp}.jpg"
+                                    file_path = date_dir / filename
+                                    
+                                    # 生成并保存结果图片
+                                    result_frame = await self._encode_result_image(frame, detections, return_image=True)
+                                    if result_frame is not None:
+                                        cv2.imwrite(str(file_path), result_frame)
+                                        saved_path = str(file_path.relative_to(self.project_root))
+                                        logger.info(f"保存检测结果: {saved_path}")
                                 
                                 # 发送回调
-                                if enable_callback:
-                                    if callback_urls:
-                                        await self._send_callbacks(callback_urls, {
-                                            "task_id": task_id,
-                                            "task_name": task_name,
-                                            "parent_task_id": parent_task_id,
-                                            "detections": detections,
-                                            "stream_url": stream_url,
-                                            "image": frame,
-                                            "timestamp": current_time,
-                                            "task_start_time": task_start_time,
-                                            "frame_start_time": frame_start_time,
-                                            "frame_end_time": frame_end_time,
-                                            "frame_duration": frame_duration,
-                                            "total_duration": frame_end_time - task_start_time,
-                                            "saved_path": saved_path
-                                        })
-                                    else:
-                                        logger.debug("回调已启用但未提供回调地址，跳过回调")
+                                if enable_callback and callback_urls:
+                                    await self._send_callbacks(callback_urls, {
+                                        "task_id": task_id,
+                                        "task_name": task_name,
+                                        "parent_task_id": parent_task_id,
+                                        "detections": detections,
+                                        "stream_url": stream_url,
+                                        "image": frame,
+                                        "timestamp": current_time,
+                                        "task_start_time": task_start_time,
+                                        "frame_start_time": frame_start_time,
+                                        "frame_end_time": frame_end_time,
+                                        "frame_duration": frame_duration,
+                                        "total_duration": frame_end_time - task_start_time,
+                                        "saved_path": saved_path
+                                    })
                                 else:
-                                    logger.debug("回调已禁用，跳过回调")
+                                    logger.debug("回调已禁用或未提供回调地址，跳过回调")
                 
                 except Exception as e:
                     logger.error(f"Frame processing error: {str(e)}")
@@ -881,3 +910,435 @@ class YOLODetector:
         except Exception as e:
             logger.error(f"停止任务失败: {str(e)}", exc_info=True)
             return False
+
+    async def get_video_task_status(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """获取视频分析任务状态
+        
+        Args:
+            task_id: 任务ID
+            
+        Returns:
+            任务信息字典，包含以下字段：
+            - task_name: 任务名称
+            - status: 任务状态（waiting/processing/completed/failed）
+            - video_url: 视频URL
+            - saved_path: 保存路径
+            - start_time: 开始时间
+            - end_time: 结束时间
+            - analysis_duration: 分析耗时
+            - progress: 处理进度（0-100）
+            - total_frames: 总帧数
+            - processed_frames: 已处理帧数
+        """
+        task_info = self.tasks.get(task_id)
+        if task_info:
+            # 计算进度
+            total_frames = task_info.get('total_frames', 0)
+            processed_frames = task_info.get('processed_frames', 0)
+            progress = (processed_frames / total_frames * 100) if total_frames > 0 else 0
+            
+            # 更新进度信息
+            task_info.update({
+                'progress': round(progress, 2),
+                'total_frames': total_frames,
+                'processed_frames': processed_frames
+            })
+            
+        return task_info
+        
+    async def stop_video_task(self, task_id: str) -> bool:
+        """停止视频分析任务
+        
+        Args:
+            task_id: 任务ID
+            
+        Returns:
+            bool: 是否成功停止任务
+        """
+        if task_id in self.stop_flags:
+            self.stop_flags[task_id] = True
+            # 等待任务真正停止
+            for _ in range(10):  # 最多等待5秒
+                if task_id not in self.tasks or self.tasks[task_id]['status'] in ['completed', 'failed']:
+                    break
+                await asyncio.sleep(0.5)
+            return True
+        return False
+        
+    async def start_video_analysis(
+        self,
+        task_id: str,
+        model_code: str,
+        video_url: str,
+        callback_urls: Optional[str] = None,
+        config: Optional[Dict] = None,
+        task_name: Optional[str] = None,
+        enable_callback: bool = True,
+        save_result: bool = False
+    ) -> Dict[str, Any]:
+        """开始视频分析任务
+        
+        Args:
+            task_id: 任务ID
+            model_code: 模型代码
+            video_url: 视频URL
+            callback_urls: 回调URL
+            config: 检测配置参数
+            task_name: 任务名称
+            enable_callback: 是否启用回调
+            save_result: 是否保存分析结果
+        """
+        try:
+            # 记录任务开始时间
+            start_time = time.time()
+            logger.info(f"开始视频分析任务: {task_id}")
+            
+            # 初始化任务信息
+            self.tasks[task_id] = {
+                'task_id': task_id,
+                'task_name': task_name,
+                'status': 'processing',
+                'video_url': video_url,
+                'saved_path': None,
+                'start_time': start_time,
+                'end_time': None,
+                'analysis_duration': None,
+                'progress': 0.0,
+                'total_frames': 0,
+                'processed_frames': 0
+            }
+            
+            # 启动异步处理任务
+            asyncio.create_task(self._process_video_analysis(
+                task_id=task_id,
+                model_code=model_code,
+                video_url=video_url,
+                callback_urls=callback_urls,
+                config=config,
+                task_name=task_name,
+                enable_callback=enable_callback,
+                save_result=save_result
+            ))
+            
+            return self.tasks[task_id]
+            
+        except Exception as e:
+            logger.error(f"启动视频分析任务失败: {str(e)}", exc_info=True)
+            # 更新任务状态为失败
+            if task_id in self.tasks:
+                self.tasks[task_id].update({
+                    'status': 'failed',
+                    'end_time': time.time(),
+                    'analysis_duration': time.time() - start_time
+                })
+            raise
+
+    async def _download_video(self, url: str) -> Optional[str]:
+        """下载视频到本地
+        
+        Args:
+            url: 视频URL
+            
+        Returns:
+            str: 本地视频文件路径
+        """
+        try:
+            # 生成本地文件路径
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"video_{timestamp}.mp4"
+            local_path = str(self.videos_dir / filename)
+            
+            logger.info(f"开始下载视频: {url}")
+            logger.info(f"保存到: {local_path}")
+            
+            # 使用 httpx 下载视频
+            async with httpx.AsyncClient() as client:
+                async with client.stream("GET", url) as response:
+                    response.raise_for_status()
+                    
+                    # 打开本地文件
+                    with open(local_path, "wb") as f:
+                        # 分块下载
+                        async for chunk in response.aiter_bytes():
+                            f.write(chunk)
+            
+            logger.info(f"视频下载完成: {local_path}")
+            return local_path
+            
+        except Exception as e:
+            logger.error(f"下载视频失败: {str(e)}", exc_info=True)
+            if os.path.exists(local_path):
+                os.remove(local_path)
+            raise
+
+    async def _process_video_analysis(
+        self,
+        task_id: str,
+        model_code: str,
+        video_url: str,
+        callback_urls: Optional[str] = None,
+        config: Optional[Dict] = None,
+        task_name: Optional[str] = None,
+        enable_callback: bool = True,
+        save_result: bool = False
+    ):
+        """实际的视频处理逻辑"""
+        cap = None
+        video_writer = None
+        local_video_path = None
+        start_time = time.time()
+        
+        try:
+            logger.info(f"开始处理视频分析任务: {task_id}")
+            
+            # 加载模型
+            if not self.model:
+                await self.load_model(model_code)
+            
+            # 使用配置参数或默认值
+            config_dict = config.dict() if hasattr(config, 'dict') else (config or {})
+            conf = config_dict.get('confidence', self.default_confidence)
+            iou = config_dict.get('iou', self.default_iou)
+            
+            # 确保置信度和IoU阈值有效
+            if conf is None:
+                conf = self.default_confidence
+            if iou is None:
+                iou = self.default_iou
+            
+            config_dict['confidence'] = conf
+            config_dict['iou'] = iou
+            
+            # 下载视频到本地
+            local_video_path = await self._download_video(video_url)
+            
+            # 打开视频
+            cap = cv2.VideoCapture(local_video_path)
+            if not cap.isOpened():
+                raise Exception(f"无法打开视频: {local_video_path}")
+            
+            # 获取视频信息
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            frame_interval = 3  # 每3帧检测一次
+            
+            # 更新任务信息中的总帧数
+            if task_id in self.tasks:
+                self.tasks[task_id].update({
+                    'total_frames': total_frames,
+                    'processed_frames': 0
+                })
+            
+            logger.info(f"视频信息 - FPS: {fps}, 尺寸: {frame_width}x{frame_height}, 总帧数: {total_frames}, 处理间隔: {frame_interval}（每{frame_interval}帧检测一次）")
+
+            # 如果需要保存结果，创建视频写入器
+            saved_path = None
+            relative_saved_path = None
+            if save_result:
+                # 生成保存路径
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                task_prefix = f"{task_name}_" if task_name else ""
+                filename = f"{task_prefix}{timestamp}.mp4"
+                
+                # 确保每天的结果保存在单独的目录中
+                date_dir = self.results_dir / datetime.now().strftime("%Y%m%d")
+                os.makedirs(date_dir, exist_ok=True)
+                
+                # 完整的保存路径
+                saved_path = str(date_dir / filename)
+                relative_saved_path = str(Path(saved_path).relative_to(self.project_root))
+                logger.info(f"视频将保存到: {saved_path}")
+                
+                # 创建视频写入器，使用 H.264 编码
+                if os.name == 'nt':  # Windows
+                    fourcc = cv2.VideoWriter_fourcc(*'H264')
+                else:  # macOS/Linux
+                    fourcc = cv2.VideoWriter_fourcc(*'avc1')
+                
+                video_writer = cv2.VideoWriter(
+                    saved_path,
+                    fourcc,
+                    fps,
+                    (frame_width, frame_height)
+                )
+                
+                if not video_writer.isOpened():
+                    logger.error("无法创建视频写入器，尝试使用其他编码格式")
+                    # 尝试其他编码格式
+                    video_writer.release()
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    video_writer = cv2.VideoWriter(
+                        saved_path,
+                        fourcc,
+                        fps,
+                        (frame_width, frame_height)
+                    )
+            
+            frame_count = 0
+            processed_count = 0
+            last_progress_time = time.time()
+            last_detections = None  # 存储上一次的检测结果
+            frames_buffer = []  # 用于存储检测间隔内的所有帧
+            
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                frame_count += 1
+                frames_buffer.append(frame.copy())  # 将当前帧添加到缓冲区
+                
+                # 检查是否需要停止任务
+                if self.stop_flags.get(task_id, False):
+                    logger.info(f"任务 {task_id} 收到停止信号，开始处理剩余帧...")
+                    # 如果需要保存结果，使用最后一次的检测结果处理剩余的所有帧
+                    if save_result and video_writer is not None:
+                        # 处理缓冲区中的帧
+                        if last_detections is not None:
+                            for buffered_frame in frames_buffer:
+                                result_frame = await self._encode_result_image(buffered_frame, last_detections, return_image=True)
+                                if result_frame is not None:
+                                    video_writer.write(result_frame)
+                        
+                        # 继续读取剩余的帧
+                        while True:
+                            ret, remaining_frame = cap.read()
+                            if not ret:
+                                break
+                            frame_count += 1
+                            # 使用最后一次的检测结果
+                            if last_detections is not None:
+                                result_frame = await self._encode_result_image(remaining_frame, last_detections, return_image=True)
+                                if result_frame is not None:
+                                    video_writer.write(result_frame)
+                            else:
+                                video_writer.write(remaining_frame)
+                            # 更新进度
+                            if task_id in self.tasks:
+                                self.tasks[task_id]['processed_frames'] = frame_count
+                                self.tasks[task_id]['progress'] = round(frame_count / total_frames * 100, 2)
+                    break
+                
+                # 控制处理帧率
+                if frame_count % frame_interval == 0:
+                    processed_count += 1
+                    current_time = time.time()
+                    
+                    try:
+                        # 执行检测
+                        last_detections = await self.detect(frame, config=config_dict)
+                        
+                        # 更新处理进度
+                        if task_id in self.tasks:
+                            self.tasks[task_id]['processed_frames'] = frame_count
+                            self.tasks[task_id]['progress'] = round(frame_count / total_frames * 100, 2)
+                        
+                        # 每秒最多更新一次进度日志
+                        if current_time - last_progress_time >= 1.0:
+                            progress = (frame_count / total_frames) * 100
+                            logger.info(f"处理进度: {progress:.1f}% ({frame_count}/{total_frames})")
+                            last_progress_time = current_time
+                        
+                        # 发送回调
+                        if enable_callback and callback_urls:
+                            await self._send_callbacks(callback_urls, {
+                                "task_id": task_id,
+                                "task_name": task_name,
+                                "frame_index": frame_count,
+                                "total_frames": total_frames,
+                                "progress": progress,
+                                "detections": last_detections,
+                                "timestamp": time.time()
+                            })
+                        
+                        # 如果需要保存结果，处理缓冲区中的所有帧
+                        if save_result and video_writer is not None and last_detections is not None:
+                            for buffered_frame in frames_buffer:
+                                result_frame = await self._encode_result_image(buffered_frame, last_detections, return_image=True)
+                                if result_frame is not None:
+                                    video_writer.write(result_frame)
+                            
+                            # 清空缓冲区
+                            frames_buffer = []
+                            
+                    except Exception as e:
+                        logger.error(f"处理第 {frame_count} 帧时出错: {str(e)}")
+                        continue
+                
+                # 每处理5帧后让出控制权
+                if frame_count % 5 == 0:
+                    await asyncio.sleep(0.01)
+            
+            # 处理缓冲区中剩余的帧
+            if save_result and video_writer is not None and frames_buffer:
+                for buffered_frame in frames_buffer:
+                    if last_detections is not None:
+                        result_frame = await self._encode_result_image(buffered_frame, last_detections, return_image=True)
+                        if result_frame is not None:
+                            video_writer.write(result_frame)
+                    else:
+                        # 如果没有检测结果，直接写入原始帧
+                        video_writer.write(buffered_frame)
+            
+            # 计算分析耗时
+            end_time = time.time()
+            analysis_duration = end_time - start_time
+            
+            # 更新任务状态
+            status = 'completed' if not self.stop_flags.get(task_id, False) else 'stopped'
+            if task_id in self.tasks:
+                self.tasks[task_id].update({
+                    'status': status,
+                    'saved_path': relative_saved_path if save_result else None,
+                    'end_time': end_time,
+                    'analysis_duration': analysis_duration,
+                    'total_frames': total_frames,
+                    'processed_frames': frame_count,
+                    'progress': round(frame_count / total_frames * 100, 2)
+                })
+            
+            # 发送最终回调
+            if enable_callback and callback_urls:
+                await self._send_callbacks(callback_urls, self.tasks[task_id])
+            
+            logger.info(f"视频分析{status}: {self.tasks[task_id]}")
+            
+        except Exception as e:
+            logger.error(f"视频分析失败: {str(e)}", exc_info=True)
+            
+            # 更新任务状态
+            if task_id in self.tasks:
+                self.tasks[task_id].update({
+                    'status': 'failed',
+                    'end_time': time.time(),
+                    'analysis_duration': time.time() - start_time
+                })
+            
+            # 发送错误回调
+            if enable_callback and callback_urls:
+                await self._send_callbacks(callback_urls, {
+                    "task_id": task_id,
+                    "task_name": task_name,
+                    "status": "failed",
+                    "error": str(e)
+                })
+            
+            raise
+            
+        finally:
+            # 释放资源
+            if cap:
+                cap.release()
+            if video_writer:
+                video_writer.release()
+            # 删除临时下载的视频文件
+            if local_video_path and os.path.exists(local_video_path):
+                try:
+                    os.remove(local_video_path)
+                    logger.info(f"已删除临时视频文件: {local_video_path}")
+                except Exception as e:
+                    logger.error(f"删除临时视频文件失败: {str(e)}")
+            # 清理停止标志
+            self.stop_flags.pop(task_id, None)

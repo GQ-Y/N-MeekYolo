@@ -2,8 +2,13 @@
 分析路由
 处理分析请求
 """
-from fastapi import APIRouter, HTTPException, Depends
+import os
+import json
+import uuid
+import tempfile
+from pathlib import Path
 from typing import List, Optional
+from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Form, BackgroundTasks
 from pydantic import BaseModel, Field
 from analysis_service.core.detector import YOLODetector
 from analysis_service.core.queue import TaskQueueManager
@@ -29,10 +34,8 @@ from analysis_service.crud import task as task_crud
 import asyncio
 import time
 from sqlalchemy.orm import Session
-import uuid
-from analysis_service.models.database import TaskQueue, Task
-from sqlalchemy import or_
 from analysis_service.core.config import settings
+from datetime import datetime
 
 logger = setup_logger(__name__)
 
@@ -43,8 +46,21 @@ task_queue = None
 
 router = APIRouter(prefix="/analyze")
 
-# 依赖注入
+# 状态映射
+status_map = {
+    "waiting": 0,     # 等待中
+    "processing": 1,  # 运行中
+    "completed": 2,   # 已完成
+    "failed": -1      # 失败
+}
+
+# 依赖注入函数
+async def get_detector() -> YOLODetector:
+    """获取检测器实例"""
+    return detector
+
 async def get_task_queue(db: Session = Depends(get_db_dependency)) -> TaskQueueManager:
+    """获取任务队列管理器"""
     global task_queue
     if task_queue is None:
         task_queue = TaskQueueManager(db)
@@ -103,6 +119,7 @@ async def analyze_image(request: ImageAnalysisRequest):
             }
         ],
         "result_image": "base64...",               // base64编码的结果图片（当is_base64=true时）
+        "saved_path": "/path/to/saved/result.jpg",  // 保存路径
         "start_time": 1648123456.789,             // 开始时间戳
         "end_time": 1648123457.123,               // 结束时间戳
         "analysis_duration": 0.334                 // 分析耗时（秒）
@@ -143,6 +160,7 @@ async def analyze_image(request: ImageAnalysisRequest):
             task_name=result.get('task_name'),
             detections=result.get('detections', []),
             result_image=result.get('result_image'),
+            saved_path=result.get('saved_path'),
             start_time=result.get('start_time'),
             end_time=result.get('end_time'),
             analysis_duration=result.get('analysis_duration')
@@ -154,8 +172,12 @@ async def analyze_image(request: ImageAnalysisRequest):
         logger.error(f"图片分析失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/video", response_model=VideoAnalysisResponse)
-async def analyze_video(request: VideoAnalysisRequest):
+@router.post("/video/url", response_model=VideoAnalysisResponse)
+async def analyze_video_url(
+    request: VideoAnalysisRequest,
+    background_tasks: BackgroundTasks,
+    detector: YOLODetector = Depends(get_detector)
+) -> VideoAnalysisResponse:
     """分析视频
     
     请求示例:
@@ -165,20 +187,20 @@ async def analyze_video(request: VideoAnalysisRequest):
         "task_name": "视频分析-1",        // 任务名称，可选
         "video_url": "http://example.com/video.mp4",  // 视频URL
         "callback_urls": "http://callback1,http://callback2",  // 回调地址，多个用逗号分隔，可选
-        "enable_callback": true,          // 是否启用回调，默认false
+        "enable_callback": true,          // 是否启用回调，默认true
         "save_result": false,            // 是否保存分析结果到本地，默认false
-        "config": {                       // 检测配置参数，可选
-            "confidence": 0.5,            // 置信度阈值，0-1之间
-            "iou": 0.45,                 // IoU阈值，0-1之间
-            "classes": [0, 2],           // 需要检测的类别ID列表
-            "roi": {                     // 感兴趣区域，坐标为相对值(0-1)
-                "x1": 0.1,              // 左上角x坐标
-                "y1": 0.1,              // 左上角y坐标
-                "x2": 0.9,              // 右下角x坐标
-                "y2": 0.9               // 右下角y坐标
+        "config": {                      // 检测配置参数，可选
+            "confidence": 0.5,           // 置信度阈值，0-1之间
+            "iou": 0.45,                // IoU阈值，0-1之间
+            "classes": [0, 2],          // 需要检测的类别ID列表
+            "roi": {                    // 感兴趣区域，坐标为相对值(0-1)
+                "x1": 0.1,             // 左上角x坐标
+                "y1": 0.1,             // 左上角y坐标
+                "x2": 0.9,             // 右下角x坐标
+                "y2": 0.9              // 右下角y坐标
             },
-            "imgsz": 640,               // 输入图片大小
-            "nested_detection": true     // 是否启用嵌套检测
+            "imgsz": 640,              // 输入图片大小
+            "nested_detection": true    // 是否启用嵌套检测
         }
     }
     ```
@@ -186,27 +208,57 @@ async def analyze_video(request: VideoAnalysisRequest):
     响应示例:
     ```json
     {
-        "task_id": "12345",              // 任务ID
-        "task_name": "视频分析-1",        // 任务名称
-        "status": "running",             // 任务状态：pending/running/completed/failed
-        "start_time": 1648123456.789,    // 开始时间戳
-        "video_url": "http://example.com/video.mp4",  // 视频URL
-        "saved_path": "/path/to/saved/result.mp4"     // 保存的文件路径（当save_result=true时）
+        "task_id": "task_20240326_123456_abcd1234",
+        "task_name": "视频分析-1",
+        "status": 1,  // 0:等待中 1:运行中 2:已完成 -1:失败
+        "video_url": "http://example.com/video.mp4",
+        "saved_path": "results/20240326/video_analysis_1.mp4",
+        "start_time": 1648123456.789,
+        "end_time": null,
+        "analysis_duration": null,
+        "progress": 0.0,
+        "total_frames": 0,
+        "processed_frames": 0
     }
     ```
     """
     try:
+        # 生成任务ID
+        task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        
+        # 启动视频分析任务
         task = await detector.start_video_analysis(
-            request.model_code,
-            request.video_url,
-            config=request.config.dict() if request.config else None,
+            task_id=task_id,
+            model_code=request.model_code,
+            video_url=request.video_url,
+            callback_urls=request.callback_urls,
+            config=request.config,
             task_name=request.task_name,
-            enable_callback=request.enable_callback
+            enable_callback=request.enable_callback,
+            save_result=request.save_result
         )
-        return VideoAnalysisResponse(**task)
+        
+        # 构建响应
+        return VideoAnalysisResponse(
+            task_id=task['task_id'],
+            task_name=task['task_name'],
+            status=status_map.get(task.get('status', 'processing'), 1),  # 默认为运行中
+            video_url=task['video_url'],
+            saved_path=task['saved_path'],
+            start_time=task['start_time'],
+            end_time=task['end_time'],
+            analysis_duration=task['analysis_duration'],
+            progress=task.get('progress', 0.0),
+            total_frames=task.get('total_frames', 0),
+            processed_frames=task.get('processed_frames', 0)
+        )
+        
     except Exception as e:
-        logger.error(f"Video analysis failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"视频分析失败: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"视频分析失败: {str(e)}"
+        )
 
 @router.post("/stream", response_model=StreamResponse)
 async def analyze_stream(
@@ -214,91 +266,7 @@ async def analyze_stream(
     queue: TaskQueueManager = Depends(get_task_queue),
     db: Session = Depends(get_db_dependency)
 ) -> StreamResponse:
-    """处理流分析请求
-    
-    请求示例:
-    ```json
-    {
-        "tasks": [                        // 流分析任务列表
-            {
-                "model_code": "model-gcc",  // 模型代码
-                "task_name": "流分析-1",    // 任务名称，可选
-                "stream_url": "rtsp://example.com/stream1",  // 流地址
-                "output_url": "rtmp://example.com/output1",  // 输出流地址，可选
-                "config": {                 // 检测配置参数，可选
-                    "confidence": 0.5,      // 置信度阈值，0-1之间
-                    "iou": 0.45,           // IoU阈值，0-1之间
-                    "classes": [0, 2],     // 需要检测的类别ID列表
-                    "roi": {               // 感兴趣区域，坐标为相对值(0-1)
-                        "x1": 0.1,        // 左上角x坐标
-                        "y1": 0.1,        // 左上角y坐标
-                        "x2": 0.9,        // 右下角x坐标
-                        "y2": 0.9         // 右下角y坐标
-                    },
-                    "imgsz": 640,         // 输入图片大小
-                    "nested_detection": true  // 是否启用嵌套检测
-                }
-            }
-        ],
-        "callback_urls": "http://callback1,http://callback2",  // 回调地址，多个用逗号分隔，可选
-        "enable_callback": true,          // 是否启用回调，默认false
-        "analyze_interval": 1,            // 分析间隔(秒)，默认1
-        "alarm_interval": 60,             // 报警间隔(秒)，默认60
-        "random_interval": [1, 10],       // 随机延迟区间(秒)，默认[0,0]
-        "push_interval": 5                // 推送间隔(秒)，默认5
-    }
-    ```
-    
-    响应示例:
-    ```json
-    {
-        "code": 200,                      // 状态码
-        "message": "Stream analysis tasks queued",  // 状态信息
-        "data": {
-            "parent_task_id": "67890",    // 父任务ID
-            "sub_tasks": [                // 子任务列表
-                {
-                    "task_id": "12345",   // 任务ID
-                    "task_name": "流分析-1",  // 任务名称
-                    "status": 0,          // 任务状态：0=等待中，1=运行中，2=已完成，-1=失败
-                    "stream_url": "rtsp://example.com/stream1",  // 流地址
-                    "output_url": "rtmp://example.com/output1"   // 输出流地址
-                }
-            ]
-        }
-    }
-    ```
-    
-    回调数据示例:
-    ```json
-    {
-        "task_id": "12345",              // 任务ID
-        "task_name": "流分析-1",          // 任务名称
-        "parent_task_id": "67890",       // 父任务ID
-        "detections": [                   // 检测结果列表
-            {
-                "bbox": {                 // 边界框坐标(像素值)
-                    "x1": 100.0,          // 左上角x坐标
-                    "y1": 200.0,          // 左上角y坐标
-                    "x2": 300.0,          // 右下角x坐标
-                    "y2": 400.0           // 右下角y坐标
-                },
-                "confidence": 0.95,       // 置信度
-                "class_id": 0,           // 类别ID
-                "class_name": "person",   // 类别名称
-                "children": []           // 嵌套检测结果
-            }
-        ],
-        "stream_url": "rtsp://example.com/stream1",  // 流地址
-        "timestamp": 1648123456.789,      // 当前时间戳
-        "task_start_time": 1648123400.000,  // 任务开始时间戳
-        "frame_start_time": 1648123456.700,  // 当前帧开始处理时间戳
-        "frame_end_time": 1648123456.789,    // 当前帧结束处理时间戳
-        "frame_duration": 0.089,             // 当前帧处理耗时(秒)
-        "total_duration": 56.789             // 任务总运行时长(秒)
-    }
-    ```
-    """
+    """处理流分析请求"""
     try:
         # 检查资源是否足够
         if not resource_monitor.has_available_resource():
@@ -306,6 +274,15 @@ async def analyze_stream(
                 status_code=503,
                 detail="资源不足,请稍后再试"
             )
+            
+        # 记录请求参数
+        logger.info(f"收到流分析请求:")
+        logger.info(f"- 任务数量: {len(request.tasks)}")
+        logger.info(f"- 分析间隔: {request.analyze_interval}秒")
+        logger.info(f"- 报警间隔: {request.alarm_interval}秒")
+        logger.info(f"- 推送间隔: {request.push_interval}秒")
+        logger.info(f"- 是否启用回调: {request.enable_callback}")
+        logger.info(f"- 是否保存结果: {request.save_result}")
             
         # 生成父任务ID
         parent_task_id = str(uuid.uuid4())
@@ -327,6 +304,12 @@ async def analyze_stream(
         queue_tasks = []
         
         for task in request.tasks:
+            logger.info(f"处理子任务:")
+            logger.info(f"- 模型代码: {task.model_code}")
+            logger.info(f"- 任务名称: {task.task_name}")
+            logger.info(f"- 流地址: {task.stream_url}")
+            logger.info(f"- 输出地址: {task.output_url}")
+            
             sub_task = task_crud.create_task(
                 db=db,
                 task_id=None,
@@ -348,7 +331,8 @@ async def analyze_stream(
                 push_interval=push_interval,
                 config=task.config.dict() if task.config else None,
                 task_name=task.task_name,
-                enable_callback=request.enable_callback
+                enable_callback=request.enable_callback,
+                save_result=request.save_result  # 添加保存结果参数
             )
             queue_tasks.append(queue_task)
             
@@ -359,7 +343,8 @@ async def analyze_stream(
                 task_name=st.task_name,
                 status=0,
                 stream_url=st.stream_url,
-                output_url=st.output_url
+                output_url=st.output_url,
+                saved_path=None  # 初始时保存路径为空
             )
             for qt, st in zip(queue_tasks, sub_tasks)
         ]
@@ -370,6 +355,10 @@ async def analyze_stream(
             sub_tasks=sub_task_infos
         )
         
+        logger.info(f"流分析任务已创建:")
+        logger.info(f"- 父任务ID: {parent_task_id}")
+        logger.info(f"- 子任务数量: {len(sub_tasks)}")
+        
         return StreamResponse(
             code=200,
             message="Stream analysis tasks queued",
@@ -377,7 +366,7 @@ async def analyze_stream(
         )
         
     except Exception as e:
-        logger.error(f"Queue stream analysis tasks failed: {str(e)}")
+        logger.error(f"创建流分析任务失败: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail=str(e)
@@ -502,3 +491,129 @@ async def get_resource_status():
     except Exception as e:
         logger.error(f"Get resource status failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# 添加新的请求模型
+class VideoStatusRequest(BaseModel):
+    """视频状态查询请求"""
+    task_id: str = Field(..., description="任务ID")
+
+@router.post("/video/status", response_model=VideoAnalysisResponse)
+async def get_video_status(request: VideoStatusRequest):
+    """获取视频分析任务状态
+    
+    请求示例:
+    ```json
+    {
+        "task_id": "550e8400-e29b-41d4-a716-446655440000"
+    }
+    ```
+    
+    响应示例:
+    ```json
+    {
+        "task_id": "550e8400-e29b-41d4-a716-446655440000",
+        "task_name": "视频分析-1",
+        "status": 1,  # 0:等待中 1:运行中 2:已完成 -1:失败
+        "video_url": "http://example.com/video.mp4",
+        "saved_path": "results/20240326/video_analysis_1.mp4",
+        "start_time": 1648123456.789,
+        "end_time": 1648123556.789,
+        "analysis_duration": 100.0,
+        "progress": 45.5,  # 处理进度（0-100）
+        "total_frames": 1000,  # 总帧数
+        "processed_frames": 455  # 已处理帧数
+    }
+    ```
+    """
+    try:
+        # 获取任务状态
+        task = await detector.get_video_task_status(request.task_id)
+        if not task:
+            raise HTTPException(
+                status_code=404,
+                detail=f"任务 {request.task_id} 不存在"
+            )
+            
+        # 将字符串状态转换为数字状态
+        status_map = {
+            "waiting": 0,
+            "processing": 1,
+            "completed": 2,
+            "failed": -1
+        }
+        status = status_map.get(task.get('status', 'processing'), 1)  # 默认为运行中
+        
+        return VideoAnalysisResponse(
+            task_id=request.task_id,
+            task_name=task.get('task_name'),
+            status=status,
+            video_url=task.get('video_url'),
+            saved_path=task.get('saved_path'),
+            start_time=task.get('start_time'),
+            end_time=task.get('end_time'),
+            analysis_duration=task.get('analysis_duration'),
+            progress=task.get('progress'),
+            total_frames=task.get('total_frames'),
+            processed_frames=task.get('processed_frames')
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取视频分析任务状态失败: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"获取任务状态失败: {str(e)}"
+        )
+
+class VideoStopRequest(BaseModel):
+    """停止视频分析任务请求"""
+    task_id: str = Field(..., description="任务ID")
+
+@router.post("/video/stop", response_model=BaseResponse)
+async def stop_video_analysis(request: VideoStopRequest):
+    """停止视频分析任务
+    
+    请求示例:
+    ```json
+    {
+        "task_id": "550e8400-e29b-41d4-a716-446655440000"
+    }
+    ```
+    
+    响应示例:
+    ```json
+    {
+        "code": 200,
+        "message": "任务已停止",
+        "data": {
+            "task_id": "550e8400-e29b-41d4-a716-446655440000"
+        }
+    }
+    ```
+    """
+    try:
+        # 停止任务
+        result = await detector.stop_video_task(request.task_id)
+        if not result:
+            raise HTTPException(
+                status_code=404,
+                detail=f"任务 {request.task_id} 不存在"
+            )
+            
+        return {
+            "code": 200,
+            "message": "任务已停止",
+            "data": {
+                "task_id": request.task_id
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"停止视频分析任务失败: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"停止任务失败: {str(e)}"
+        )

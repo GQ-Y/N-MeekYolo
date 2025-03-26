@@ -113,6 +113,16 @@ class VideoAnalysisRequest(BaseModel):
         description="检测配置参数"
     )
 
+    @property
+    def has_valid_video_source(self) -> bool:
+        """检查是否有有效的视频源"""
+        return bool(self.video_url)
+
+    def model_post_init(self, __context) -> None:
+        """验证视频源"""
+        if not self.has_valid_video_source:
+            raise ValueError("必须提供video_url")
+
 class StreamTask(BaseModel):
     """单个流分析任务"""
     model_code: str = Field(
