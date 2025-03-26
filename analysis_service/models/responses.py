@@ -53,13 +53,18 @@ class DetectionResult(BaseModel):
     track_id: Optional[int] = None
     class_name: str
     confidence: float
-    bbox: Dict[str, int]  # x1, y1, x2, y2, width, height
+    bbox: Dict[str, float]  # x1, y1, x2, y2 使用浮点数以保持精度
+    children: Optional[List['DetectionResult']] = []  # 嵌套检测结果
 
 class ImageAnalysisResponse(BaseModel):
     """图片分析响应"""
     image_url: str
+    task_name: Optional[str] = None
     detections: List[DetectionResult]
     result_image: Optional[str] = None  # base64编码的结果图片
+    start_time: Optional[float] = None  # 开始时间戳
+    end_time: Optional[float] = None    # 结束时间戳
+    analysis_duration: Optional[float] = None  # 分析耗时(秒)
 
 class VideoAnalysisResponse(BaseModel):
     """视频分析响应"""

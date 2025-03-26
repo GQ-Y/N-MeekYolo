@@ -14,7 +14,7 @@ MODEL_SERVICE:
 
 # 分析配置
 ANALYSIS:
-  confidence: 0.8
+  confidence: 0.2
   iou: 0.45
   max_det: 300
   device: "auto"

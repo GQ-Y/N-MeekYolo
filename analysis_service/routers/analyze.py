@@ -17,7 +17,12 @@ from analysis_service.models.responses import (
     SubTaskInfo,
     StreamBatchResponse
 )
-from analysis_service.models.requests import StreamTask, StreamAnalysisRequest
+from analysis_service.models.requests import (
+    ImageAnalysisRequest,
+    VideoAnalysisRequest,
+    StreamAnalysisRequest,
+    StreamTask
+)
 from shared.utils.logger import setup_logger
 from analysis_service.services.database import get_db_dependency
 from analysis_service.crud import task as task_crud
@@ -25,7 +30,7 @@ import asyncio
 import time
 from sqlalchemy.orm import Session
 import uuid
-from analysis_service.models.database import TaskQueue, Task  # 添加导入
+from analysis_service.models.database import TaskQueue, Task
 from sqlalchemy import or_
 from analysis_service.core.config import settings
 
@@ -46,47 +51,157 @@ async def get_task_queue(db: Session = Depends(get_db_dependency)) -> TaskQueueM
         await task_queue.start()
     return task_queue
 
-class ImageAnalysisRequest(BaseModel):
-    """图片分析请求"""
-    model_code: str
-    image_urls: List[str]
-    callback_urls: str = None
-    is_base64: bool = False
-
-class VideoAnalysisRequest(BaseModel):
-    """视频分析请求"""
-    model_code: str
-    video_url: str
-    callback_urls: str = None
-
 @router.post("/image", response_model=ImageAnalysisResponse)
 async def analyze_image(request: ImageAnalysisRequest):
-    """分析图片"""
+    """分析图片
+    
+    请求示例:
+    ```json
+    {
+        "model_code": "model-gcc",        // 模型代码
+        "task_name": "行人检测-1",        // 任务名称，可选
+        "image_urls": [                   // 图片URL列表
+            "http://example.com/image.jpg"
+        ],
+        "callback_urls": "http://callback1,http://callback2",  // 回调地址，多个用逗号分隔，可选
+        "enable_callback": true,          // 是否启用回调，默认false
+        "is_base64": false,              // 是否返回base64编码的结果图片，默认false
+        "save_result": false,            // 是否保存分析结果到本地，默认false
+        "config": {                       // 检测配置参数，可选
+            "confidence": 0.5,            // 置信度阈值，0-1之间
+            "iou": 0.45,                 // IoU阈值，0-1之间
+            "classes": [0, 2],           // 需要检测的类别ID列表
+            "roi": {                     // 感兴趣区域，坐标为相对值(0-1)
+                "x1": 0.1,              // 左上角x坐标
+                "y1": 0.1,              // 左上角y坐标
+                "x2": 0.9,              // 右下角x坐标
+                "y2": 0.9               // 右下角y坐标
+            },
+            "imgsz": 640,               // 输入图片大小
+            "nested_detection": true     // 是否启用嵌套检测
+        }
+    }
+    ```
+    
+    响应示例:
+    ```json
+    {
+        "image_url": "http://example.com/image.jpg",  // 原始图片URL
+        "task_name": "行人检测-1",                    // 任务名称
+        "detections": [                              // 检测结果列表
+            {
+                "track_id": null,                    // 跟踪ID（图片检测时为null）
+                "class_name": "person",              // 类别名称
+                "confidence": 0.95,                  // 置信度
+                "bbox": {                           // 边界框坐标
+                    "x1": 100,                      // 左上角x坐标
+                    "y1": 200,                      // 左上角y坐标
+                    "x2": 300,                      // 右下角x坐标
+                    "y2": 400                       // 右下角y坐标
+                },
+                "children": []                      // 嵌套检测的子目标列表
+            }
+        ],
+        "result_image": "base64...",               // base64编码的结果图片（当is_base64=true时）
+        "start_time": 1648123456.789,             // 开始时间戳
+        "end_time": 1648123457.123,               // 结束时间戳
+        "analysis_duration": 0.334                 // 分析耗时（秒）
+    }
+    ```
+    """
     try:
+        # 记录请求参数
+        logger.info(f"收到图片分析请求:")
+        logger.info(f"- 模型代码: {request.model_code}")
+        logger.info(f"- 任务名称: {request.task_name}")
+        logger.info(f"- 图片数量: {len(request.image_urls)}")
+        logger.info(f"- 检测配置: {request.config}")
+        logger.info(f"- 是否返回base64: {request.is_base64}")
+        logger.info(f"- 是否保存结果: {request.save_result}")
+        
         result = await detector.detect_images(
             request.model_code,
             request.image_urls,
             request.callback_urls,
-            request.is_base64
+            request.is_base64,
+            config=request.config.dict() if request.config else None,
+            task_name=request.task_name,
+            enable_callback=request.enable_callback,
+            save_result=request.save_result
         )
-        logger.info(f"Detection result: {result}")
+        
+        # 记录检测结果
+        logger.info(f"检测完成:")
+        logger.info(f"- 检测到目标数量: {len(result.get('detections', []))}")
+        logger.info(f"- 处理时长: {result.get('analysis_duration', 0):.3f}秒")
+        if result.get('saved_paths'):
+            logger.info(f"- 保存路径: {result['saved_paths']}")
+        
+        # 构建响应
         response = ImageAnalysisResponse(
             image_url=request.image_urls[0],
+            task_name=result.get('task_name'),
             detections=result.get('detections', []),
-            result_image=result.get('result_image')
+            result_image=result.get('result_image'),
+            start_time=result.get('start_time'),
+            end_time=result.get('end_time'),
+            analysis_duration=result.get('analysis_duration')
         )
+        
         return response
+        
     except Exception as e:
-        logger.error(f"Image analysis failed: {str(e)}")
+        logger.error(f"图片分析失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/video", response_model=VideoAnalysisResponse)
 async def analyze_video(request: VideoAnalysisRequest):
-    """分析视频"""
+    """分析视频
+    
+    请求示例:
+    ```json
+    {
+        "model_code": "model-gcc",        // 模型代码
+        "task_name": "视频分析-1",        // 任务名称，可选
+        "video_url": "http://example.com/video.mp4",  // 视频URL
+        "callback_urls": "http://callback1,http://callback2",  // 回调地址，多个用逗号分隔，可选
+        "enable_callback": true,          // 是否启用回调，默认false
+        "save_result": false,            // 是否保存分析结果到本地，默认false
+        "config": {                       // 检测配置参数，可选
+            "confidence": 0.5,            // 置信度阈值，0-1之间
+            "iou": 0.45,                 // IoU阈值，0-1之间
+            "classes": [0, 2],           // 需要检测的类别ID列表
+            "roi": {                     // 感兴趣区域，坐标为相对值(0-1)
+                "x1": 0.1,              // 左上角x坐标
+                "y1": 0.1,              // 左上角y坐标
+                "x2": 0.9,              // 右下角x坐标
+                "y2": 0.9               // 右下角y坐标
+            },
+            "imgsz": 640,               // 输入图片大小
+            "nested_detection": true     // 是否启用嵌套检测
+        }
+    }
+    ```
+    
+    响应示例:
+    ```json
+    {
+        "task_id": "12345",              // 任务ID
+        "task_name": "视频分析-1",        // 任务名称
+        "status": "running",             // 任务状态：pending/running/completed/failed
+        "start_time": 1648123456.789,    // 开始时间戳
+        "video_url": "http://example.com/video.mp4",  // 视频URL
+        "saved_path": "/path/to/saved/result.mp4"     // 保存的文件路径（当save_result=true时）
+    }
+    ```
+    """
     try:
         task = await detector.start_video_analysis(
             request.model_code,
-            request.video_url
+            request.video_url,
+            config=request.config.dict() if request.config else None,
+            task_name=request.task_name,
+            enable_callback=request.enable_callback
         )
         return VideoAnalysisResponse(**task)
     except Exception as e:
@@ -101,12 +216,88 @@ async def analyze_stream(
 ) -> StreamResponse:
     """处理流分析请求
     
-    参数:
-        - analyze_interval: 分析间隔(秒)
-        - alarm_interval: 报警间隔(秒)
-        - random_interval: 随机间隔范围(秒)
-        - confidence_threshold: 目标置信度阈值
-        - push_interval: 推送间隔(秒)
+    请求示例:
+    ```json
+    {
+        "tasks": [                        // 流分析任务列表
+            {
+                "model_code": "model-gcc",  // 模型代码
+                "task_name": "流分析-1",    // 任务名称，可选
+                "stream_url": "rtsp://example.com/stream1",  // 流地址
+                "output_url": "rtmp://example.com/output1",  // 输出流地址，可选
+                "config": {                 // 检测配置参数，可选
+                    "confidence": 0.5,      // 置信度阈值，0-1之间
+                    "iou": 0.45,           // IoU阈值，0-1之间
+                    "classes": [0, 2],     // 需要检测的类别ID列表
+                    "roi": {               // 感兴趣区域，坐标为相对值(0-1)
+                        "x1": 0.1,        // 左上角x坐标
+                        "y1": 0.1,        // 左上角y坐标
+                        "x2": 0.9,        // 右下角x坐标
+                        "y2": 0.9         // 右下角y坐标
+                    },
+                    "imgsz": 640,         // 输入图片大小
+                    "nested_detection": true  // 是否启用嵌套检测
+                }
+            }
+        ],
+        "callback_urls": "http://callback1,http://callback2",  // 回调地址，多个用逗号分隔，可选
+        "enable_callback": true,          // 是否启用回调，默认false
+        "analyze_interval": 1,            // 分析间隔(秒)，默认1
+        "alarm_interval": 60,             // 报警间隔(秒)，默认60
+        "random_interval": [1, 10],       // 随机延迟区间(秒)，默认[0,0]
+        "push_interval": 5                // 推送间隔(秒)，默认5
+    }
+    ```
+    
+    响应示例:
+    ```json
+    {
+        "code": 200,                      // 状态码
+        "message": "Stream analysis tasks queued",  // 状态信息
+        "data": {
+            "parent_task_id": "67890",    // 父任务ID
+            "sub_tasks": [                // 子任务列表
+                {
+                    "task_id": "12345",   // 任务ID
+                    "task_name": "流分析-1",  // 任务名称
+                    "status": 0,          // 任务状态：0=等待中，1=运行中，2=已完成，-1=失败
+                    "stream_url": "rtsp://example.com/stream1",  // 流地址
+                    "output_url": "rtmp://example.com/output1"   // 输出流地址
+                }
+            ]
+        }
+    }
+    ```
+    
+    回调数据示例:
+    ```json
+    {
+        "task_id": "12345",              // 任务ID
+        "task_name": "流分析-1",          // 任务名称
+        "parent_task_id": "67890",       // 父任务ID
+        "detections": [                   // 检测结果列表
+            {
+                "bbox": {                 // 边界框坐标(像素值)
+                    "x1": 100.0,          // 左上角x坐标
+                    "y1": 200.0,          // 左上角y坐标
+                    "x2": 300.0,          // 右下角x坐标
+                    "y2": 400.0           // 右下角y坐标
+                },
+                "confidence": 0.95,       // 置信度
+                "class_id": 0,           // 类别ID
+                "class_name": "person",   // 类别名称
+                "children": []           // 嵌套检测结果
+            }
+        ],
+        "stream_url": "rtsp://example.com/stream1",  // 流地址
+        "timestamp": 1648123456.789,      // 当前时间戳
+        "task_start_time": 1648123400.000,  // 任务开始时间戳
+        "frame_start_time": 1648123456.700,  // 当前帧开始处理时间戳
+        "frame_end_time": 1648123456.789,    // 当前帧结束处理时间戳
+        "frame_duration": 0.089,             // 当前帧处理耗时(秒)
+        "total_duration": 56.789             // 任务总运行时长(秒)
+    }
+    ```
     """
     try:
         # 检查资源是否足够
@@ -123,14 +314,12 @@ async def analyze_stream(
         default_analyze_interval = settings.ANALYSIS.analyze_interval
         default_alarm_interval = settings.ANALYSIS.alarm_interval
         default_random_interval = tuple(settings.ANALYSIS.random_interval)
-        default_confidence = settings.ANALYSIS.confidence
         default_push_interval = settings.ANALYSIS.push_interval
         
         # 使用请求参数覆盖默认值
         analyze_interval = request.analyze_interval or default_analyze_interval
         alarm_interval = request.alarm_interval or default_alarm_interval
         random_interval = request.random_interval or default_random_interval
-        confidence_threshold = request.confidence_threshold or default_confidence
         push_interval = request.push_interval or default_push_interval
         
         # 创建子任务
@@ -144,7 +333,8 @@ async def analyze_stream(
                 model_code=task.model_code,
                 stream_url=task.stream_url,
                 output_url=task.output_url,
-                callback_urls=request.callback_urls
+                callback_urls=request.callback_urls,
+                task_name=task.task_name
             )
             sub_tasks.append(sub_task)
             
@@ -155,8 +345,10 @@ async def analyze_stream(
                 analyze_interval=analyze_interval,
                 alarm_interval=alarm_interval,
                 random_interval=random_interval,
-                confidence_threshold=confidence_threshold,
-                push_interval=push_interval
+                push_interval=push_interval,
+                config=task.config.dict() if task.config else None,
+                task_name=task.task_name,
+                enable_callback=request.enable_callback
             )
             queue_tasks.append(queue_task)
             
@@ -164,6 +356,7 @@ async def analyze_stream(
         sub_task_infos = [
             SubTaskInfo(
                 task_id=qt.id,
+                task_name=st.task_name,
                 status=0,
                 stream_url=st.stream_url,
                 output_url=st.output_url

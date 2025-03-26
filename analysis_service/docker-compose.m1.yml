@@ -16,10 +16,12 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./results:/app/results
+      - ./config:/app/analysis_service/config
     environment:
       - ANALYSIS_SERVICE_ENV=production
       - MODEL_SERVICE_HOST=model-service
       - DEVICE=cpu
+      - ANALYSIS__confidence=0.2
     networks:
       - meekyolo-net
     healthcheck:

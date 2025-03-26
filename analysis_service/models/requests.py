@@ -1,5 +1,117 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 from pydantic import BaseModel, Field
+
+class DetectionConfig(BaseModel):
+    """检测配置"""
+    confidence: Optional[float] = Field(
+        None,
+        description="置信度阈值",
+        gt=0,
+        lt=1,
+        example=0.5
+    )
+    iou: Optional[float] = Field(
+        None,
+        description="IoU阈值",
+        gt=0,
+        lt=1,
+        example=0.45
+    )
+    classes: Optional[List[int]] = Field(
+        None,
+        description="需要检测的类别ID列表",
+        example=[0, 2]
+    )
+    roi: Optional[Dict[str, float]] = Field(
+        None,
+        description="感兴趣区域，格式为{x1, y1, x2, y2}，值为0-1的归一化坐标",
+        example={"x1": 0.1, "y1": 0.1, "x2": 0.9, "y2": 0.9}
+    )
+    imgsz: Optional[int] = Field(
+        None,
+        description="输入图片大小",
+        ge=32,
+        le=4096,
+        example=640
+    )
+    nested_detection: Optional[bool] = Field(
+        False,
+        description="是否进行嵌套检测（检查目标A是否在目标B内）"
+    )
+
+class ImageAnalysisRequest(BaseModel):
+    """图片分析请求"""
+    model_code: str = Field(
+        ...,
+        description="模型代码",
+        example="model-gcc"
+    )
+    task_name: Optional[str] = Field(
+        None,
+        description="任务名称",
+        example="行人检测-1"
+    )
+    image_urls: List[str] = Field(
+        ...,
+        description="图片URL列表",
+        example=["http://example.com/image.jpg"]
+    )
+    callback_urls: Optional[str] = Field(
+        None,
+        description="回调地址，多个用逗号分隔。如果此字段为空，即使enable_callback为true也不会发送回调",
+        example="http://callback1,http://callback2"
+    )
+    enable_callback: bool = Field(
+        True,
+        description="是否启用回调。注意：只有当此字段为true且callback_urls不为空时才会发送回调"
+    )
+    is_base64: bool = Field(
+        False,
+        description="是否返回base64编码的结果图片"
+    )
+    save_result: bool = Field(
+        False,
+        description="是否保存分析结果到本地。若为true，则在响应中返回保存的文件路径"
+    )
+    config: Optional[DetectionConfig] = Field(
+        None,
+        description="检测配置参数"
+    )
+
+class VideoAnalysisRequest(BaseModel):
+    """视频分析请求"""
+    model_code: str = Field(
+        ...,
+        description="模型代码",
+        example="model-gcc"
+    )
+    task_name: Optional[str] = Field(
+        None,
+        description="任务名称",
+        example="视频分析-1"
+    )
+    video_url: str = Field(
+        ...,
+        description="视频URL",
+        example="http://example.com/video.mp4"
+    )
+    callback_urls: Optional[str] = Field(
+        None,
+        description="回调地址，多个用逗号分隔。如果此字段为空，即使enable_callback为true也不会发送回调",
+        example="http://callback1,http://callback2"
+    )
+    enable_callback: bool = Field(
+        True,
+        description="是否启用回调。注意：只有当此字段为true且callback_urls不为空时才会发送回调"
+    )
+    save_result: bool = Field(
+        False,
+        description="是否保存分析结果到本地。若为true，则在响应中返回保存的文件路径"
+    )
+    config: Optional[DetectionConfig] = Field(
+        None,
+        description="检测配置参数"
+    )
 
 class StreamTask(BaseModel):
     """单个流分析任务"""
@@ -7,6 +119,11 @@ class StreamTask(BaseModel):
         ...,
         description="模型代码",
         example="model-gcc"
+    )
+    task_name: Optional[str] = Field(
+        None,
+        description="任务名称",
+        example="流分析-1"
     )
     stream_url: str = Field(
         ..., 
@@ -17,57 +134,67 @@ class StreamTask(BaseModel):
         None,
         description="输出地址"
     )
+    save_result: bool = Field(
+        False,
+        description="是否保存分析结果到本地。若为true，则在响应中返回保存的文件路径"
+    )
+    config: Optional[DetectionConfig] = Field(
+        None,
+        description="检测配置参数"
+    )
 
 class StreamAnalysisRequest(BaseModel):
-    """流分析请求
-    
-    参数:
-        tasks: 任务列表
-        callback_urls: 回调地址,多个用逗号分隔
-        analyze_interval: 分析间隔(秒)
-        alarm_interval: 报警间隔(秒)
-        random_interval: 随机间隔范围(秒)
-        confidence_threshold: 目标置信度阈值
-        push_interval: 推送间隔(秒)
-    """
+    """流分析请求"""
     tasks: List[StreamTask] = Field(
         ...,
-        description="任务列表",
-        min_items=1
+        description="流分析任务列表",
+        example=[{
+            "model_code": "model-gcc",
+            "stream_url": "rtsp://example.com/stream1",
+            "output_url": "rtsp://example.com/output1",
+            "config": {
+                "confidence": 0.5,
+                "iou": 0.45,
+                "max_det": 100,
+                "classes": [0, 1, 2],
+                "roi": {
+                    "x1": 0.1,
+                    "y1": 0.1,
+                    "x2": 0.9,
+                    "y2": 0.9
+                },
+                "imgsz": 640,
+                "nested_detection": True
+            }
+        }]
     )
     callback_urls: Optional[str] = Field(
         None,
-        description="回调地址,多个用逗号分隔",
+        description="回调地址，多个用逗号分隔。如果此字段为空，即使enable_callback为true也不会发送回调",
         example="http://callback1,http://callback2"
     )
-    analyze_interval: Optional[int] = Field(
-        None,
+    enable_callback: bool = Field(
+        True,
+        description="是否启用回调。注意：只有当此字段为true且callback_urls不为空时才会发送回调"
+    )
+    analyze_interval: int = Field(
+        1,
         description="分析间隔(秒)",
-        ge=1,
         example=1
     )
-    alarm_interval: Optional[int] = Field(
-        None,
-        description="报警间隔(秒)", 
-        ge=1,
+    alarm_interval: int = Field(
+        60,
+        description="报警间隔(秒)",
         example=60
     )
-    random_interval: Optional[Tuple[int, int]] = Field(
-        None,
-        description="随机间隔范围(秒)",
-        example=[1, 10]
+    random_interval: Tuple[int, int] = Field(
+        (0, 0),
+        description="随机延迟区间(秒)",
+        example=(0, 0)
     )
-    confidence_threshold: Optional[float] = Field(
-        None,
-        description="目标置信度阈值",
-        gt=0,
-        lt=1,
-        example=0.8
-    )
-    push_interval: Optional[int] = Field(
-        None,
+    push_interval: int = Field(
+        5,
         description="推送间隔(秒)",
-        ge=1,
         example=5
     )
 
@@ -78,18 +205,21 @@ class StreamAnalysisRequest(BaseModel):
                     "tasks": [
                         {
                             "model_code": "model-gcc",
-                            "stream_url": "rtsp://example.com/stream1"
-                        },
-                        {
-                            "model_code": "model-gcc", 
-                            "stream_url": "rtsp://example.com/stream2"
+                            "stream_url": "rtsp://example.com/stream1",
+                            "config": {
+                                "confidence": 0.5,
+                                "iou": 0.45,
+                                "classes": [0, 2],
+                                "roi": {"x1": 0.1, "y1": 0.1, "x2": 0.9, "y2": 0.9},
+                                "imgsz": 640,
+                                "nested_detection": True
+                            }
                         }
                     ],
-                    "callback_urls": "http://127.0.0.1:8081,http://192.168.1.1:8081",
+                    "callback_urls": "http://127.0.0.1:8081",
                     "analyze_interval": 1,
                     "alarm_interval": 60,
-                    "random_interval": [1, 10],
-                    "confidence_threshold": 0.8,
+                    "random_interval": (0, 0),
                     "push_interval": 5
                 }
             ]
