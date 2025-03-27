@@ -72,6 +72,16 @@ class DetectionResult(BaseModel):
     confidence: float = Field(..., description="置信度")
     bbox: Dict[str, float] = Field(..., description="边界框坐标")
     children: List["DetectionResult"] = Field(default_factory=list, description="嵌套检测的子目标列表")
+    track_info: Optional[Dict[str, Any]] = Field(
+        None,
+        description="跟踪信息，包含轨迹、速度等",
+        example={
+            "trajectory": [(100, 100, 200, 200), (110, 110, 210, 210)],  # 历史轨迹点 [(x1,y1,x2,y2),...]
+            "velocity": (10, 10),                                         # 速度向量 (dx,dy)
+            "age": 10,                                                    # 跟踪持续帧数
+            "time_since_update": 0                                        # 最后更新后经过的帧数
+        }
+    )
 
 class ImageAnalysisData(BaseModel):
     """图像分析数据"""
@@ -98,6 +108,18 @@ class VideoAnalysisData(BaseModel):
     progress: Optional[float] = Field(None, description="处理进度（0-100）")
     total_frames: Optional[int] = Field(None, description="总帧数")
     processed_frames: Optional[int] = Field(None, description="已处理帧数")
+    tracking_enabled: Optional[bool] = Field(None, description="是否启用了目标跟踪")
+    tracking_stats: Optional[Dict[str, Any]] = Field(
+        None,
+        description="跟踪统计信息",
+        example={
+            "total_tracks": 100,           # 总跟踪目标数
+            "active_tracks": 5,            # 当前活跃的跟踪目标数
+            "avg_track_length": 25.5,      # 平均跟踪长度（帧数）
+            "tracker_type": "sort",        # 使用的跟踪器类型
+            "tracking_fps": 30.0           # 跟踪处理帧率
+        }
+    )
 
 class StreamBatchData(BaseModel):
     """流批次数据"""

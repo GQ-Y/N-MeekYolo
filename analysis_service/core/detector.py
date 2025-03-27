@@ -22,6 +22,8 @@ import random
 from datetime import datetime
 from loguru import logger
 import httpx
+import colorsys
+from analysis_service.core.tracker import create_tracker, BaseTracker
 
 logger = setup_logger(__name__)
 
@@ -141,6 +143,7 @@ class YOLODetector:
         """初始化检测器"""
         self.model = None
         self.current_model_code = None
+        self.tracker: Optional[BaseTracker] = None  # 添加跟踪器属性
         # 使用配置中的设备设置
         self.device = torch.device("cuda" if torch.cuda.is_available() and settings.ANALYSIS.device != "cpu" else "cpu")
         self.stop_flags = {}
@@ -303,7 +306,14 @@ class YOLODetector:
             logger.error(f"下载图片出错: {url}, 错误: {str(e)}", exc_info=True)
             return None
 
-    async def _encode_result_image(self, image: np.ndarray, detections: List[Dict], return_image: bool = False) -> Union[str, np.ndarray, None]:
+    async def _encode_result_image(
+        self,
+        image: np.ndarray,
+        detections: List[Dict],
+        return_image: bool = False,
+        draw_tracks: bool = False,  # 新增: 是否绘制轨迹
+        draw_track_ids: bool = False  # 新增: 是否绘制跟踪ID
+    ) -> Union[str, np.ndarray, None]:
         """将检测结果绘制到图片上"""
         try:
             # 复制图片以免修改原图
@@ -350,24 +360,34 @@ class YOLODetector:
                     det: 检测结果
                     level: 嵌套层级，用于确定颜色
                 """
+                nonlocal draw, img_pil  # 声明使用外部的draw和img_pil变量
+                
                 bbox = det['bbox']
                 x1, y1 = bbox['x1'], bbox['y1']
                 x2, y2 = bbox['x2'], bbox['y2']
                 
-                # 根据层级选择不同的颜色
-                colors = [
-                    (0, 255, 0),   # 绿色 - 父级
-                    (255, 0, 0),   # 红色 - 一级子目标
-                    (0, 0, 255),   # 蓝色 - 二级子目标
-                    (255, 255, 0)  # 黄色 - 更深层级
-                ]
-                box_color = colors[min(level, len(colors) - 1)]
+                # 根据跟踪ID或层级选择颜色
+                if "track_id" in det:
+                    box_color = self._get_color_by_id(det["track_id"])
+                else:
+                    # 根据层级选择不同的颜色
+                    colors = [
+                        (0, 255, 0),   # 绿色 - 父级
+                        (255, 0, 0),   # 红色 - 一级子目标
+                        (0, 0, 255),   # 蓝色 - 二级子目标
+                        (255, 255, 0)  # 黄色 - 更深层级
+                    ]
+                    box_color = colors[min(level, len(colors) - 1)]
                 
                 # 绘制边界框
                 draw.rectangle([(x1, y1), (x2, y2)], outline=box_color, width=3)  # 加粗边框
                 
-                # 绘制标签（支持中文）
-                label = f"{det['class_name']} {det['confidence']:.2f}"
+                # 准备标签文本
+                label_parts = []
+                label_parts.append(f"{det['class_name']} {det['confidence']:.2f}")
+                if draw_track_ids and det.get("track_id") is not None:
+                    label_parts.append(f"ID:{det['track_id']}")
+                label = " | ".join(label_parts)
                 
                 # 计算文本大小
                 text_bbox = draw.textbbox((0, 0), label, font=font)
@@ -393,6 +413,51 @@ class YOLODetector:
                 # 递归处理子目标
                 for child in det.get('children', []):
                     draw_detection(child, level + 1)
+                
+                # 如果启用了轨迹绘制，且有轨迹信息
+                if draw_tracks and det.get("track_info", {}).get("trajectory"):
+                    # 先转换回OpenCV格式处理轨迹
+                    temp_image = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+                    
+                    trajectory = det["track_info"]["trajectory"]
+                    # 只绘制最近的N个点
+                    max_trajectory_points = 30
+                    if len(trajectory) > 1:
+                        points = trajectory[-max_trajectory_points:]
+                        for i in range(len(points) - 1):
+                            pt1 = points[i]
+                            pt2 = points[i + 1]
+                            # 计算轨迹线的中心点
+                            pt1_center = (
+                                int((pt1[0] + pt1[2]) / 2),
+                                int((pt1[1] + pt1[3]) / 2)
+                            )
+                            pt2_center = (
+                                int((pt2[0] + pt2[2]) / 2),
+                                int((pt2[1] + pt2[3]) / 2)
+                            )
+                            # 绘制轨迹线，使用半透明效果
+                            alpha = 0.5
+                            overlay = temp_image.copy()
+                            cv2.line(
+                                overlay,
+                                pt1_center,
+                                pt2_center,
+                                box_color,
+                                2
+                            )
+                            cv2.addWeighted(
+                                overlay,
+                                alpha,
+                                temp_image,
+                                1 - alpha,
+                                0,
+                                temp_image
+                            )
+                    
+                    # 转换回PIL格式
+                    img_pil = Image.fromarray(cv2.cvtColor(temp_image, cv2.COLOR_BGR2RGB))
+                    draw = ImageDraw.Draw(img_pil)
             
             # 处理所有顶层检测结果
             for det in detections:
@@ -414,7 +479,7 @@ class YOLODetector:
                 image_base64 = base64.b64encode(buffer).decode('utf-8')
                 logger.debug(f"成功生成base64图片，长度: {len(image_base64)}")
                 return image_base64
-                
+            
             except Exception as e:
                 logger.error(f"图片编码为base64失败: {str(e)}", exc_info=True)
                 return None
@@ -974,7 +1039,9 @@ class YOLODetector:
         config: Optional[Dict] = None,
         task_name: Optional[str] = None,
         enable_callback: bool = True,
-        save_result: bool = False
+        save_result: bool = False,
+        enable_tracking: bool = False,  # 新增: 是否启用跟踪
+        tracking_config: Optional[Dict] = None  # 新增: 跟踪配置
     ) -> Dict[str, Any]:
         """开始视频分析任务
         
@@ -987,6 +1054,15 @@ class YOLODetector:
             task_name: 任务名称
             enable_callback: 是否启用回调
             save_result: 是否保存分析结果
+            enable_tracking: 是否启用目标跟踪
+            tracking_config: 跟踪配置,包含以下参数:
+                - tracker_type: 跟踪器类型,默认为"sort"
+                - max_age: 最大跟踪帧数,默认为30
+                - min_hits: 最小命中次数,默认为3
+                - iou_threshold: IOU阈值,默认为0.3
+                - visualization: 可视化配置
+                    - show_tracks: 是否显示轨迹
+                    - show_track_ids: 是否显示跟踪ID
         """
         try:
             # 记录任务开始时间
@@ -1005,7 +1081,15 @@ class YOLODetector:
                 'analysis_duration': None,
                 'progress': 0.0,
                 'total_frames': 0,
-                'processed_frames': 0
+                'processed_frames': 0,
+                'tracking_enabled': enable_tracking,  # 新增: 跟踪状态
+                'tracking_stats': {  # 新增: 跟踪统计信息
+                    'total_tracks': 0,
+                    'active_tracks': 0,
+                    'avg_track_length': 0.0,
+                    'tracker_type': tracking_config.get('tracker_type', 'sort') if enable_tracking else None,
+                    'tracking_fps': 0.0
+                } if enable_tracking else None
             }
             
             # 启动异步处理任务
@@ -1017,7 +1101,9 @@ class YOLODetector:
                 config=config,
                 task_name=task_name,
                 enable_callback=enable_callback,
-                save_result=save_result
+                save_result=save_result,
+                enable_tracking=enable_tracking,  # 新增: 传递跟踪参数
+                tracking_config=tracking_config
             ))
             
             return self.tasks[task_id]
@@ -1080,7 +1166,9 @@ class YOLODetector:
         config: Optional[Dict] = None,
         task_name: Optional[str] = None,
         enable_callback: bool = True,
-        save_result: bool = False
+        save_result: bool = False,
+        enable_tracking: bool = False,  # 新增: 是否启用跟踪
+        tracking_config: Optional[Dict] = None  # 新增: 跟踪配置
     ):
         """实际的视频处理逻辑"""
         cap = None
@@ -1094,6 +1182,17 @@ class YOLODetector:
             # 加载模型
             if not self.model:
                 await self.load_model(model_code)
+            
+            # 初始化跟踪器（如果启用）
+            if enable_tracking:
+                tracking_config = tracking_config or {}
+                self.tracker = create_tracker(
+                    tracker_type=tracking_config.get("tracker_type", "sort"),
+                    max_age=tracking_config.get("max_age", 30),
+                    min_hits=tracking_config.get("min_hits", 3),
+                    iou_threshold=tracking_config.get("iou_threshold", 0.3)
+                )
+                logger.info(f"初始化跟踪器: {tracking_config.get('tracker_type', 'sort')}")
             
             # 使用配置参数或默认值
             config_dict = config.dict() if hasattr(config, 'dict') else (config or {})
@@ -1124,14 +1223,23 @@ class YOLODetector:
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             frame_interval = 3  # 每3帧检测一次
             
-            # 更新任务信息中的总帧数
+            # 更新任务信息中的总帧数和跟踪状态
             if task_id in self.tasks:
                 self.tasks[task_id].update({
                     'total_frames': total_frames,
-                    'processed_frames': 0
+                    'processed_frames': 0,
+                    'tracking_enabled': enable_tracking,
+                    'tracking_stats': {
+                        'total_tracks': 0,
+                        'active_tracks': 0,
+                        'avg_track_length': 0.0,
+                        'tracker_type': tracking_config.get('tracker_type', 'sort') if enable_tracking else None,
+                        'tracking_fps': 0.0
+                    } if enable_tracking else None
                 })
             
             logger.info(f"视频信息 - FPS: {fps}, 尺寸: {frame_width}x{frame_height}, 总帧数: {total_frames}, 处理间隔: {frame_interval}（每{frame_interval}帧检测一次）")
+            logger.info(f"目标跟踪: {'启用' if enable_tracking else '禁用'}")
 
             # 如果需要保存结果，创建视频写入器
             saved_path = None
@@ -1181,6 +1289,8 @@ class YOLODetector:
             last_progress_time = time.time()
             last_detections = None  # 存储上一次的检测结果
             frames_buffer = []  # 用于存储检测间隔内的所有帧
+            tracking_start_time = time.time()
+            total_tracking_time = 0
             
             while True:
                 ret, frame = cap.read()
@@ -1198,7 +1308,13 @@ class YOLODetector:
                         # 处理缓冲区中的帧
                         if last_detections is not None:
                             for buffered_frame in frames_buffer:
-                                result_frame = await self._encode_result_image(buffered_frame, last_detections, return_image=True)
+                                result_frame = await self._encode_result_image(
+                                    buffered_frame, 
+                                    last_detections,
+                                    return_image=True,
+                                    draw_tracks=enable_tracking and tracking_config.get('visualization', {}).get('show_tracks', True),
+                                    draw_track_ids=enable_tracking and tracking_config.get('visualization', {}).get('show_track_ids', True)
+                                )
                                 if result_frame is not None:
                                     video_writer.write(result_frame)
                         
@@ -1210,7 +1326,13 @@ class YOLODetector:
                             frame_count += 1
                             # 使用最后一次的检测结果
                             if last_detections is not None:
-                                result_frame = await self._encode_result_image(remaining_frame, last_detections, return_image=True)
+                                result_frame = await self._encode_result_image(
+                                    remaining_frame,
+                                    last_detections,
+                                    return_image=True,
+                                    draw_tracks=enable_tracking and tracking_config.get('visualization', {}).get('show_tracks', True),
+                                    draw_track_ids=enable_tracking and tracking_config.get('visualization', {}).get('show_track_ids', True)
+                                )
                                 if result_frame is not None:
                                     video_writer.write(result_frame)
                             else:
@@ -1228,7 +1350,30 @@ class YOLODetector:
                     
                     try:
                         # 执行检测
-                        last_detections = await self.detect(frame, config=config_dict)
+                        detections = await self.detect(frame, config=config_dict)
+                        
+                        # 如果启用了跟踪，更新跟踪状态
+                        if enable_tracking and self.tracker:
+                            tracking_start = time.time()
+                            tracked_objects = self.tracker.update(detections)
+                            tracking_time = time.time() - tracking_start
+                            total_tracking_time += tracking_time
+                            
+                            # 更新检测结果，添加跟踪信息
+                            for det, track in zip(detections, tracked_objects):
+                                det.update(track.to_dict())
+                            
+                            # 更新跟踪统计信息
+                            if task_id in self.tasks and self.tasks[task_id].get('tracking_stats'):
+                                stats = self.tasks[task_id]['tracking_stats']
+                                stats.update({
+                                    'total_tracks': self.tracker.next_track_id - 1,
+                                    'active_tracks': len([t for t in tracked_objects if t.time_since_update == 0]),
+                                    'avg_track_length': sum(t.age for t in tracked_objects) / len(tracked_objects) if tracked_objects else 0,
+                                    'tracking_fps': processed_count / total_tracking_time if total_tracking_time > 0 else 0
+                                })
+                        
+                        last_detections = detections
                         
                         # 更新处理进度
                         if task_id in self.tasks:
@@ -1250,13 +1395,21 @@ class YOLODetector:
                                 "total_frames": total_frames,
                                 "progress": progress,
                                 "detections": last_detections,
+                                "tracking_enabled": enable_tracking,
+                                "tracking_stats": self.tasks[task_id].get('tracking_stats') if enable_tracking else None,
                                 "timestamp": time.time()
                             })
                         
                         # 如果需要保存结果，处理缓冲区中的所有帧
                         if save_result and video_writer is not None and last_detections is not None:
                             for buffered_frame in frames_buffer:
-                                result_frame = await self._encode_result_image(buffered_frame, last_detections, return_image=True)
+                                result_frame = await self._encode_result_image(
+                                    buffered_frame, 
+                                    last_detections,
+                                    return_image=True,
+                                    draw_tracks=enable_tracking and tracking_config.get('visualization', {}).get('show_tracks', True),
+                                    draw_track_ids=enable_tracking and tracking_config.get('visualization', {}).get('show_track_ids', True)
+                                )
                                 if result_frame is not None:
                                     video_writer.write(result_frame)
                             
@@ -1275,7 +1428,13 @@ class YOLODetector:
             if save_result and video_writer is not None and frames_buffer:
                 for buffered_frame in frames_buffer:
                     if last_detections is not None:
-                        result_frame = await self._encode_result_image(buffered_frame, last_detections, return_image=True)
+                        result_frame = await self._encode_result_image(
+                            buffered_frame,
+                            last_detections,
+                            return_image=True,
+                            draw_tracks=enable_tracking and tracking_config.get('visualization', {}).get('show_tracks', True),
+                            draw_track_ids=enable_tracking and tracking_config.get('visualization', {}).get('show_track_ids', True)
+                        )
                         if result_frame is not None:
                             video_writer.write(result_frame)
                     else:
@@ -1298,12 +1457,23 @@ class YOLODetector:
                     'processed_frames': frame_count,
                     'progress': round(frame_count / total_frames * 100, 2)
                 })
+                
+                # 如果启用了跟踪，更新最终的跟踪统计信息
+                if enable_tracking and self.tracker:
+                    self.tasks[task_id]['tracking_stats'].update({
+                        'total_tracks': self.tracker.next_track_id - 1,
+                        'tracking_fps': processed_count / total_tracking_time if total_tracking_time > 0 else 0
+                    })
             
-            # 发送最终回调
-            if enable_callback and callback_urls:
-                await self._send_callbacks(callback_urls, self.tasks[task_id])
+            logger.info(f"视频分析完成: {task_id}")
+            logger.info(f"- 总帧数: {total_frames}")
+            logger.info(f"- 处理帧数: {frame_count}")
+            logger.info(f"- 分析耗时: {analysis_duration:.2f}秒")
+            if enable_tracking:
+                logger.info(f"- 跟踪目标数: {self.tracker.next_track_id - 1}")
+                logger.info(f"- 跟踪处理帧率: {processed_count / total_tracking_time if total_tracking_time > 0 else 0:.2f} FPS")
             
-            logger.info(f"视频分析{status}: {self.tasks[task_id]}")
+            return self.tasks[task_id]
             
         except Exception as e:
             logger.error(f"视频分析失败: {str(e)}", exc_info=True)
@@ -1328,17 +1498,16 @@ class YOLODetector:
             raise
             
         finally:
-            # 释放资源
-            if cap:
+            # 清理资源
+            if cap is not None:
                 cap.release()
-            if video_writer:
+            if video_writer is not None:
                 video_writer.release()
-            # 删除临时下载的视频文件
             if local_video_path and os.path.exists(local_video_path):
                 try:
                     os.remove(local_video_path)
-                    logger.info(f"已删除临时视频文件: {local_video_path}")
                 except Exception as e:
                     logger.error(f"删除临时视频文件失败: {str(e)}")
-            # 清理停止标志
-            self.stop_flags.pop(task_id, None)
+            
+            # 重置跟踪器
+            self.tracker = None

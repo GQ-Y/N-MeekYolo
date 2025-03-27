@@ -39,6 +39,43 @@ class DetectionConfig(BaseModel):
         description="是否进行嵌套检测（检查目标A是否在目标B内）"
     )
 
+class TrackingConfig(BaseModel):
+    """目标跟踪配置"""
+    tracker_type: str = Field(
+        "sort",
+        description="跟踪器类型，支持 'sort'、'deepsort'、'bytetrack'",
+        example="sort"
+    )
+    max_age: int = Field(
+        30,
+        description="目标消失后保持跟踪的最大帧数",
+        ge=1,
+        le=100,
+        example=30
+    )
+    min_hits: int = Field(
+        3,
+        description="确认为有效目标所需的最小检测次数",
+        ge=1,
+        le=10,
+        example=3
+    )
+    iou_threshold: float = Field(
+        0.3,
+        description="跟踪器的IOU阈值",
+        gt=0,
+        lt=1,
+        example=0.3
+    )
+    visualization: Optional[Dict[str, bool]] = Field(
+        None,
+        description="可视化配置，控制跟踪结果的显示方式",
+        example={
+            "show_tracks": True,    # 显示轨迹
+            "show_track_ids": True  # 显示跟踪ID
+        }
+    )
+
 class ImageAnalysisRequest(BaseModel):
     """图片分析请求"""
     model_code: str = Field(
@@ -111,6 +148,14 @@ class VideoAnalysisRequest(BaseModel):
     config: Optional[DetectionConfig] = Field(
         None,
         description="检测配置参数"
+    )
+    enable_tracking: bool = Field(
+        False,
+        description="是否启用目标跟踪"
+    )
+    tracking_config: Optional[TrackingConfig] = Field(
+        None,
+        description="目标跟踪配置参数，仅在enable_tracking为true时有效"
     )
 
     @property
