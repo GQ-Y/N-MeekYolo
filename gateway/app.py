@@ -4,20 +4,60 @@ API网关入口
 """
 import asyncio
 from typing import List, Dict, Any
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.staticfiles import StaticFiles
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field
 from shared.utils.logger import setup_logger
 from gateway.discovery.service_registry import service_registry
 from gateway.router.api_router import router
 from gateway.routers.admin import router as admin_router
+from gateway.core.models import StandardResponse
+from gateway.core.exceptions import GatewayException
+import time
+import uuid
 
 # 配置日志
 logger = setup_logger(__name__)
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """请求日志中间件"""
+    async def dispatch(self, request: Request, call_next):
+        start_time = time.time()
+        request_id = str(uuid.uuid4())
+        
+        # 添加请求ID到请求头
+        request.state.request_id = request_id
+        
+        # 记录请求信息
+        logger.info(f"Request started: {request_id} - {request.method} {request.url.path}")
+        
+        try:
+            response = await call_next(request)
+            
+            # 记录响应信息
+            process_time = (time.time() - start_time) * 1000
+            logger.info(
+                f"Request completed: {request_id} - {request.method} {request.url.path} "
+                f"- Status: {response.status_code} - Time: {process_time:.2f}ms"
+            )
+            
+            # 添加请求ID到响应头
+            response.headers["X-Request-ID"] = request_id
+            return response
+            
+        except Exception as e:
+            process_time = (time.time() - start_time) * 1000
+            logger.error(
+                f"Request failed: {request_id} - {request.method} {request.url.path} "
+                f"- Error: {str(e)} - Time: {process_time:.2f}ms"
+            )
+            raise
 
 # 定义基础响应模型
 class HTTPError(BaseModel):
@@ -48,7 +88,7 @@ app = FastAPI(
     redoc_url=None
 )
 
-# 添加CORS中间件
+# 添加中间件
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -57,12 +97,50 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 注册路由 - 调整顺序,先注册admin路由
+# 添加Gzip压缩
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# 添加请求日志中间件
+app.add_middleware(RequestLoggingMiddleware)
+
+# 注册路由
 app.include_router(admin_router)
 app.include_router(router)
 
 # 挂载静态文件
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# 全局异常处理
+@app.exception_handler(GatewayException)
+async def gateway_exception_handler(request: Request, exc: GatewayException):
+    """处理网关异常"""
+    return JSONResponse(
+        status_code=exc.code,
+        content=StandardResponse(
+            requestId=getattr(request.state, "request_id", str(uuid.uuid4())),
+            path=request.url.path,
+            success=False,
+            code=exc.code,
+            message=exc.message,
+            data=exc.data
+        ).dict()
+    )
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """处理通用异常"""
+    logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content=StandardResponse(
+            requestId=getattr(request.state, "request_id", str(uuid.uuid4())),
+            path=request.url.path,
+            success=False,
+            code=500,
+            message="Internal server error",
+            data={"error": str(exc)} if app.debug else None
+        ).dict()
+    )
 
 # 自定义OpenAPI文档
 def custom_openapi():
@@ -76,120 +154,6 @@ def custom_openapi():
         routes=app.routes,
     )
     
-    # 确保components存在
-    if "components" not in openapi_schema:
-        openapi_schema["components"] = {}
-        
-    # 初始化各个组件
-    components = openapi_schema["components"]
-    if "schemas" not in components:
-        components["schemas"] = {}
-    if "responses" not in components:
-        components["responses"] = {}
-    if "securitySchemes" not in components:
-        components["securitySchemes"] = {}
-        
-    # 添加错误响应schemas
-    components["schemas"].update({
-        "HTTPError": {
-            "title": "HTTPError",
-            "type": "object",
-            "properties": {
-                "detail": {
-                    "title": "Detail",
-                    "type": "string"
-                }
-            },
-            "required": ["detail"]
-        },
-        "ValidationError": {
-            "title": "ValidationError",
-            "type": "object",
-            "properties": {
-                "loc": {
-                    "title": "Location",
-                    "type": "array",
-                    "items": {"type": "string"}
-                },
-                "msg": {
-                    "title": "Message",
-                    "type": "string"
-                },
-                "type": {
-                    "title": "Error Type",
-                    "type": "string"
-                }
-            },
-            "required": ["loc", "msg", "type"]
-        },
-        "HTTPValidationError": {
-            "title": "HTTPValidationError",
-            "type": "object",
-            "properties": {
-                "detail": {
-                    "title": "Detail",
-                    "type": "array",
-                    "items": {"$ref": "#/components/schemas/ValidationError"}
-                }
-            }
-        }
-    })
-    
-    # 添加全局响应
-    components["responses"].update({
-        "HTTPValidationError": {
-            "description": "Validation Error",
-            "content": {
-                "application/json": {
-                    "schema": {"$ref": "#/components/schemas/HTTPValidationError"}
-                }
-            }
-        }
-    })
-    
-    # 添加安全配置
-    components["securitySchemes"].update({
-        "APIKeyHeader": {
-            "type": "apiKey",
-            "in": "header",
-            "name": "X-API-Key"
-        }
-    })
-    
-    # 为所有路由添加422响应
-    for path in openapi_schema["paths"].values():
-        for operation in path.values():
-            if "responses" not in operation:
-                operation["responses"] = {}
-            if "422" not in operation["responses"]:
-                operation["responses"]["422"] = {
-                    "$ref": "#/components/responses/HTTPValidationError"
-                }
-    
-    # 添加服务说明
-    openapi_schema["info"]["x-services"] = {
-        "api": {
-            "name": "API服务",
-            "description": "提供核心业务API",
-            "url": "http://localhost:8001"
-        },
-        "model": {
-            "name": "模型服务",
-            "description": "提供AI模型管理",
-            "url": "http://localhost:8002"
-        },
-        "analysis": {
-            "name": "分析服务", 
-            "description": "提供视频分析能力",
-            "url": "http://localhost:8003"
-        },
-        "cloud": {
-            "name": "云服务",
-            "description": "提供云服务",
-            "url": "http://localhost:8004"
-        }
-    }
-    
     app.openapi_schema = openapi_schema
     return app.openapi_schema
 
@@ -200,14 +164,10 @@ app.openapi = custom_openapi
 async def custom_swagger_ui_html():
     return get_swagger_ui_html(
         openapi_url=app.openapi_url,
-        title=app.title + " - API文档",
+        title=app.title + " - API Documentation",
         oauth2_redirect_url=app.swagger_ui_oauth2_redirect_url,
-        swagger_js_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js",
-        swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
-        init_oauth={
-            "clientId": "your-client-id",
-            "clientSecret": "your-client-secret"
-        }
+        swagger_js_url="/static/swagger-ui-bundle.js",
+        swagger_css_url="/static/swagger-ui.css",
     )
 
 @app.on_event("startup")
