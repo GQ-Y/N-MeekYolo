@@ -143,66 +143,32 @@ class YOLODetector:
         """初始化检测器"""
         self.model = None
         self.current_model_code = None
-        self.tracker: Optional[BaseTracker] = None  # 添加跟踪器属性
-        # 使用配置中的设备设置
+        self.tracker: Optional[BaseTracker] = None
         self.device = torch.device("cuda" if torch.cuda.is_available() and settings.ANALYSIS.device != "cpu" else "cpu")
         self.stop_flags = {}
-        self.tasks = {}  # 存储任务信息
+        self.tasks = {}
         
-        # 使用新的配置结构构建model_service_url
+        # 模型服务配置
         self.model_service_url = settings.MODEL_SERVICE.url
         self.api_prefix = settings.MODEL_SERVICE.api_prefix
         
-        # 获取项目根目录
-        self.project_root = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        
-        # 设置各个目录
-        self.base_dir = self.project_root / "data"
-        self.model_dir = self.base_dir / "models"
-        self.temp_dir = self.base_dir / "temp"
-        self.videos_dir = self.base_dir / "videos"  # 新增：视频存储目录
-        self.results_dir = self.project_root / "results"
-        
-        # 创建必要的目录
-        try:
-            logger.info("创建必要的目录...")
-            for directory in [self.base_dir, self.model_dir, self.temp_dir, self.videos_dir, self.results_dir]:  # 添加videos_dir
-                if not directory.exists():
-                    directory.mkdir(parents=True, exist_ok=True)
-                    logger.info(f"创建目录: {directory}")
-                else:
-                    logger.info(f"目录已存在: {directory}")
-                    
-            # 检查目录权限
-            for directory in [self.base_dir, self.model_dir, self.temp_dir, self.videos_dir, self.results_dir]:  # 添加videos_dir
-                if not os.access(directory, os.W_OK):
-                    logger.error(f"目录无写入权限: {directory}")
-                    raise PermissionError(f"目录无写入权限: {directory}")
-                    
-        except Exception as e:
-            logger.error(f"创建目录失败: {str(e)}", exc_info=True)
-            raise
-        
-        # 保存默认配置
+        # 默认配置
         self.default_confidence = settings.ANALYSIS.confidence
         self.default_iou = settings.ANALYSIS.iou
         self.default_max_det = settings.ANALYSIS.max_det
         
-        # 打印配置信息
+        # 设置保存目录
+        self.project_root = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.results_dir = self.project_root / settings.OUTPUT.save_dir
+        
+        # 确保结果目录存在
+        os.makedirs(self.results_dir, exist_ok=True)
+        
         logger.info(f"使用设备: {self.device}")
         logger.info(f"Model service URL: {self.model_service_url}")
         logger.info(f"Model service API prefix: {self.api_prefix}")
-        logger.info(f"Project root: {self.project_root}")
-        logger.info(f"Base directory: {self.base_dir}")
-        logger.info(f"Model directory: {self.model_dir}")
-        logger.info(f"Temp directory: {self.temp_dir}")
-        logger.info(f"Videos directory: {self.videos_dir}")
-        logger.info(f"Results directory: {self.results_dir}")
         logger.info(f"Default confidence: {self.default_confidence}")
-        
-    def _get_api_url(self, path: str) -> str:
-        """获取完整的API URL"""
-        return f"{self.model_service_url}{self.api_prefix}{path}"
+        logger.info(f"Results directory: {self.results_dir}")
         
     async def get_model_path(self, model_code: str) -> str:
         """获取模型路径"""
@@ -669,23 +635,13 @@ class YOLODetector:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             task_prefix = f"{task_name}_" if task_name else ""
             filename = f"{task_prefix}{timestamp}.jpg"
-            logger.info(f"生成文件名: {filename}")
             
             # 确保每天的结果保存在单独的目录中
             date_dir = self.results_dir / datetime.now().strftime("%Y%m%d")
             os.makedirs(date_dir, exist_ok=True)
-            logger.info(f"创建保存目录: {date_dir}")
             
             # 保存图片
             file_path = date_dir / filename
-            logger.info(f"完整文件路径: {file_path}")
-            logger.info(f"项目根目录: {self.project_root}")
-            
-            # 确保目录存在
-            if not os.path.exists(os.path.dirname(file_path)):
-                os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            
-            # 保存图片
             success = cv2.imwrite(str(file_path), result_image)
             if not success:
                 logger.error("保存图片失败")
@@ -693,8 +649,9 @@ class YOLODetector:
             
             # 返回相对于项目根目录的路径
             relative_path = file_path.relative_to(self.project_root)
-            logger.info(f"相对路径: {relative_path}")
+            logger.info(f"图片已保存: {relative_path}")
             return str(relative_path)
+            
         except Exception as e:
             logger.error(f"保存结果图片失败: {str(e)}", exc_info=True)
             return None
@@ -751,7 +708,6 @@ class YOLODetector:
                     'result_image': result_image,
                     'saved_path': saved_path
                 }
-                logger.info(f"单个结果: {result_dict}")
                 results.append(result_dict)
             
             # 计算分析耗时
@@ -773,8 +729,6 @@ class YOLODetector:
                 'end_time': end_time,
                 'analysis_duration': analysis_duration
             })
-            
-            logger.info(f"最终返回结果: {result}")
             
             # 发送回调
             if enable_callback and callback_urls:

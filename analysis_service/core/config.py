@@ -16,6 +16,14 @@ class AnalysisServiceConfig(BaseSettings):
     # 基础信息
     PROJECT_NAME: str = "MeekYolo Analysis Service"
     VERSION: str = "1.0.0"
+    ENVIRONMENT: str = "development"  # 环境: development, production, testing
+    DEBUG: bool = True  # 调试模式
+    
+    # CORS配置
+    CORS_ORIGINS: List[str] = ["*"]
+    CORS_ALLOW_CREDENTIALS: bool = True
+    CORS_ALLOW_METHODS: List[str] = ["*"]
+    CORS_ALLOW_HEADERS: List[str] = ["*"]
     
     # 服务配置
     class ServiceConfig(BaseModel):
