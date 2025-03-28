@@ -306,6 +306,23 @@ class YOLODetector:
             logger.error(f"下载图片出错: {url}, 错误: {str(e)}", exc_info=True)
             return None
 
+    def _get_color_by_id(self, track_id: int) -> Tuple[int, int, int]:
+        """根据跟踪ID生成固定的颜色
+        
+        Args:
+            track_id: 跟踪ID
+            
+        Returns:
+            Tuple[int, int, int]: RGB颜色值
+        """
+        # 使用黄金比例法生成不同的色相值
+        golden_ratio = 0.618033988749895
+        hue = (track_id * golden_ratio) % 1.0
+        
+        # 转换HSV到RGB（固定饱和度和明度以获得鲜艳的颜色）
+        rgb = tuple(round(x * 255) for x in colorsys.hsv_to_rgb(hue, 0.8, 0.95))
+        return rgb
+
     async def _encode_result_image(
         self,
         image: np.ndarray,
@@ -326,13 +343,25 @@ class YOLODetector:
             # 加载中文字体
             try:
                 # 尝试加载系统中文字体
-                font_size = 24  # 增大字体大小
+                font_size = 16  # 字体大小
                 font_paths = [
-                    "/System/Library/Fonts/PingFang.ttc",  # macOS
-                    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",  # Linux
-                    "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",  # Linux 另一个位置
-                    "C:/Windows/Fonts/simhei.ttf",  # Windows
-                    "fonts/simhei.ttf",  # 项目本地字体
+                    # macOS 系统字体
+                    "/System/Library/Fonts/STHeiti Light.ttc",  # 华文细黑
+                    "/System/Library/Fonts/STHeiti Medium.ttc", # 华文中黑
+                    "/System/Library/Fonts/PingFang.ttc",       # 苹方
+                    "/System/Library/Fonts/Hiragino Sans GB.ttc", # 冬青黑体
+                    
+                    # Windows 系统字体
+                    "C:/Windows/Fonts/msyh.ttc",     # 微软雅黑
+                    "C:/Windows/Fonts/simsun.ttc",   # 宋体
+                    "C:/Windows/Fonts/simhei.ttf",   # 黑体
+                    
+                    # Linux 系统字体
+                    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+                    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                    
+                    # 项目本地字体（作为后备）
+                    "fonts/simhei.ttf"
                 ]
                 
                 font = None
@@ -340,13 +369,15 @@ class YOLODetector:
                     if os.path.exists(font_path):
                         try:
                             font = ImageFont.truetype(font_path, font_size)
-                            logger.debug(f"成功加载字体: {font_path}")
+                            logger.info(f"成功加载字体: {font_path}")
                             break
                         except Exception as e:
-                            logger.warning(f"尝试加载字体失败 {font_path}: {str(e)}")
+                            logger.debug(f"尝试加载字体失败 {font_path}: {str(e)}")
+                            continue
                 
                 if font is None:
                     logger.warning("未找到合适的中文字体，使用默认字体")
+                    # 使用 PIL 默认字体，但增加字体大小以提高可读性
                     font = ImageFont.load_default()
                     
             except Exception as e:
@@ -385,7 +416,7 @@ class YOLODetector:
                 # 准备标签文本
                 label_parts = []
                 label_parts.append(f"{det['class_name']} {det['confidence']:.2f}")
-                if draw_track_ids and det.get("track_id") is not None:
+                if draw_track_ids and "track_id" in det:
                     label_parts.append(f"ID:{det['track_id']}")
                 label = " | ".join(label_parts)
                 
@@ -1069,6 +1100,15 @@ class YOLODetector:
             start_time = time.time()
             logger.info(f"开始视频分析任务: {task_id}")
             
+            # 初始化跟踪配置
+            if enable_tracking:
+                tracking_config = tracking_config or {}
+                if "visualization" not in tracking_config:
+                    tracking_config["visualization"] = {
+                        "show_tracks": True,
+                        "show_track_ids": True
+                    }
+            
             # 初始化任务信息
             self.tasks[task_id] = {
                 'task_id': task_id,
@@ -1082,8 +1122,9 @@ class YOLODetector:
                 'progress': 0.0,
                 'total_frames': 0,
                 'processed_frames': 0,
-                'tracking_enabled': enable_tracking,  # 新增: 跟踪状态
-                'tracking_stats': {  # 新增: 跟踪统计信息
+                'tracking_enabled': enable_tracking,
+                'tracking_config': tracking_config,  # 保存跟踪配置
+                'tracking_stats': {
                     'total_tracks': 0,
                     'active_tracks': 0,
                     'avg_track_length': 0.0,
@@ -1102,7 +1143,7 @@ class YOLODetector:
                 task_name=task_name,
                 enable_callback=enable_callback,
                 save_result=save_result,
-                enable_tracking=enable_tracking,  # 新增: 传递跟踪参数
+                enable_tracking=enable_tracking,
                 tracking_config=tracking_config
             ))
             
@@ -1403,12 +1444,17 @@ class YOLODetector:
                         # 如果需要保存结果，处理缓冲区中的所有帧
                         if save_result and video_writer is not None and last_detections is not None:
                             for buffered_frame in frames_buffer:
+                                # 获取可视化配置
+                                vis_config = tracking_config.get('visualization', {}) if enable_tracking and tracking_config else {}
+                                show_tracks = vis_config.get('show_tracks', True)
+                                show_track_ids = vis_config.get('show_track_ids', True)
+                                
                                 result_frame = await self._encode_result_image(
                                     buffered_frame, 
                                     last_detections,
                                     return_image=True,
-                                    draw_tracks=enable_tracking and tracking_config.get('visualization', {}).get('show_tracks', True),
-                                    draw_track_ids=enable_tracking and tracking_config.get('visualization', {}).get('show_track_ids', True)
+                                    draw_tracks=enable_tracking and show_tracks,
+                                    draw_track_ids=enable_tracking and show_track_ids
                                 )
                                 if result_frame is not None:
                                     video_writer.write(result_frame)
