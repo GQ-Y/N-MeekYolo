@@ -43,155 +43,79 @@ class TaskController:
             callback_urls = ",".join([cb.url for cb in task.callbacks])
             logger.debug(f"回调URL列表: {callback_urls}")
             
-            # 构建分析任务请求
-            analysis_tasks = []
+            # 为每个视频流和模型组合创建分析任务
+            sub_tasks_to_create = []
             for stream in task.streams:
                 for model in task.models:
-                    analysis_tasks.append({
-                        "model_code": model.code,
-                        "stream_url": stream.url,
-                        "output_url": None
-                    })
+                    try:
+                        # 调用分析服务创建任务
+                        task_name = f"{task.name}-{stream.name}-{model.name}"
+                        analysis_task_id = await self.analysis_service.analyze_stream(
+                            model_code=model.code,
+                            stream_url=stream.url,
+                            task_name=task_name,
+                            callback_urls=callback_urls,
+                            enable_callback=bool(callback_urls),
+                            save_result=True,
+                            config={
+                                "confidence": 0.5,
+                                "iou": 0.45,
+                                "imgsz": 640,
+                                "nested_detection": True
+                            },
+                            analysis_type="detection"
+                        )
+                        
+                        logger.info(f"创建分析任务成功:")
+                        logger.info(f"  - 任务名称: {task_name}")
+                        logger.info(f"  - 分析任务ID: {analysis_task_id}")
+                        logger.info(f"  - 视频流: {stream.url}")
+                        logger.info(f"  - 模型: {model.code}")
+                        
+                        # 创建子任务记录
+                        sub_task = SubTask(
+                            task_id=task.id,
+                            analysis_task_id=analysis_task_id,
+                            stream_id=stream.id,
+                            model_id=model.id,
+                            status="running",
+                            started_at=datetime.now()
+                        )
+                        sub_tasks_to_create.append(sub_task)
+                        
+                    except Exception as e:
+                        logger.error(f"创建分析任务失败: {str(e)}")
+                        continue
             
-            analysis_request = {
-                "tasks": analysis_tasks,
-                "callback_urls": callback_urls,
-                "callback_interval": task.callback_interval
-            }
-            
-            target_url = self._get_api_url('/analyze/stream')
-            logger.info(f"正在发送分析请求到 {target_url}")
-            logger.info(f"请求数据: {analysis_request}")
+            if not sub_tasks_to_create:
+                logger.error("没有成功创建的子任务")
+                task.status = "failed"
+                db.commit()
+                return False
             
             try:
-                # 调用Analysis Service创建分析任务
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(
-                        target_url,
-                        json=analysis_request
-                    )
-                    response.raise_for_status()
-                    result = response.json()
-                    logger.info(f"分析服务响应状态码: {response.status_code}")
-                    logger.info(f"分析服务原始响应: {response.text}")
-                    logger.info(f"分析服务解析响应: {result}")
-                    
-                    # 保存父任务ID
-                    parent_task_id = result["data"]["parent_task_id"]
-                    logger.info(f"提取到父任务ID: {parent_task_id}")
-                    task.analysis_task_id = parent_task_id
-                    
-                    # 构建子任务记录
-                    sub_tasks = result["data"]["sub_tasks"]
-                    logger.info(f"从响应中提取到 {len(sub_tasks)} 个子任务:")
-                    for idx, st in enumerate(sub_tasks):
-                        logger.info(f"子任务 {idx + 1}:")
-                        logger.info(f"  - 任务ID: {st['task_id']}")
-                        logger.info(f"  - 状态: {st['status']}")
-                        logger.info(f"  - 视频流URL: {st['stream_url']}")
-                        logger.info(f"  - 输出URL: {st['output_url']}")
-                    
-                    # 先提交父任务的更改
-                    try:
-                        db.flush()
-                        logger.info(f"已提交父任务更:")
-                        logger.info(f"  - 任务ID: {task.id}")
-                        logger.info(f"  - 分析任务ID: {task.analysis_task_id}")
-                        logger.info(f"  - 状态: {task.status}")
-                    except Exception as e:
-                        logger.error(f"提交父任务更改失败: {str(e)}", exc_info=True)
-                        raise
-                    
-                    sub_tasks_to_create = []
-                    for sub_task_info in result["data"]["sub_tasks"]:
-                        try:
-                            # 从URL中提取stream_id
-                            stream_url = sub_task_info["stream_url"]
-                            stream = next(s for s in task.streams if s.url == stream_url)
-                            model = task.models[0]  # 假设每个流只使用一个模型
-                            
-                            logger.info(f"准备创建子任务:")
-                            logger.info(f"  - 视频流ID: {stream.id}")
-                            logger.info(f"  - 视频流URL: {stream_url}")
-                            logger.info(f"  - 模型ID: {model.id}")
-                            logger.info(f"  - 模型代码: {model.code}")
-                            
-                            # 创建子任务记录
-                            sub_task = SubTask(
-                                task_id=task.id,
-                                analysis_task_id=sub_task_info["task_id"],
-                                stream_id=stream.id,
-                                model_id=model.id,
-                                status="running",
-                                started_at=datetime.now()
-                            )
-                            
-                            # 添加到待创建列表
-                            sub_tasks_to_create.append(sub_task)
-                            logger.info(f"子任务详情:")
-                            logger.info(f"  - 任务ID: {sub_task.task_id}")
-                            logger.info(f"  - 分析任务ID: {sub_task.analysis_task_id}")
-                            logger.info(f"  - 视频流ID: {sub_task.stream_id}")
-                            logger.info(f"  - 模型ID: {sub_task.model_id}")
-                            
-                        except Exception as e:
-                            logger.error(f"准备子任务失败，视频流URL: {stream_url}: {str(e)}", exc_info=True)
-                            continue
-                    
-                    # 批量添加子任务
-                    try:
-                        logger.info(f"正在添加 {len(sub_tasks_to_create)} 个子任务到数据库")
-                        db.bulk_save_objects(sub_tasks_to_create)
-                        db.flush()
-                        logger.info("子任务已成功提交")
-                    except Exception as e:
-                        logger.error("批量保存子任务失败", exc_info=True)
-                        raise
-                    
-                    # 更新流状态
-                    for stream in task.streams:
-                        stream.status = "active"
-                        logger.info(f"已更新视频流 {stream.id} 状态为活动")
-                    
-                    # 最终提交
-                    try:
-                        db.commit()
-                        # 验证保存结果
-                        saved_sub_tasks = db.query(SubTask).filter(SubTask.task_id == task_id).all()
-                        logger.info(f"更改已成功提交。在数据库中找到 {len(saved_sub_tasks)} 个子任务")
-                        for st in saved_sub_tasks:
-                            logger.info(f"已保存的子任务:")
-                            logger.info(f"  - ID: {st.id}")
-                            logger.info(f"  - 任务ID: {st.task_id}")
-                            logger.info(f"  - 分析任务ID: {st.analysis_task_id}")
-                            logger.info(f"  - 视频流ID: {st.stream_id}")
-                            logger.info(f"  - 模型ID: {st.model_id}")
-                            logger.info(f"  - 状态: {st.status}")
-                    except Exception as e:
-                        db.rollback()
-                        logger.error("提交更改失败", exc_info=True)
-                        raise
+                # 批量添加子任务
+                db.bulk_save_objects(sub_tasks_to_create)
                 
-            except httpx.HTTPError as e:
-                logger.error(f"HTTP请求失败: {str(e)}")
-                logger.error(f"响应状态码: {e.response.status_code if hasattr(e, 'response') else 'N/A'}")
-                logger.error(f"响应内容: {e.response.text if hasattr(e, 'response') else 'N/A'}")
-                raise
+                # 更新流状态
+                for stream in task.streams:
+                    stream.status = "active"
+                
+                # 更新任务状态
+                task.status = "running"
+                
+                # 提交所有更改
+                db.commit()
+                logger.info(f"任务 {task_id} 启动成功，创建了 {len(sub_tasks_to_create)} 个子任务")
+                return True
+                
             except Exception as e:
-                logger.error(f"创建分析任务失败: {str(e)}")
-                logger.error(f"请求详情: {analysis_request}")
-                raise
-                
-            # 更新任务状态
-            task.status = "running"
-            db.commit()
-            logger.info(f"任务 {task_id} 启动成功")
-            
-            return True
+                db.rollback()
+                logger.error(f"保存任务状态失败: {str(e)}")
+                return False
             
         except Exception as e:
-            db.rollback()
-            logger.error(f"启动任务 {task_id} 失败: {str(e)}", exc_info=True)
+            logger.error(f"启动任务失败: {str(e)}")
             return False
             
     async def stop_task(self, db: Session, task_id: int) -> bool:
