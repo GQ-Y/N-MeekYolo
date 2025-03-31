@@ -22,8 +22,9 @@ logger = setup_logger(__name__)
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
-    docs_url="/docs",  # 明确指定swagger ui路径
-    redoc_url="/redoc"  # 明确指定redoc路径
+    docs_url="/api/v1/docs",  # 明确指定swagger ui路径
+    redoc_url="/api/v1/redoc",  # 明确指定redoc路径
+    openapi_url="/api/v1/openapi.json"
 )
 
 # 配置CORS
