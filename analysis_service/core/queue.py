@@ -2,7 +2,7 @@
 任务队列管理
 """
 import asyncio
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 from datetime import datetime, timedelta
 import uuid
 from sqlalchemy.orm import Session
@@ -10,6 +10,9 @@ from analysis_service.models.database import Task, TaskQueue
 from analysis_service.core.resource import ResourceMonitor
 from analysis_service.core.detector import YOLODetector
 from shared.utils.logger import setup_logger
+from analysis_service.crud import task as task_crud
+from analysis_service.models.analysis_type import AnalysisType
+from analysis_service.services.database import get_db
 
 logger = setup_logger(__name__)
 
@@ -82,7 +85,7 @@ class TaskQueueManager:
             # 启动等待中的任务(考虑并发限制)
             for task in pending_tasks:
                 if len(self.running_tasks) < self.max_concurrent:
-                    asyncio.create_task(self._process_task(task))
+                    asyncio.create_task(self._process_task(task.id))
                     
         except Exception as e:
             logger.error(f"Task recovery failed: {str(e)}")
@@ -113,15 +116,18 @@ class TaskQueueManager:
         self.db.add(queue_task)
         self.db.commit()
         
+        # 保存任务ID而不是对象
+        task_id = queue_task.id
+        
         # 检查当前运行任务数
         if len(self.running_tasks) >= self.max_concurrent:
             logger.warning("Max concurrent tasks reached, waiting...")
             return queue_task
             
-        # 立即启动任务
+        # 立即启动任务，传递task_id而不是对象
         if self.is_running:  # 只有在管理器运行时才启动新任务
             asyncio.create_task(self._process_task(
-                queue_task,
+                task_id,  # 传递ID而不是对象
                 analyze_interval=analyze_interval,
                 alarm_interval=alarm_interval,
                 random_interval=random_interval,
@@ -131,25 +137,30 @@ class TaskQueueManager:
         
         return queue_task
         
-    async def _process_task(self, queue_task: TaskQueue, analyze_interval: int = None, alarm_interval: int = None, random_interval: Tuple[int, int] = None, confidence_threshold: float = None, push_interval: int = None):
+    async def _process_task(
+        self,
+        task_id: str,  # 修改参数类型为str
+        analyze_interval: int = None,
+        alarm_interval: int = None,
+        random_interval: Tuple[int, int] = None,
+        confidence_threshold: float = None,
+        push_interval: int = None
+    ):
         """处理单个任务"""
-        task_id = None
+        db = None
         try:
-            if not queue_task:
-                logger.error("队列任务对象为空")
-                return
+            # 使用新的session处理数据库操作
+            db = get_db()
             
-            task_id = queue_task.id
-            
-            # 重新获取任务对象，确保在当前session中
-            queue_task = self.db.query(TaskQueue).filter(
+            # 获取任务对象
+            queue_task = db.query(TaskQueue).filter(
                 TaskQueue.id == task_id
             ).first()
             if not queue_task:
                 logger.error(f"找不到队列任务: {task_id}")
                 return
             
-            task = self.db.query(Task).filter(Task.id == queue_task.task_id).first()
+            task = db.query(Task).filter(Task.id == queue_task.task_id).first()
             if not task:
                 logger.error(f"找不到关联的任务记录: {queue_task.task_id}")
                 return
@@ -157,10 +168,15 @@ class TaskQueueManager:
             # 更新状态
             queue_task.status = 1
             queue_task.started_at = datetime.now()
-            self.db.commit()
+            db.commit()
             
-            # 记录到运行中的任务，使用ID而不是对象
+            # 记录到运行中的任务
             self.running_tasks[task_id] = queue_task.task_id
+            
+            # 构建配置字典
+            config = {}
+            if confidence_threshold is not None:
+                config['confidence_threshold'] = confidence_threshold
             
             # 执行任务
             await self.detector.start_stream_analysis(
@@ -171,34 +187,43 @@ class TaskQueueManager:
                 analyze_interval=analyze_interval,
                 alarm_interval=alarm_interval,
                 random_interval=random_interval,
-                confidence_threshold=confidence_threshold,
+                config=config,
                 push_interval=push_interval
             )
             
             # 更新状态
-            queue_task = self.db.query(TaskQueue).filter(
+            queue_task = db.query(TaskQueue).filter(
                 TaskQueue.id == task_id
             ).first()
             if queue_task:
                 queue_task.status = 2
                 queue_task.completed_at = datetime.now()
-                self.db.commit()
-            
+                db.commit()
+                
         except Exception as e:
             logger.error(f"任务处理失败: {str(e)}", exc_info=True)
             if task_id:
-                queue_task = self.db.query(TaskQueue).filter(
-                    TaskQueue.id == task_id
-                ).first()
-                if queue_task:
-                    queue_task.status = -1
-                    queue_task.error_message = str(e)
-                    self.db.commit()
-            
+                try:
+                    if not db:
+                        db = get_db()
+                    queue_task = db.query(TaskQueue).filter(
+                        TaskQueue.id == task_id
+                    ).first()
+                    if queue_task:
+                        queue_task.status = -1
+                        queue_task.error_message = str(e)
+                        db.commit()
+                except Exception as inner_e:
+                    logger.error(f"更新任务状态失败: {str(inner_e)}", exc_info=True)
+        
         finally:
-            # 从运行中任务移除，使用安全的task_id
-            if task_id:
-                self.running_tasks.pop(task_id, None)
+            # 关闭数据库连接
+            if db:
+                db.close()
+            
+            # 清理运行中的任务记录
+            if task_id and task_id in self.running_tasks:
+                del self.running_tasks[task_id]
             
             # 检查等待中的任务
             try:
@@ -218,7 +243,7 @@ class TaskQueueManager:
         
         for task in pending_tasks:
             if len(self.running_tasks) < self.max_concurrent:
-                asyncio.create_task(self._process_task(task))
+                asyncio.create_task(self._process_task(task.id))
 
     async def update_priority(self, queue_task_id: str, priority: int) -> TaskQueue:
         """更新任务优先级"""
@@ -291,3 +316,76 @@ class TaskQueueManager:
     async def is_task_running(self, task_id: str) -> bool:
         """检查任务是否在运行"""
         return task_id in self.running_tasks
+
+    async def stop_task(self, task_id: str) -> bool:
+        """停止任务（cancel_task的别名）"""
+        return await self.cancel_task(task_id)
+
+    async def create_stream_task(
+        self,
+        task_id: str,
+        model_code: str,
+        stream_url: str,
+        analysis_type: AnalysisType,
+        callback_urls: Optional[str] = None,
+        config: Optional[Dict] = None,
+        task_name: Optional[str] = None,
+        enable_callback: bool = True,
+        save_result: bool = False
+    ) -> Task:
+        """创建流分析任务
+        
+        Args:
+            task_id: 任务ID
+            model_code: 模型代码
+            stream_url: 流URL
+            analysis_type: 分析类型
+            callback_urls: 回调地址，多个用逗号分隔
+            config: 分析配置
+            task_name: 任务名称
+            enable_callback: 是否启用回调
+            save_result: 是否保存结果
+            
+        Returns:
+            Task: 创建的任务对象
+        """
+        try:
+            # 检查资源
+            if not self.resource_monitor.has_available_resource():
+                raise Exception("资源不足")
+            
+            # 创建任务记录
+            task = task_crud.create_task(
+                db=self.db,
+                task_id=task_id,
+                model_code=model_code,
+                stream_url=stream_url,
+                callback_urls=callback_urls if enable_callback else None
+            )
+            
+            # 更新任务信息
+            task.task_name = task_name or f"流分析-{task_id}"
+            task.analysis_type = analysis_type
+            task.config = config
+            task.enable_callback = enable_callback
+            task.save_result = save_result
+            task.status = 0  # 等待中
+            task.start_time = datetime.now()
+            self.db.commit()
+            
+            # 创建队列任务
+            queue_task = await self.add_task(
+                task=task,
+                analyze_interval=config.get("analyze_interval") if config else None,
+                alarm_interval=config.get("alarm_interval") if config else None,
+                random_interval=config.get("random_interval") if config else None,
+                confidence_threshold=config.get("confidence") if config else None,
+                push_interval=config.get("push_interval") if config else None
+            )
+            
+            logger.info(f"流分析任务创建成功: {task_id}")
+            return task
+            
+        except Exception as e:
+            logger.error(f"创建流分析任务失败: {str(e)}", exc_info=True)
+            raise

@@ -382,12 +382,10 @@ async def analyze_stream(
             message="流分析任务已创建",
             code=200,
             data={
-                "task_id": task.task_id,
+                "task_id": task.id,
                 "task_name": task.task_name,
-                "status": AnalysisStatus.PENDING,
-                "stream_url": task.stream_url,
-                "analysis_type": task.analysis_type,
-                "create_time": task.create_time
+                "model_code": task.model_code,
+                "stream_url": task.stream_url
             }
         )
         

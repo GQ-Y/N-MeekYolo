@@ -817,6 +817,16 @@ class YOLODetector:
             last_alarm_time = current_time
             last_push_time = current_time
             
+            # 设置默认间隔
+            if analyze_interval is None:
+                analyze_interval = 0  # 不延迟
+            if alarm_interval is None:
+                alarm_interval = 0  # 不延迟
+            if push_interval is None:
+                push_interval = 0  # 不延迟
+            if random_interval is None:
+                random_interval = (0, 0)  # 不添加随机延迟
+            
             # 如果需要保存结果，创建保存目录
             date_dir = None
             if save_result:
@@ -829,12 +839,12 @@ class YOLODetector:
                 frame_start_time = current_time
                 
                 # 检查分析间隔
-                if current_time - last_analyze_time < analyze_interval:
+                if analyze_interval > 0 and current_time - last_analyze_time < analyze_interval:
                     await asyncio.sleep(0.1)
                     continue
                 
                 # 添加随机延迟
-                if random_interval[1] > random_interval[0]:
+                if random_interval and random_interval[1] > random_interval[0]:
                     delay = random.uniform(random_interval[0], random_interval[1])
                     await asyncio.sleep(delay)
                 

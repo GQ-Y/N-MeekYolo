@@ -37,7 +37,7 @@ class AnalysisServiceConfig(BaseSettings):
     
     # 分析配置
     class AnalysisConfig(BaseModel):
-        confidence: float = 0.2
+        confidence: float = 0.1
         iou: float = 0.45
         max_det: int = 300
         device: str = "auto"
