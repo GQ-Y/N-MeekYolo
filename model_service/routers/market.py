@@ -14,7 +14,10 @@ router = APIRouter()
 market_service = MarketService()
 
 @router.post("/sync", response_model=StandardResponse, summary="同步市场模型")
-async def sync_market(db: Session = Depends(get_db)):
+async def sync_market(
+    request: Request,
+    db: Session = Depends(get_db)
+):
     """
     同步云市场模型
     
