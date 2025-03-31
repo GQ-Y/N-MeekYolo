@@ -23,7 +23,10 @@ class CloudClient:
         # 确保path以/开头
         if not path.startswith("/"):
             path = "/" + path
-        return f"{self.base_url}{path}"
+        # 如果path已经包含api_prefix，则不再添加
+        if path.startswith(self.api_prefix):
+            return f"{self.base_url}{path}"
+        return f"{self.base_url}{self.api_prefix}{path}"
     
     async def _make_request(
         self, 
@@ -70,7 +73,7 @@ class CloudClient:
                 ) as response:
                     if response.status == 200:
                         result = await response.json()
-                        return result.get("data"), None
+                        return result, None
                     elif response.status == 401:
                         # 标记密钥为无效
                         await invalidate_key(db, api_key)
