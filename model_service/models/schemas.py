@@ -2,7 +2,7 @@
 数据模型
 """
 from typing import Optional, Any, Dict, List
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, constr
 from datetime import datetime
 from model_service.models.models import ModelInfo, ModelList
 import uuid
@@ -40,23 +40,54 @@ class ModelListResponse(StandardResponse):
 
 class KeyCreate(BaseModel):
     """创建密钥请求"""
-    name: str = Field(..., description="密钥名称")
-    description: Optional[str] = Field(None, description="密钥描述")
-    expires_at: Optional[datetime] = Field(None, description="过期时间")
+    name: str = Field(..., min_length=1, description="密钥名称")
+    phone: constr(min_length=11, max_length=11) = Field(..., description="手机号")
+    email: EmailStr = Field(..., description="邮箱")
+
+    class Config:
+        from_attributes = True
+        json_schema_extra = {
+            "example": {
+                "name": "测试密钥",
+                "phone": "13800138000",
+                "email": "test@example.com"
+            }
+        }
+
+class KeyUpdate(BaseModel):
+    """更新密钥请求"""
+    name: Optional[str] = Field(None, min_length=1, description="密钥名称")
+    phone: Optional[constr(min_length=11, max_length=11)] = Field(None, description="手机号")
+    email: Optional[EmailStr] = Field(None, description="邮箱")
+    status: Optional[bool] = Field(None, description="状态")
 
     class Config:
         from_attributes = True
 
-class KeyResponse(StandardResponse):
+class KeyResponse(BaseModel):
     """密钥响应"""
-    id: int
-    key: str
-    name: str
-    phone: str
-    email: str
-    status: bool
-    created_at: datetime
-    updated_at: Optional[datetime] = None
+    id: int = Field(..., description="密钥ID")
+    cloud_id: int = Field(..., description="云服务密钥ID")
+    key: str = Field(..., description="API密钥")
+    name: str = Field(..., description="密钥名称")
+    phone: str = Field(..., description="手机号")
+    email: str = Field(..., description="邮箱")
+    status: bool = Field(..., description="状态")
+    created_at: datetime = Field(..., description="创建时间")
+    updated_at: Optional[datetime] = Field(None, description="更新时间")
 
     class Config:
-        from_attributes = True 
+        from_attributes = True
+        json_schema_extra = {
+            "example": {
+                "id": 1,
+                "cloud_id": 100,
+                "key": "sk-xxxxxxxxxxxxxxxx",
+                "name": "测试密钥",
+                "phone": "13800138000",
+                "email": "test@example.com",
+                "status": True,
+                "created_at": "2024-03-31T00:00:00Z",
+                "updated_at": None
+            }
+        } 

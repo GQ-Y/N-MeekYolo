@@ -1,7 +1,7 @@
 """
 密钥服务
 """
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
 import httpx
@@ -20,86 +20,124 @@ class KeyService:
     def __init__(self):
         self.cloud_client = CloudClient()
     
-    async def get_key(self, db: Session) -> Optional[MarketKey]:
-        """获取密钥"""
+    async def get_key(self, db: Session, key_id: Optional[int] = None) -> Optional[MarketKey]:
+        """
+        获取密钥
+        
+        Args:
+            db: 数据库会话
+            key_id: 密钥ID，如果不提供则返回第一个可用密钥
+            
+        Returns:
+            Optional[MarketKey]: 密钥信息
+        """
+        if key_id:
+            return db.query(MarketKey).filter(MarketKey.id == key_id).first()
         return await get_key(db)
     
-    async def create_or_update_key(self, db: Session, data: KeyCreate) -> MarketKey:
-        """创建或更新密钥"""
-        try:
-            # 获取现有密钥
-            key = db.query(MarketKey).first()
+    async def get_keys(self, db: Session, skip: int = 0, limit: int = 10) -> List[MarketKey]:
+        """
+        获取密钥列表
+        
+        Args:
+            db: 数据库会话
+            skip: 分页起始位置
+            limit: 每页数量
             
-            # 调用云服务
-            cloud_client = CloudClient()
-            try:
-                if key:
-                    # 更新密钥
-                    result = await cloud_client.update_key(key.cloud_id, data.model_dump())
-                else:
-                    # 创建新密钥
-                    result = await cloud_client.create_key(data.model_dump())
-            except httpx.RequestError as e:
-                logger.error(f"云服务请求失败: {str(e)}")
-                raise HTTPException(
-                    status_code=503,
-                    detail="云服务暂时不可用，请稍后重试"
-                )
-            except httpx.HTTPStatusError as e:
-                logger.error(f"云服务返回错误: {str(e)}")
-                if e.response.status_code == 401:
-                    raise HTTPException(
-                        status_code=401,
-                        detail="无效的访问凭证"
-                    )
-                elif e.response.status_code == 403:
-                    raise HTTPException(
-                        status_code=403,
-                        detail="没有权限执行此操作"
-                    )
-                elif e.response.status_code == 404:
-                    raise HTTPException(
-                        status_code=404,
-                        detail="请求的资源不存在"
-                    )
-                else:
-                    raise HTTPException(
-                        status_code=500,
-                        detail="云服务内部错误"
-                    )
+        Returns:
+            List[MarketKey]: 密钥列表
+        """
+        return db.query(MarketKey).offset(skip).limit(limit).all()
+    
+    async def create_key(self, db: Session, data: KeyCreate) -> MarketKey:
+        """
+        创建密钥
+        
+        Args:
+            db: 数据库会话
+            data: 密钥创建参数
+            
+        Returns:
+            MarketKey: 创建的密钥信息
+        """
+        try:
+            # 调用云服务创建密钥
+            result, error = await self.cloud_client._make_request(
+                "POST",
+                "/api/v1/keys",
+                db,
+                params={
+                    "name": data.name,
+                    "phone": data.phone,
+                    "email": data.email
+                }
+            )
+            
+            if error:
+                raise HTTPException(status_code=400, detail=error)
             
             # 保存到数据库
             try:
-                if key:
-                    key.name = result["name"]
-                    key.description = result.get("description")
-                    key.expires_at = result.get("expires_at")
-                    key.updated_at = datetime.now()
-                else:
-                    key = MarketKey(
-                        cloud_id=result["id"],
-                        name=result["name"],
-                        description=result.get("description"),
-                        expires_at=result.get("expires_at")
-                    )
-                    db.add(key)
-                
+                key = MarketKey(
+                    cloud_id=result["id"],
+                    key=result["key"],
+                    name=data.name,
+                    phone=data.phone,
+                    email=data.email,
+                    status=True
+                )
+                db.add(key)
                 db.commit()
                 db.refresh(key)
                 return key
+                
             except Exception as e:
                 logger.error(f"数据库操作失败: {str(e)}")
                 db.rollback()
-                raise HTTPException(
-                    status_code=500,
-                    detail="数据库操作失败"
-                )
+                raise HTTPException(status_code=500, detail="数据库操作失败")
             
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"创建/更新密钥失败: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail="创建/更新密钥失败"
+            logger.error(f"创建密钥失败: {str(e)}")
+            raise HTTPException(status_code=500, detail="创建密钥失败")
+    
+    async def delete_key(self, db: Session, key_id: int) -> bool:
+        """
+        删除密钥
+        
+        Args:
+            db: 数据库会话
+            key_id: 密钥ID
+            
+        Returns:
+            bool: 是否删除成功
+        """
+        try:
+            # 获取密钥
+            key = await self.get_key(db, key_id)
+            if not key:
+                return False
+                
+            # 调用云服务删除密钥
+            result, error = await self.cloud_client._make_request(
+                "DELETE",
+                "/api/v1/keys",
+                db,
+                params={"key_id": key.cloud_id}
             )
+            
+            if error:
+                raise HTTPException(status_code=400, detail=error)
+            
+            # 从数据库删除
+            db.delete(key)
+            db.commit()
+            return True
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"删除密钥失败: {str(e)}")
+            db.rollback()
+            raise HTTPException(status_code=500, detail="删除密钥失败")

@@ -187,16 +187,89 @@ async def sync_model(
     - 同步结果
     """
     try:
-        result = await model_service.sync_model(db, model_code)
+        result, error = await model_service.sync_model(db, model_code)
+        if error:
+            raise HTTPException(status_code=400, detail=error)
+            
         return StandardResponse(
             path=str(request.url),
             data=result
         )
-    except ValueError as e:
-        logger.error(f"Validation error: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Failed to sync model: {str(e)}")
+        logger.error(f"同步模型失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/available", response_model=ModelListResponse)
+async def get_available_models(
+    request: Request,
+    skip: int = Query(0, description="分页起始位置"),
+    limit: int = Query(10, description="每页数量"),
+    db: Session = Depends(get_db)
+):
+    """
+    获取可用模型列表
+    
+    参数：
+    - skip: 分页起始位置
+    - limit: 每页数量
+    
+    返回：
+    - 可用模型列表
+    """
+    try:
+        result, error = await model_service.cloud_client.get_available_models(db, skip, limit)
+        if error:
+            raise HTTPException(status_code=400, detail=error)
+            
+        return ModelListResponse(
+            path=str(request.url),
+            data=result
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取可用模型列表失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/detail", response_model=ModelResponse)
+async def get_model_detail(
+    request: Request,
+    code: str = Query(..., description="模型代码"),
+    db: Session = Depends(get_db)
+):
+    """
+    获取模型详细信息
+    
+    参数：
+    - code: 模型代码
+    
+    返回：
+    - 模型详细信息
+    """
+    try:
+        # 先查询本地数据库
+        model, error = await model_service.get_model_by_code(db, code)
+        if model:
+            return ModelResponse(
+                path=str(request.url),
+                data=model
+            )
+            
+        # 如果本地没有，从云服务获取
+        result, error = await model_service.cloud_client.get_model_info(db, code)
+        if error:
+            raise HTTPException(status_code=404, detail=error)
+            
+        return ModelResponse(
+            path=str(request.url),
+            data=result
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取模型详情失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/download", response_class=FileResponse)
@@ -215,23 +288,25 @@ async def download_model(
     - 模型文件（.pt 格式）
     """
     try:
-        # 直接检查文件是否存在
-        base_dir = os.path.join("/app", "models")
-        model_dir = os.path.join(base_dir, code)
-        file_path = os.path.join(model_dir, "best.pt")
+        # 检查本地是否存在模型文件
+        base_dir = os.path.join(settings.STORAGE.base_dir, code)
+        model_file = os.path.join(base_dir, "best.pt")
         
-        logger.info(f"Attempting to download model from: {file_path}")
+        if not os.path.exists(model_file):
+            # 如果本地不存在，尝试同步
+            result, error = await model_service.sync_model(db, code)
+            if error:
+                raise HTTPException(status_code=404, detail=error)
         
-        if not os.path.exists(file_path):
-            logger.error(f"Model file not found: {file_path}")
-            raise HTTPException(status_code=404, detail="Model file not found")
-        
+        # 返回模型文件
         return FileResponse(
-            file_path,
+            model_file,
             filename=f"{code}.pt",
             media_type="application/octet-stream"
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Failed to download model: {str(e)}")
+        logger.error(f"下载模型失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -46,7 +46,7 @@ class ModelServiceConfig(BaseSettings):
     
     # 云服务配置
     class CloudConfig(BaseModel):
-        url: str = "http://cloud-service:8004"  # 云服务地址
+        url: str = "http://localhost:8004"  # 云服务地址
         api_prefix: str = "/api/v1"         # API前缀
     
     # 配置项

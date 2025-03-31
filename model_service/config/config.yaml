@@ -24,5 +24,5 @@ LOGGING:
 
 # 云服务配置
 CLOUD_SERVICE:
-  url: "http://cloud-service:8004"
+  url: "http://localhost:8004"
   api_prefix: "/api/v1"
