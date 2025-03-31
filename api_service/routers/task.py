@@ -13,10 +13,10 @@ from api_service.services.task_controller import TaskController
 from api_service.models.database import Task
 
 logger = setup_logger(__name__)
-router = APIRouter(prefix="/tasks", tags=["任务"])
+router = APIRouter(prefix="/api/v1/task", tags=["任务"])
 task_controller = TaskController()
 
-@router.post("", response_model=BaseResponse)
+@router.post("/create", response_model=BaseResponse)
 async def create_task(request: TaskCreate, db: Session = Depends(get_db)):
     """创建任务"""
     try:
@@ -40,7 +40,6 @@ async def create_task(request: TaskCreate, db: Session = Depends(get_db)):
             "updated_at": result.updated_at,
             "started_at": result.started_at,
             "completed_at": result.completed_at,
-            # 转换关联对象为ID列表
             "stream_ids": [stream.id for stream in result.streams],
             "model_ids": [model.id for model in result.models],
             "callback_ids": [callback.id for callback in result.callbacks]
@@ -51,7 +50,7 @@ async def create_task(request: TaskCreate, db: Session = Depends(get_db)):
         logger.error(f"Create task failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("", response_model=BaseResponse)
+@router.post("/list", response_model=BaseResponse)
 async def get_tasks(
     skip: int = 0,
     limit: int = 100,
@@ -84,8 +83,11 @@ async def get_tasks(
         logger.error(f"Get tasks failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/{task_id}", response_model=BaseResponse)
-async def get_task(task_id: int, db: Session = Depends(get_db)):
+@router.post("/detail", response_model=BaseResponse)
+async def get_task(
+    task_id: int,
+    db: Session = Depends(get_db)
+):
     """获取任务详情"""
     try:
         result = task.get_task(db, task_id)
@@ -112,9 +114,8 @@ async def get_task(task_id: int, db: Session = Depends(get_db)):
         logger.error(f"Get task failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.put("/{task_id}", response_model=BaseResponse)
+@router.post("/update", response_model=BaseResponse)
 async def update_task(
-    task_id: int,
     request: TaskUpdate,
     db: Session = Depends(get_db)
 ):
@@ -122,7 +123,7 @@ async def update_task(
     try:
         result = task.update_task(
             db,
-            task_id,
+            request.id,  # 从请求体获取ID
             name=request.name,
             stream_ids=request.stream_ids,
             model_ids=request.model_ids,
@@ -143,7 +144,6 @@ async def update_task(
             "updated_at": result.updated_at,
             "started_at": result.started_at,
             "completed_at": result.completed_at,
-            # 转换关联对象为ID列表
             "stream_ids": [stream.id for stream in result.streams],
             "model_ids": [model.id for model in result.models],
             "callback_ids": [callback.id for callback in result.callbacks]
@@ -156,35 +156,8 @@ async def update_task(
         logger.error(f"Update task failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.put("/{task_id}/status", response_model=BaseResponse, 
-    description="更新任务状态",
-    responses={
-        200: {
-            "description": "成功更新任务状态",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "code": 200,
-                        "message": "Success",
-                        "data": {
-                            "id": 1,
-                            "name": "测试任务",
-                            "status": "running",
-                            "error_message": None,
-                            "created_at": "2024-01-01T00:00:00",
-                            "updated_at": "2024-01-01T00:00:00",
-                            "stream_ids": [1, 2],
-                            "model_ids": [1],
-                            "callback_ids": [1]
-                        }
-                    }
-                }
-            }
-        }
-    }
-)
+@router.post("/status/update", response_model=BaseResponse)
 async def update_task_status(
-    task_id: int,
     request: TaskStatusUpdate,
     db: Session = Depends(get_db)
 ):
@@ -203,7 +176,7 @@ async def update_task_status(
     try:
         result = task.update_task_status(
             db,
-            task_id,
+            request.task_id,  # 从请求体获取ID
             status=request.status,
             error_message=request.error_message
         )
@@ -234,8 +207,11 @@ async def update_task_status(
         logger.error(f"Update task status failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.delete("/{task_id}", response_model=BaseResponse)
-async def delete_task(task_id: int, db: Session = Depends(get_db)):
+@router.post("/delete", response_model=BaseResponse)
+async def delete_task(
+    task_id: int,
+    db: Session = Depends(get_db)
+):
     """删除任务"""
     try:
         success = task.delete_task(db, task_id)
@@ -248,9 +224,9 @@ async def delete_task(task_id: int, db: Session = Depends(get_db)):
         logger.error(f"Delete task failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/{task_id}/start", response_model=BaseResponse)
+@router.post("/start", response_model=BaseResponse)
 async def start_task(
-    task_id: int = Path(..., description="任务ID"),
+    task_id: int,
     db: Session = Depends(get_db)
 ):
     """启动任务"""
@@ -260,21 +236,21 @@ async def start_task(
             raise HTTPException(status_code=400, detail="Failed to start task")
             
         # 获取更新后的任务信息
-        task = db.query(Task).filter(Task.id == task_id).first()
-        if not task:
+        task_info = db.query(Task).filter(Task.id == task_id).first()
+        if not task_info:
             raise HTTPException(status_code=404, detail="Task not found")
             
         return BaseResponse(
             message="任务启动成功",
             data={
                 "task_id": task_id,
-                "status": task.status,
-                "started_at": task.started_at,
+                "status": task_info.status,
+                "started_at": task_info.started_at,
                 "streams": [
                     {
                         "id": stream.id,
                         "status": stream.status
-                    } for stream in task.streams
+                    } for stream in task_info.streams
                 ]
             }
         )
@@ -285,41 +261,9 @@ async def start_task(
         logger.error(f"Start task failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/{task_id}/stop", response_model=BaseResponse,
-    description="停止任务",
-    responses={
-        200: {
-            "description": "任务停止成功",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "code": 200,
-                        "message": "任务停止成功",
-                        "data": {
-                            "task_id": 1,
-                            "status": "stopped",
-                            "completed_at": "2024-01-01T00:00:00"
-                        }
-                    }
-                }
-            }
-        },
-        400: {
-            "description": "停止失败",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "code": 400,
-                        "message": "Failed to stop task",
-                        "detail": "任务未在运行"
-                    }
-                }
-            }
-        }
-    }
-)
+@router.post("/stop", response_model=BaseResponse)
 async def stop_task(
-    task_id: int = Path(..., description="任务ID"),
+    task_id: int,
     db: Session = Depends(get_db)
 ):
     """

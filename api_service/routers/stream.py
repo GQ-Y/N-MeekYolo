@@ -6,16 +6,16 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from api_service.models.requests import StreamCreate, StreamUpdate, StreamStatus
 from api_service.models.responses import BaseResponse, StreamResponse
-from api_service.models.database import Stream  # 添加Stream模型导入
+from api_service.models.database import Stream
 from api_service.services.stream import StreamService
 from api_service.services.database import get_db
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
-router = APIRouter(prefix="/streams", tags=["视频源"])
-stream_service = StreamService()  # 创建服务实例
+router = APIRouter(prefix="/api/v1/stream", tags=["视频源"])
+stream_service = StreamService()
 
-@router.post("", response_model=BaseResponse)
+@router.post("/create", response_model=BaseResponse)
 async def create_stream(
     data: StreamCreate,
     db: Session = Depends(get_db)
@@ -37,7 +37,7 @@ async def create_stream(
             detail=str(e)
         )
 
-@router.get("", response_model=BaseResponse)
+@router.post("/list", response_model=BaseResponse)
 async def get_streams(
     skip: int = 0,
     limit: int = 100,
@@ -70,7 +70,6 @@ async def get_streams(
         for stream in streams:
             try:
                 stream_data = StreamResponse.from_orm(stream).dict()
-                # 添加单个视频源状态日志
                 logger.debug(
                     f"视频源 {stream.id} ({stream.name}) "
                     f"状态值: {stream_data['status']}, "
@@ -79,13 +78,12 @@ async def get_streams(
                 stream_list.append(stream_data)
             except Exception as e:
                 logger.error(f"处理视频源 {stream.id} 数据时出错: {str(e)}")
-                # 创建一个带有默认状态的响应
                 stream_data = {
                     "id": stream.id,
                     "name": stream.name,
                     "url": stream.url,
                     "description": stream.description,
-                    "status": StreamStatus.OFFLINE,  # 默认离线
+                    "status": StreamStatus.OFFLINE,
                     "error_message": str(e),
                     "created_at": stream.created_at,
                     "updated_at": stream.updated_at
@@ -107,9 +105,12 @@ async def get_streams(
             detail=str(e)
         )
 
-@router.get("/{stream_id}", response_model=BaseResponse)
-async def get_stream(stream_id: int, db: Session = Depends(get_db)):
-    """获取视频源"""
+@router.post("/detail", response_model=BaseResponse)
+async def get_stream(
+    stream_id: int,
+    db: Session = Depends(get_db)
+):
+    """获取视频源详情"""
     try:
         result = stream_service.get_stream(db, stream_id)
         if not result:
@@ -128,9 +129,8 @@ async def get_stream(stream_id: int, db: Session = Depends(get_db)):
             detail=str(e)
         )
 
-@router.put("/{stream_id}", response_model=BaseResponse)
+@router.post("/update", response_model=BaseResponse)
 async def update_stream(
-    stream_id: int,
     request: StreamUpdate,
     db: Session = Depends(get_db)
 ):
@@ -138,7 +138,7 @@ async def update_stream(
     try:
         result = stream_service.update_stream(
             db,
-            stream_id,
+            request.id,  # 从请求体中获取ID
             request
         )
         if not result:
@@ -157,8 +157,11 @@ async def update_stream(
             detail=str(e)
         )
 
-@router.delete("/{stream_id}", response_model=BaseResponse)
-async def delete_stream(stream_id: int, db: Session = Depends(get_db)):
+@router.post("/delete", response_model=BaseResponse)
+async def delete_stream(
+    stream_id: int,
+    db: Session = Depends(get_db)
+):
     """删除视频源"""
     try:
         success = stream_service.delete_stream(db, stream_id)

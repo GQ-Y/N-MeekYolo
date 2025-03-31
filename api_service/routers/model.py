@@ -11,10 +11,10 @@ from api_service.models.database import Model
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
-router = APIRouter(prefix="/models", tags=["模型"])
+router = APIRouter(prefix="/api/v1/model", tags=["模型"])
 model_service = ModelService()
 
-@router.get("", response_model=BaseResponse)
+@router.post("/list", response_model=BaseResponse)
 async def get_models(
     skip: int = 0,
     limit: int = 100,
@@ -54,8 +54,11 @@ async def get_models(
         logger.error(f"Get models failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/code/{code}", response_model=BaseResponse)
-async def get_model_by_code(code: str, db: Session = Depends(get_db)):
+@router.post("/detail/code", response_model=BaseResponse)
+async def get_model_by_code(
+    code: str,
+    db: Session = Depends(get_db)
+):
     """通过代码获取模型"""
     try:
         model = await model_service.get_model_by_code(db, code)
@@ -77,8 +80,11 @@ async def get_model_by_code(code: str, db: Session = Depends(get_db)):
         logger.error(f"Get model by code failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/{model_id}", response_model=BaseResponse)
-async def get_model(model_id: int, db: Session = Depends(get_db)):
+@router.post("/detail", response_model=BaseResponse)
+async def get_model(
+    model_id: int,
+    db: Session = Depends(get_db)
+):
     """通过ID获取模型"""
     try:
         model = await model_service.get_model(db, model_id)

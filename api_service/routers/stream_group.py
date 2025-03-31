@@ -12,10 +12,10 @@ from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-router = APIRouter()
+router = APIRouter(prefix="/api/v1/stream-group", tags=["视频源分组"])
 stream_group_service = StreamGroupService()
 
-@router.post("", response_model=BaseResponse)
+@router.post("/create", response_model=BaseResponse)
 async def create_stream_group(
     data: StreamGroupCreate,
     db: Session = Depends(get_db)
@@ -49,7 +49,7 @@ async def create_stream_group(
             detail=f"创建失败: {str(e)}"
         )
 
-@router.get("", response_model=List[StreamGroupResponse])
+@router.post("/list", response_model=BaseResponse)
 async def get_stream_groups(
     skip: int = 0,
     limit: int = 100,
@@ -75,9 +75,16 @@ async def get_stream_groups(
             }
             
             logger.debug(f"Converting group to dict: {group_dict}")
-            response_data.append(StreamGroupResponse(**group_dict))
+            response_data.append(group_dict)
             
-        return response_data
+        return BaseResponse(
+            code=200,
+            message="获取成功",
+            data={
+                "total": len(response_data),
+                "items": response_data
+            }
+        )
 
     except Exception as e:
         logger.error(f"Get stream groups failed: {str(e)}", exc_info=True)
