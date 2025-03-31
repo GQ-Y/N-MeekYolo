@@ -37,12 +37,12 @@ app.add_middleware(
 )
 
 # 注册路由 - 使用统一的中文标签
-app.include_router(stream_router, tags=["视频源"])
-app.include_router(stream_group_router, tags=["视频源分组"])
-app.include_router(model_router, tags=["模型"])
-app.include_router(callback_router, tags=["回调服务"])
-app.include_router(task_router, tags=["任务"])
-app.include_router(analysis_router, tags=["分析"])
+app.include_router(stream_router)
+app.include_router(stream_group_router)
+app.include_router(model_router)
+app.include_router(callback_router)
+app.include_router(task_router)
+app.include_router(analysis_router)
 
 # 创建视频源监控器
 stream_monitor = StreamMonitor()

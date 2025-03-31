@@ -1,7 +1,14 @@
 """
-模型路由
+模型路由模块
+
+提供目标检测模型的管理接口，支持：
+- 模型列表：获取所有可用的目标检测模型
+- 模型详情：通过ID或代码获取模型详细信息
+- 模型同步：自动同步远程模型服务的最新模型数据
+
+本模块支持服务降级，当远程模型服务不可用时，会自动降级使用本地数据。
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 from typing import List
 from api_service.models.responses import BaseResponse, ModelResponse
@@ -11,16 +18,31 @@ from api_service.models.database import Model
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
-router = APIRouter(prefix="/api/v1/model", tags=["模型"])
+router = APIRouter(prefix="/api/v1/models", tags=["模型"])
 model_service = ModelService()
 
-@router.post("/list", response_model=BaseResponse)
+@router.post("/list", response_model=BaseResponse, summary="获取模型列表")
 async def get_models(
+    request: Request,
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db)
 ):
-    """获取模型列表"""
+    """
+    获取所有可用的目标检测模型列表，支持分页查询
+    
+    参数:
+    - skip: 跳过的记录数
+    - limit: 返回的最大记录数
+    
+    返回:
+    - total: 总记录数
+    - items: 模型列表，包含每个模型的基本信息
+    
+    说明:
+    - 优先从远程模型服务同步最新数据
+    - 如果远程服务不可用或同步失败，将使用本地数据
+    """
     try:
         # 如果model_service可用,同步最新数据
         service_available = await model_service.check_model_service()
@@ -28,15 +50,17 @@ async def get_models(
             try:
                 models = await model_service.sync_models(db)
             except Exception as e:
-                logger.error(f"Failed to sync models from model service: {str(e)}")
+                logger.error(f"从模型服务同步数据失败: {str(e)}")
                 # 如果同步失败，降级使用本地数据
                 models = db.query(Model).offset(skip).limit(limit).all()
         else:
             # 服务不可用时使用本地数据
-            logger.warning("Model service is not available, using local data")
+            logger.warning("模型服务不可用，使用本地数据")
             models = db.query(Model).offset(skip).limit(limit).all()
             
         return BaseResponse(
+            path=str(request.url),
+            message="获取成功",
             data={
                 "total": len(models),
                 "items": [
@@ -51,21 +75,42 @@ async def get_models(
             }
         )
     except Exception as e:
-        logger.error(f"Get models failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"获取模型列表失败: {str(e)}")
+        return BaseResponse(
+            path=str(request.url),
+            success=False,
+            code=500,
+            message=str(e)
+        )
 
-@router.post("/detail/code", response_model=BaseResponse)
+@router.post("/detail/code", response_model=BaseResponse, summary="通过代码获取模型")
 async def get_model_by_code(
+    request: Request,
     code: str,
     db: Session = Depends(get_db)
 ):
-    """通过代码获取模型"""
+    """
+    通过模型代码获取模型详细信息
+    
+    参数:
+    - code: 模型代码，唯一标识一个模型
+    
+    返回:
+    - 模型的详细信息，包括ID、代码、名称、描述和路径
+    """
     try:
         model = await model_service.get_model_by_code(db, code)
         if not model:
-            raise HTTPException(status_code=404, detail="Model not found")
+            return BaseResponse(
+                path=str(request.url),
+                success=False,
+                code=404,
+                message="模型不存在"
+            )
             
         return BaseResponse(
+            path=str(request.url),
+            message="获取成功",
             data={
                 "id": model.id,
                 "code": model.code,
@@ -74,24 +119,43 @@ async def get_model_by_code(
                 "path": model.path
             }
         )
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Get model by code failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"通过代码获取模型失败: {str(e)}")
+        return BaseResponse(
+            path=str(request.url),
+            success=False,
+            code=500,
+            message=str(e)
+        )
 
-@router.post("/detail", response_model=BaseResponse)
+@router.post("/detail", response_model=BaseResponse, summary="通过ID获取模型")
 async def get_model(
+    request: Request,
     model_id: int,
     db: Session = Depends(get_db)
 ):
-    """通过ID获取模型"""
+    """
+    通过模型ID获取模型详细信息
+    
+    参数:
+    - model_id: 模型ID
+    
+    返回:
+    - 模型的详细信息，包括ID、代码、名称、描述和路径
+    """
     try:
         model = await model_service.get_model(db, model_id)
         if not model:
-            raise HTTPException(status_code=404, detail="Model not found")
+            return BaseResponse(
+                path=str(request.url),
+                success=False,
+                code=404,
+                message="模型不存在"
+            )
             
         return BaseResponse(
+            path=str(request.url),
+            message="获取成功",
             data={
                 "id": model.id,
                 "code": model.code,
@@ -100,8 +164,11 @@ async def get_model(
                 "path": model.path
             }
         )
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Get model failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e)) 
+        logger.error(f"通过ID获取模型失败: {str(e)}")
+        return BaseResponse(
+            path=str(request.url),
+            success=False,
+            code=500,
+            message=str(e)
+        ) 

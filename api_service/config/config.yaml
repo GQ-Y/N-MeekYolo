@@ -9,11 +9,11 @@ SERVICE:
 
 # 分析服务配置
 ANALYSIS_SERVICE:
-  url: "http://analysis-service:8002"
+  url: "http://localhost:8002"
 
 # 模型服务配置
 MODEL_SERVICE:
-  url: "http://model-service:8003"
+  url: "http://localhost:8003"
   api_prefix: "/api/v1"
 
 # 数据库配置

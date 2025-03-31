@@ -1,7 +1,7 @@
 """
 请求数据模型
 """
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from pydantic import BaseModel, Field
 from enum import Enum, IntEnum
 
@@ -197,4 +197,23 @@ class UpdateTaskRequest(BaseModel):
     model_ids: Optional[List[int]] = None
     callback_ids: Optional[List[int]] = None
     callback_interval: Optional[int] = None
-    status: Optional[str] = None 
+    status: Optional[str] = None
+
+class AnalysisCreate(BaseModel):
+    """创建分析服务请求"""
+    name: str
+    description: Optional[str] = None
+    model_id: int
+    stream_id: int
+    callback_id: Optional[int] = None
+    config: Optional[Dict[str, Any]] = None
+
+class AnalysisUpdate(BaseModel):
+    """更新分析服务请求"""
+    id: int
+    name: Optional[str] = None
+    description: Optional[str] = None
+    model_id: Optional[int] = None
+    stream_id: Optional[int] = None
+    callback_id: Optional[int] = None
+    config: Optional[Dict[str, Any]] = None 

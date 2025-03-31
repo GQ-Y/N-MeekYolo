@@ -5,12 +5,39 @@ from typing import Dict, Optional, List, Any
 from pydantic import BaseModel, Field
 from datetime import datetime
 from api_service.models.requests import StreamStatus
+import uuid
 
 class BaseResponse(BaseModel):
-    """基础响应"""
-    code: int = 200
-    message: str = "success"
-    data: Optional[Dict] = None
+    """标准响应模型"""
+    requestId: str = Field(default_factory=lambda: str(uuid.uuid4()), description="请求ID")
+    path: str = Field("", description="请求路径")
+    success: bool = Field(True, description="是否成功")
+    message: str = Field("Success", description="响应消息")
+    code: int = Field(200, description="状态码")
+    data: Optional[Any] = Field(None, description="响应数据")
+    timestamp: int = Field(default_factory=lambda: int(datetime.now().timestamp() * 1000), description="时间戳")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "requestId": "550e8400-e29b-41d4-a716-446655440000",
+                "path": "/api/v1/stream/list",
+                "success": True,
+                "message": "Success",
+                "code": 200,
+                "data": {
+                    "total": 1,
+                    "items": [
+                        {
+                            "id": 1,
+                            "name": "测试视频源",
+                            "status": "online"
+                        }
+                    ]
+                },
+                "timestamp": 1616633599000
+            }
+        }
 
 class StreamGroupResponse(BaseModel):
     """流分组响应"""

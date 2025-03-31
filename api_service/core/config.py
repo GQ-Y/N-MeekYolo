@@ -24,12 +24,12 @@ class APIServiceConfig(BaseSettings):
     
     # 分析服务配置
     class AnalysisServiceConfig(BaseModel):
-        url: str = "http://analysis-service:8002"
+        url: str = "http://localhost:8002"
         api_prefix: str = "/api/v1"
     
     # 模型服务配置
     class ModelServiceConfig(BaseModel):
-        url: str = "http://model-service:8003"
+        url: str = "http://localhost:8003"
         api_prefix: str = "/api/v1"
     
     # 数据库配置
@@ -52,19 +52,19 @@ class APIServiceConfig(BaseSettings):
     # 服务列表配置
     class ServicesConfig(BaseModel):
         api: Dict[str, Any] = {
-            "url": "http://api-service:8001",
+            "url": "http://localhost:8001",
             "description": "API服务"
         }
         analysis: Dict[str, Any] = {
-            "url": "http://analysis-service:8002",
+            "url": "http://localhost:8002",
             "description": "分析服务"
         }
         model: Dict[str, Any] = {
-            "url": "http://model-service:8003",
+            "url": "http://localhost:8003",
             "description": "模型服务"
         }
         cloud: Dict[str, Any] = {
-            "url": "http://cloud-service:8004",
+            "url": "http://localhost:8004",
             "description": "云服务"
         }
     
