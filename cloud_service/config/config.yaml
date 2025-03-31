@@ -6,7 +6,7 @@ VERSION: "1.0.0"
 SERVICE:
   host: "0.0.0.0"
   port: 8004
-  base_url: "http://cloud-service:8004"
+  base_url: "http://localhost:8004"
 
 # 数据库配置
 DATABASE:

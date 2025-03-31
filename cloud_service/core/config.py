@@ -28,7 +28,7 @@ class CloudServiceConfig(BaseSettings):
     class ServiceConfig(BaseModel):
         host: str = "0.0.0.0"
         port: int = 8004
-        base_url: str = "http://cloud-service:8004"
+        base_url: str = "http://localhost:8004"
         debug: bool = False
     
     # 日志配置

@@ -18,7 +18,10 @@ from model_service.services.database import init_db
 from model_service.manager.model_manager import ModelManager
 
 # 配置日志
-logging.basicConfig(level=settings.LOGGING.level)
+logging.basicConfig(
+    level=settings.LOGGING.level,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # 创建限速器
@@ -82,7 +85,7 @@ app.include_router(
 )
 app.include_router(
     market_router, 
-    prefix="/api/v1/market", 
+    prefix="/api/v1/market",  # 这里只需要基本前缀，子路径由路由器自己定义
     tags=["模型市场"],
     responses={404: {"description": "未找到模型"}}
 )

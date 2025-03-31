@@ -300,3 +300,40 @@ class ModelManager:
         except Exception as e:
             logger.error(f"Failed to delete model: {str(e)}")
             raise
+    
+    async def load_model(self, model_code: str) -> bool:
+        """
+        加载模型
+        
+        参数：
+        - model_code: 模型代码
+        
+        返回：
+        - bool: 是否成功加载
+        
+        异常：
+        - HTTPException(404): 模型不存在
+        - HTTPException(400): 模型文件不完整
+        """
+        try:
+            model_dir = os.path.join(self.base_dir, model_code)
+            if not os.path.exists(model_dir):
+                logger.error(f"Model directory not found: {model_dir}")
+                raise HTTPException(status_code=404, detail="模型不存在")
+            
+            # 检查必要的文件
+            model_file = os.path.join(model_dir, "best.pt")
+            data_file = os.path.join(model_dir, "data.yaml")
+            
+            if not os.path.exists(model_file) or not os.path.exists(data_file):
+                logger.error(f"Missing required files in model directory: {model_dir}")
+                raise HTTPException(status_code=400, detail="模型文件不完整")
+            
+            logger.info(f"Model {model_code} loaded successfully")
+            return True
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to load model: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"加载模型失败: {str(e)}")

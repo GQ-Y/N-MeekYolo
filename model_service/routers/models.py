@@ -20,7 +20,9 @@ MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB in bytes
 ALLOWED_EXTENSIONS = {'.pt', '.pth', '.onnx', '.yaml', '.yml'}
 
 logger = setup_logger(__name__)
-router = APIRouter()
+router = APIRouter(
+    tags=["模型管理"]  # 使用中文标签，与 app.py 中的注册保持一致
+)
 model_manager = ModelManager()
 model_service = ModelService()
 
@@ -169,36 +171,6 @@ async def delete_model(
         raise
     except Exception as e:
         logger.error(f"删除模型失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/sync", response_model=StandardResponse)
-async def sync_model(
-    request: Request,
-    model_code: str = Body(..., embed=True, description="要同步的模型代码"),
-    db: Session = Depends(get_db)
-):
-    """
-    从云市场同步模型
-    
-    参数：
-    - model_code: 要同步的模型代码
-    
-    返回：
-    - 同步结果
-    """
-    try:
-        result, error = await model_service.sync_model(db, model_code)
-        if error:
-            raise HTTPException(status_code=400, detail=error)
-            
-        return StandardResponse(
-            path=str(request.url),
-            data=result
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"同步模型失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/available", response_model=ModelListResponse)
