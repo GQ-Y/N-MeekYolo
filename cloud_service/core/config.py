@@ -28,18 +28,37 @@ class CloudServiceConfig(BaseSettings):
     class ServiceConfig(BaseModel):
         host: str = "0.0.0.0"
         port: int = 8004
-        base_url: str = "http://cloud-service:8004"  # 添加 base_url
+        base_url: str = "http://cloud-service:8004"
+        debug: bool = False
     
     # 日志配置
     class LoggingConfig(BaseModel):
         level: str = "INFO"
         format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     
+    # CORS配置
+    class CORSConfig(BaseModel):
+        allow_origins: List[str] = ["*"]
+        allow_methods: List[str] = ["*"]
+        allow_headers: List[str] = ["*"]
+        allow_credentials: bool = True
+    
+    # 安全配置
+    class SecurityConfig(BaseModel):
+        allowed_hosts: List[str] = ["*"]
+        api_key_header: str = "X-API-Key"
+        rate_limit: str = "5/minute"
+        ssl_enabled: bool = False
+        ssl_cert_file: Optional[str] = None
+        ssl_key_file: Optional[str] = None
+    
     # 配置项
     SERVICE: ServiceConfig = ServiceConfig()
     STORAGE: StorageConfig = StorageConfig()
     DATABASE: DatabaseConfig = DatabaseConfig()
     LOGGING: LoggingConfig = LoggingConfig()
+    CORS: CORSConfig = CORSConfig()
+    SECURITY: SecurityConfig = SecurityConfig()
     
     class Config:
         env_file = ".env"
