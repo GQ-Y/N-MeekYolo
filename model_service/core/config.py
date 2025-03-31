@@ -17,6 +17,13 @@ class ModelServiceConfig(BaseSettings):
     PROJECT_NAME: str = "MeekYolo Model Service"
     VERSION: str = "1.0.0"
     
+    # CORS配置
+    ALLOWED_HOSTS: List[str] = ["*"]
+    CORS_ORIGINS: List[str] = ["*"]
+    CORS_ALLOW_CREDENTIALS: bool = True
+    CORS_ALLOW_METHODS: List[str] = ["*"]
+    CORS_ALLOW_HEADERS: List[str] = ["*"]
+    
     # 服务配置
     class ServiceConfig(BaseModel):
         host: str = "0.0.0.0"
