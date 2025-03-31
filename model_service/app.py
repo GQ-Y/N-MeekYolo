@@ -41,9 +41,20 @@ async def lifespan(app: FastAPI):
 
 # 创建应用程序
 app = FastAPI(
-    title=settings.PROJECT_NAME,
+    title="MeekYolo 模型服务",
+    description="""
+    MeekYolo 模型服务 API 文档
+    
+    提供以下功能：
+    * 模型管理：上传、下载、删除、查询模型
+    * 模型市场：同步云市场模型
+    * 密钥管理：创建、查询、删除密钥
+    """,
     version=settings.VERSION,
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json"
 )
 
 # 添加中间件
@@ -63,9 +74,24 @@ app.add_middleware(SlowAPIMiddleware)
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # 注册路由
-app.include_router(models_router, prefix="/api/v1/models", tags=["models"])
-app.include_router(market_router, prefix="/api/v1/market", tags=["market"])
-app.include_router(key_router, prefix="/api/v1/keys", tags=["keys"])
+app.include_router(
+    models_router, 
+    prefix="/api/v1/models", 
+    tags=["模型管理"],
+    responses={404: {"description": "未找到模型"}}
+)
+app.include_router(
+    market_router, 
+    prefix="/api/v1/market", 
+    tags=["模型市场"],
+    responses={404: {"description": "未找到模型"}}
+)
+app.include_router(
+    key_router, 
+    prefix="/api/v1/keys", 
+    tags=["密钥管理"],
+    responses={404: {"description": "未找到密钥"}}
+)
 
 @app.get("/health")
 @limiter.limit("5/minute")
