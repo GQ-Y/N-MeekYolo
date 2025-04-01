@@ -83,6 +83,8 @@ class CallbackCreate(BaseModel):
     url: str = Field(..., description="回调URL")
     description: Optional[str] = Field(None, description="回调服务描述")
     headers: Optional[Dict] = Field(None, description="自定义请求头")
+    method: str = Field('POST', description="请求方法(GET/POST)")
+    body_template: Optional[Dict] = Field(None, description="请求体模板")
     retry_count: Optional[int] = Field(3, description="重试次数")
     retry_interval: Optional[int] = Field(1, description="重试间隔(秒)")
 
@@ -92,6 +94,8 @@ class CallbackUpdate(BaseModel):
     url: Optional[str] = Field(None, description="回调URL")
     description: Optional[str] = Field(None, description="回调服务描述")
     headers: Optional[Dict] = Field(None, description="自定义请求头")
+    method: Optional[str] = Field(None, description="请求方法(GET/POST)")
+    body_template: Optional[Dict] = Field(None, description="请求体模板")
     retry_count: Optional[int] = Field(None, description="重试次数")
     retry_interval: Optional[int] = Field(None, description="重试间隔(秒)")
 

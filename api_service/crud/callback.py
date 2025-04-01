@@ -11,6 +11,8 @@ def create_callback(
     url: str,
     description: str = None,
     headers: Dict = None,
+    method: str = 'POST',
+    body_template: Dict = None,
     retry_count: int = 3,
     retry_interval: int = 1
 ) -> Callback:
@@ -20,6 +22,8 @@ def create_callback(
         url=url,
         description=description,
         headers=headers,
+        method=method,
+        body_template=body_template,
         retry_count=retry_count,
         retry_interval=retry_interval
     )
@@ -43,6 +47,8 @@ def update_callback(
     url: str = None,
     description: str = None,
     headers: Dict = None,
+    method: str = None,
+    body_template: Dict = None,
     retry_count: int = None,
     retry_interval: int = None
 ) -> Optional[Callback]:
@@ -57,6 +63,10 @@ def update_callback(
             callback.description = description
         if headers is not None:
             callback.headers = headers
+        if method:
+            callback.method = method
+        if body_template is not None:
+            callback.body_template = body_template
         if retry_count is not None:
             callback.retry_count = retry_count
         if retry_interval is not None:

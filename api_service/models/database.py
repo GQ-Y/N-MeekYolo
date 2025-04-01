@@ -123,6 +123,8 @@ class Callback(Base):
     url = Column(String(200), nullable=False, unique=True)
     description = Column(String(200))
     headers = Column(JSON)  # 自定义请求头
+    method = Column(String(10), default='POST')  # 请求方法
+    body_template = Column(JSON, nullable=True)  # 请求体模板
     retry_count = Column(Integer, default=3)  # 重试次数
     retry_interval = Column(Integer, default=1)  # 重试间隔(秒)
     created_at = Column(DateTime, default=datetime.utcnow)
