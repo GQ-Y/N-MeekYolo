@@ -2,12 +2,13 @@
 API路由模块
 处理所有外部API请求的路由和转发
 """
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Depends
 from fastapi.responses import JSONResponse
 from typing import Optional, Any, Dict
 from shared.utils.logger import setup_logger
 from gateway.discovery.service_registry import service_registry
 from gateway.core.models import StandardResponse, RouteRequest
+from gateway.core.auth import JWTBearer
 from gateway.core.exceptions import (
     GatewayException,
     ServiceNotFoundException,
@@ -132,10 +133,12 @@ async def route_request(route_req: RouteRequest, request: Request) -> StandardRe
     "/route",
     operation_id="route_request",
     response_model=StandardResponse,
+    dependencies=[Depends(JWTBearer())],
     description="""
     统一的路由处理入口
     
     此接口用于处理所有对下游服务的请求。所有请求参数必须通过请求体传递。
+    需要在请求头中提供有效的Bearer Token进行认证。
     
     示例请求:
     ```json
@@ -144,7 +147,7 @@ async def route_request(route_req: RouteRequest, request: Request) -> StandardRe
         "path": "users/profile",
         "method": "POST",
         "headers": {
-            "Authorization": "Bearer token"
+            "Content-Type": "application/json"
         },
         "query_params": {
             "page": "1"

@@ -17,10 +17,12 @@ from shared.utils.logger import setup_logger
 from gateway.discovery.service_registry import service_registry
 from gateway.router.api_router import router
 from gateway.routers.admin import router as admin_router
+from gateway.routers.auth import router as auth_router
 from gateway.core.models import StandardResponse
 from gateway.core.exceptions import GatewayException
 import time
 import uuid
+from .routers import auth, system
 
 # 配置日志
 logger = setup_logger(__name__)
@@ -82,6 +84,7 @@ app = FastAPI(
     - 服务发现和注册
     - 服务健康监控
     - 服务状态管理
+    - 用户认证和授权
     """,
     version="1.0.0",
     docs_url=None,
@@ -104,8 +107,11 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(RequestLoggingMiddleware)
 
 # 注册路由
+app.include_router(auth_router)  # 添加认证路由
 app.include_router(admin_router)
 app.include_router(router)
+app.include_router(auth.router)
+app.include_router(system.router)
 
 # 挂载静态文件
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -186,4 +192,8 @@ async def shutdown_event():
 @app.get("/health")
 async def health_check():
     """健康检查接口"""
-    return {"status": "healthy"} 
+    return {"status": "healthy"}
+
+@app.get("/")
+async def root():
+    return {"message": "Welcome to MeekYolo Gateway"} 

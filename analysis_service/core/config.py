@@ -32,7 +32,7 @@ class AnalysisServiceConfig(BaseSettings):
     
     # 模型服务配置
     class ModelServiceConfig(BaseModel):
-        url: str = "http://model-service:8003"
+        url: str = "http://localhost:8003"
         api_prefix: str = "/api/v1"
     
     # 分析配置
