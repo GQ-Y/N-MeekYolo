@@ -59,6 +59,7 @@ class StreamResponse(BaseModel):
     description: Optional[str] = None
     status: int = Field(default=0, description="状态: 0-离线, 1-在线")
     error_message: Optional[str] = None
+    groups: List[Dict[str, Any]] = Field(default_factory=list, description="所属分组列表")
     created_at: datetime
     updated_at: datetime
     
@@ -67,6 +68,10 @@ class StreamResponse(BaseModel):
 
     @classmethod
     def from_orm(cls, obj):
+        if isinstance(obj, dict):
+            # 如果是字典，直接使用
+            return cls(**obj)
+            
         # 确保status是整数，处理可能的字符串值
         if hasattr(obj, 'status'):
             try:
@@ -84,7 +89,30 @@ class StreamResponse(BaseModel):
                     obj.status = int(obj.status)
             except (ValueError, TypeError):
                 obj.status = 0  # 默认离线
-        return super().from_orm(obj)
+                
+        # 处理分组信息
+        groups_data = []
+        if hasattr(obj, 'groups'):
+            for group in obj.groups:
+                if hasattr(group, 'id') and hasattr(group, 'name'):
+                    groups_data.append({"id": group.id, "name": group.name})
+                elif isinstance(group, dict) and 'id' in group and 'name' in group:
+                    groups_data.append(group)
+                    
+        # 创建响应数据
+        data = {
+            "id": obj.id,
+            "name": obj.name,
+            "url": obj.url,
+            "description": obj.description,
+            "status": obj.status,
+            "error_message": obj.error_message if hasattr(obj, 'error_message') else None,
+            "groups": groups_data,
+            "created_at": obj.created_at,
+            "updated_at": obj.updated_at
+        }
+        
+        return cls(**data)
 
 class CreateStreamResponse(BaseModel):
     """创建流响应"""

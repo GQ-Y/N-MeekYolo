@@ -132,15 +132,33 @@ class StreamGroupService:
     ) -> bool:
         """删除流分组"""
         try:
+            # 检查是否为默认分组
+            if group_id == 0:
+                raise HTTPException(
+                    status_code=403,
+                    detail="默认分组不允许删除"
+                )
+                
             group = await self.get_stream_group(db, group_id)
+            
+            # 再次检查是否为默认分组（通过名称）
+            if group.name == "默认分组":
+                raise HTTPException(
+                    status_code=403,
+                    detail="默认分组不允许删除"
+                )
+            
             db.delete(group)
             db.commit()
             return True
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Delete stream group failed: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
+            db.rollback()
+            raise HTTPException(
+                status_code=500,
+                detail=f"删除分组失败: {str(e)}"
+            )
     
     async def add_stream_to_group(
         self,

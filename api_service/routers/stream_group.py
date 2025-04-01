@@ -41,7 +41,7 @@ async def get_stream_groups(
     - items: 分组列表，包含每个分组的基本信息和关联的视频流数量
     """
     try:
-        groups = stream_group_service.get_stream_groups(db, skip, limit)
+        groups = await stream_group_service.get_stream_groups(db, skip, limit)
         return BaseResponse(
             path=str(request.url),
             message="获取成功",
@@ -52,7 +52,15 @@ async def get_stream_groups(
                         "id": group.id,
                         "name": group.name,
                         "description": group.description,
-                        "stream_count": len(group.streams),
+                        "cameras": [
+                            {
+                                "id": stream.id,
+                                "name": stream.name,
+                                "url": stream.url,
+                                "status": stream.status,
+                                "error_message": stream.error_message
+                            } for stream in group.streams
+                        ],
                         "created_at": group.created_at,
                         "updated_at": group.updated_at
                     } for group in groups
@@ -85,7 +93,7 @@ async def create_stream_group(
     - 创建的分组信息
     """
     try:
-        result = stream_group_service.create_stream_group(db, group_data)
+        result = await stream_group_service.create_stream_group(db, group_data)
         return BaseResponse(
             path=str(request.url),
             message="创建成功",
@@ -122,7 +130,7 @@ async def get_stream_group(
     - 分组详细信息，包含关联的视频流列表
     """
     try:
-        result = stream_group_service.get_stream_group(db, group_id)
+        result = await stream_group_service.get_stream_group(db, group_id)
         if not result:
             return BaseResponse(
                 path=str(request.url),
@@ -177,7 +185,11 @@ async def update_stream_group(
     - 更新后的分组信息
     """
     try:
-        result = stream_group_service.update_stream_group(db, group_data)
+        result = await stream_group_service.update_stream_group(
+            db,
+            group_data.id,  # 从请求体中获取分组ID
+            group_data
+        )
         if not result:
             return BaseResponse(
                 path=str(request.url),
@@ -222,7 +234,7 @@ async def delete_stream_group(
     - 删除操作的结果
     """
     try:
-        success = stream_group_service.delete_stream_group(db, group_id)
+        success = await stream_group_service.delete_stream_group(db, group_id)
         if not success:
             return BaseResponse(
                 path=str(request.url),
@@ -261,7 +273,7 @@ async def add_stream_to_group(
     - 操作结果
     """
     try:
-        result = stream_group_service.add_stream_to_group(db, group_id, stream_id)
+        result = await stream_group_service.add_stream_to_group(db, group_id, stream_id)
         if not result:
             return BaseResponse(
                 path=str(request.url),
@@ -300,7 +312,7 @@ async def remove_stream_from_group(
     - 操作结果
     """
     try:
-        success = stream_group_service.remove_stream_from_group(db, group_id, stream_id)
+        success = await stream_group_service.remove_stream_from_group(db, group_id, stream_id)
         if not success:
             return BaseResponse(
                 path=str(request.url),

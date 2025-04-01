@@ -9,7 +9,7 @@
 - 状态管理：控制视频流的启动和停止
 """
 from fastapi import APIRouter, Depends, Request
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from typing import Optional
 from api_service.models.requests import StreamCreate, StreamUpdate, StreamStatus
 from api_service.models.responses import BaseResponse, StreamResponse
@@ -47,7 +47,7 @@ async def get_streams(
         
         # 获取总数和分页数据
         total = db.query(Stream).count()
-        streams = db.query(Stream).offset(skip).limit(limit).all()
+        streams = db.query(Stream).options(joinedload(Stream.groups)).offset(skip).limit(limit).all()
         
         # 统计在线状态
         online_count = db.query(Stream).filter(Stream.status == StreamStatus.ONLINE).count()
@@ -64,25 +64,29 @@ async def get_streams(
         stream_list = []
         for stream in streams:
             try:
-                stream_data = StreamResponse.from_orm(stream).dict()
+                stream_data = StreamResponse.from_orm(stream)
                 logger.debug(
                     f"视频流 {stream.id} ({stream.name}) "
-                    f"状态值: {stream_data['status']}, "
-                    f"状态: {'在线' if stream_data['status'] == StreamStatus.ONLINE else '离线'}"
+                    f"状态值: {stream_data.status}, "
+                    f"状态: {'在线' if stream_data.status == StreamStatus.ONLINE else '离线'}, "
+                    f"分组数: {len(stream_data.groups)}"
                 )
-                stream_list.append(stream_data)
+                stream_list.append(stream_data.dict())
             except Exception as e:
                 logger.error(f"处理视频流 {stream.id} 数据时出错: {str(e)}")
-                stream_list.append({
-                    "id": stream.id,
-                    "name": stream.name,
-                    "url": stream.url,
-                    "description": stream.description,
-                    "status": StreamStatus.OFFLINE,
-                    "error_message": str(e),
-                    "created_at": stream.created_at,
-                    "updated_at": stream.updated_at
-                })
+                # 创建一个新的 StreamResponse 对象
+                error_response = StreamResponse(
+                    id=stream.id,
+                    name=stream.name,
+                    url=stream.url,
+                    description=stream.description,
+                    status=StreamStatus.OFFLINE,
+                    error_message=str(e),
+                    groups=[],
+                    created_at=stream.created_at,
+                    updated_at=stream.updated_at
+                )
+                stream_list.append(error_response.dict())
         
         return BaseResponse(
             path=str(request.url),

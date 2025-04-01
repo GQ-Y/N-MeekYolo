@@ -36,8 +36,9 @@ class StreamGroupCreate(BaseModel):
 
 class StreamGroupUpdate(BaseModel):
     """更新流分组请求"""
-    name: Optional[str] = None
-    description: Optional[str] = None
+    id: int = Field(..., description="分组ID")
+    name: Optional[str] = Field(None, description="分组名称")
+    description: Optional[str] = Field(None, description="分组描述")
 
 # 视频源请求模型
 class StreamCreate(BaseModel):
@@ -54,6 +55,7 @@ class StreamStatus(IntEnum):
 
 class StreamUpdate(BaseModel):
     """更新视频源请求"""
+    id: int = Field(..., description="视频源ID")
     name: Optional[str] = Field(None, description="视频源名称")
     url: Optional[str] = Field(None, description="视频源URL")
     description: Optional[str] = Field(None, description="视频源描述")
