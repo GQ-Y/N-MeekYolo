@@ -22,7 +22,7 @@ from gateway.core.models import StandardResponse
 from gateway.core.exceptions import GatewayException
 import time
 import uuid
-from .routers import auth, system
+from .routers import auth, system, user
 
 # 配置日志
 logger = setup_logger(__name__)
@@ -112,6 +112,7 @@ app.include_router(admin_router)
 app.include_router(router)
 app.include_router(auth.router)
 app.include_router(system.router)
+app.include_router(user.router)  # 添加用户路由
 
 # 挂载静态文件
 app.mount("/static", StaticFiles(directory="static"), name="static")

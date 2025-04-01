@@ -27,14 +27,24 @@ class Auth:
     """认证工具类"""
     
     @staticmethod
+    def hash_password(password: str) -> str:
+        """对密码进行哈希"""
+        return hashlib.sha256(password.encode()).hexdigest()
+    
+    @staticmethod
+    def hash_token(token: str) -> str:
+        """对口令进行哈希"""
+        return hashlib.sha256(token.encode()).hexdigest()
+    
+    @staticmethod
     def verify_password(plain_password: str, hashed_password: str) -> bool:
         """验证密码"""
-        return hashlib.sha256(plain_password.encode()).hexdigest() == hashed_password
+        return Auth.hash_password(plain_password) == hashed_password
     
     @staticmethod
     def verify_token(plain_token: str, hashed_token: str) -> bool:
         """验证口令"""
-        return hashlib.sha256(plain_token.encode()).hexdigest() == hashed_token
+        return Auth.hash_token(plain_token) == hashed_token
     
     @staticmethod
     def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
@@ -84,8 +94,9 @@ class Auth:
         # 创建新用户
         user = User(
             username=username,
-            password=hashlib.sha256(password.encode()).hexdigest(),
-            token=hashlib.sha256(token.encode()).hexdigest()
+            password=cls.hash_password(password),
+            token=cls.hash_token(token),
+            nickname="MeekYolo"  # 默认昵称
         )
         db.add(user)
         db.commit()

@@ -128,6 +128,21 @@ class RouteRequest(BaseModel):
             }
         }
 
+class ProfileUpdate(BaseModel):
+    """用户信息更新请求"""
+    nickname: str
+    phone: Optional[str] = None
+
+class PasswordUpdate(BaseModel):
+    """密码更新请求"""
+    old_password: str
+    new_password: str
+
+class TokenUpdate(BaseModel):
+    """口令更新请求"""
+    old_token: str
+    new_token: str
+
 """
 数据库模型
 """
@@ -146,6 +161,8 @@ class User(Base):
     username = Column(String, unique=True, index=True)
     password = Column(String)
     token = Column(String)
+    nickname = Column(String, default="MeekYolo")  # 用户昵称
+    phone = Column(String, nullable=True)  # 手机号
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
