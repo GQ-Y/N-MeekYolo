@@ -50,7 +50,8 @@ def validate_file(file: UploadFile) -> None:
 @router.post("/upload", response_model=ModelResponse)
 async def upload_model(
     request: Request,
-    files: List[UploadFile] = File(..., description="模型文件列表，支持 .pt、.pth、.onnx、.yaml 格式"),
+    model_file: UploadFile = File(..., description="模型文件(.pt)"),
+    config_file: UploadFile = File(..., description="配置文件(.yaml)"),
     name: str = Form(..., description="模型名称"),
     code: str = Form(..., description="模型代码，唯一标识符"),
     version: str = Form("1.0.0", description="模型版本号"),
@@ -61,17 +62,18 @@ async def upload_model(
     上传模型文件
     
     支持上传以下格式的文件：
-    - .pt/.pth: PyTorch 模型文件
-    - .onnx: ONNX 模型文件
-    - .yaml: 模型配置文件
+    - .pt: PyTorch 模型文件
+    - .yaml: 模型配置文件，必须包含以下字段：
+      - nc: 模型支持的检测类别数量
+      - names: 模型支持的检测类别名称映射
     
     文件大小限制：100MB
     """
     try:
-        # 验证所有文件
-        for file in files:
-            validate_file(file)
-            
+        # 验证文件
+        validate_file(model_file)
+        validate_file(config_file)
+        
         model_info = ModelInfo(
             name=name,
             code=code,
@@ -79,10 +81,10 @@ async def upload_model(
             author=author,
             description=description
         )
-        result = await model_manager.upload_model(files, model_info)
+        result = await model_manager.upload_model([model_file, config_file], model_info)
         return ModelResponse(
             path=str(request.url),
-            data=model_info
+            data=result
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -93,18 +95,18 @@ async def upload_model(
 @router.get("/list", response_model=ModelListResponse)
 async def list_models(
     request: Request,
-    skip: int = 0,
-    limit: int = 10
+    skip: int = Query(0, description="分页起始位置", ge=0),
+    limit: int = Query(100, description="每页数量", gt=0, le=1000)
 ):
     """
     获取模型列表
     
     参数：
-    - skip: 跳过的记录数，用于分页
-    - limit: 返回的记录数，用于分页
+    - skip: 分页起始位置，必须大于等于0
+    - limit: 每页数量，必须大于0且小于等于1000
     
     返回：
-    - 模型列表，包含基本信息
+    - 模型列表，包含基本信息和检测类别信息
     """
     try:
         models = await model_manager.list_models(skip, limit)
@@ -119,21 +121,21 @@ async def list_models(
 @router.get("/detail", response_model=ModelResponse)
 async def get_model(
     request: Request,
-    model_code: str = Query(..., description="模型代码，唯一标识符")
+    code: str = Query(..., description="模型代码，唯一标识符")
 ):
     """
     获取模型详细信息
     
     参数：
-    - model_code: 模型代码，唯一标识符
+    - code: 模型代码，唯一标识符
     
     返回：
-    - 模型详细信息，包含所有字段
+    - 模型详细信息，包含所有字段和检测类别信息
     """
     try:
-        model = await model_manager.get_model_info(model_code)
+        model = await model_manager.get_model_info(code)
         if not model:
-            raise HTTPException(status_code=404, detail=f"模型不存在: {model_code}")
+            raise HTTPException(status_code=404, detail=f"模型不存在: {code}")
         return ModelResponse(
             path=str(request.url),
             data=model

@@ -231,45 +231,68 @@ class YOLODetector:
             raise
 
     async def _download_image(self, url: str) -> Optional[np.ndarray]:
-        """
-        下载图片
+        """下载图片并转换为 numpy 数组
         
-        Args:
-            url: 图片URL
-            
-        Returns:
-            np.ndarray: OpenCV格式的图像(BGR)，如果下载失败返回None
+        支持以下格式：
+        - HTTP/HTTPS URL
+        - Base64编码的图片数据（以 'data:image/' 开头）
+        - Blob URL（以 'blob:' 开头）
         """
         try:
-            logger.info(f"开始下载图片: {url}")
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=30) as response:
-                    if response.status == 200:
-                        # 读取图片数据
-                        image_data = await response.read()
-                        content_type = response.headers.get('content-type', '')
-                        logger.info(f"图片下载成功，Content-Type: {content_type}, 数据大小: {len(image_data)} bytes")
-                        
-                        # 转换为numpy数组
-                        nparr = np.frombuffer(image_data, np.uint8)
-                        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                        
-                        if image is None:
-                            logger.error("图片解码失败")
-                            return None
-                            
-                        logger.info(f"图片解码成功，尺寸: {image.shape}")
-                        return image
-                    else:
-                        logger.error(f"下载图片失败: {url}, 状态码: {response.status}")
-                        response_text = await response.text()
-                        logger.error(f"响应内容: {response_text[:200]}")  # 只记录前200个字符
+            # 处理 Base64 编码的图片数据
+            if url.startswith('data:image/'):
+                try:
+                    # 提取实际的 base64 数据
+                    base64_data = url.split(',')[1]
+                    image_data = base64.b64decode(base64_data)
+                    nparr = np.frombuffer(image_data, np.uint8)
+                    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    if img is None:
+                        logger.error(f"Failed to decode base64 image data")
                         return None
-        except aiohttp.ClientError as e:
-            logger.error(f"网络请求错误: {str(e)}")
-            return None
+                    return img
+                except Exception as e:
+                    logger.error(f"Error processing base64 image: {str(e)}")
+                    return None
+
+            # 处理 HTTP/HTTPS URL
+            elif url.startswith(('http://', 'https://')):
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(url) as response:
+                            if response.status == 200:
+                                image_data = await response.read()
+                                nparr = np.frombuffer(image_data, np.uint8)
+                                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                                if img is None:
+                                    logger.error(f"Failed to decode image from URL: {url}")
+                                    return None
+                                return img
+                            else:
+                                logger.error(f"Failed to download image from URL: {url}, status: {response.status}")
+                                return None
+                except Exception as e:
+                    logger.error(f"Error downloading image from URL {url}: {str(e)}")
+                    return None
+
+            # 处理 Blob URL
+            elif url.startswith('blob:'):
+                try:
+                    # 从请求中获取 blob 数据
+                    # 注意：这里需要前端将 blob 数据转换为 base64 或直接上传文件
+                    # 因为后端无法直接访问浏览器的 blob URL
+                    logger.error(f"Blob URL is not supported directly. Please convert to base64 or upload file: {url}")
+                    return None
+                except Exception as e:
+                    logger.error(f"Error processing blob URL {url}: {str(e)}")
+                    return None
+
+            else:
+                logger.error(f"Unsupported image URL format: {url}")
+                return None
+
         except Exception as e:
-            logger.error(f"下载图片出错: {url}, 错误: {str(e)}", exc_info=True)
+            logger.error(f"Unexpected error processing image {url}: {str(e)}")
             return None
 
     def _get_color_by_id(self, track_id: int) -> Tuple[int, int, int]:

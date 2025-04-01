@@ -9,7 +9,7 @@ SERVICES:
 
 # 模型服务配置
 MODEL_SERVICE:
-  url: "http://model-service:8003"
+  url: "http://localhost:8003"
   api_prefix: "/api/v1"
 
 # 分析配置

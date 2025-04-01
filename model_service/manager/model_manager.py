@@ -31,26 +31,35 @@ class ModelManager:
                 with open(data_file, "r", encoding="utf-8") as f:
                     data = yaml.safe_load(f)
                     # 从 data.yaml 中提取信息
+                    names_dict = data.get("names", {})
+                    # 确保names字典的键是整数类型
+                    names = {int(k): str(v) for k, v in names_dict.items()}
                     return ModelInfo(
-                        name=data.get("name", model_code),  # 直接使用 name 字段
+                        name=data.get("name", model_code),
                         code=model_code,
                         version=data.get("version", "1.0.0"),
                         author=data.get("author", ""),
-                        description=data.get("description", "")
+                        description=data.get("description", ""),
+                        nc=data.get("nc", 0),
+                        names=names
                     )
             
             # 如果没有 data.yaml 或读取失败，返回基本信息
             return ModelInfo(
                 name=model_code,
                 code=model_code,
-                version="1.0.0"
+                version="1.0.0",
+                nc=0,
+                names={}
             )
         except Exception as e:
             logger.warning(f"Failed to read model info from data.yaml: {str(e)}")
             return ModelInfo(
                 name=model_code,
                 code=model_code,
-                version="1.0.0"
+                version="1.0.0",
+                nc=0,
+                names={}
             )
     
     def _find_yaml_config(self, files: List[UploadFile]) -> Dict:
@@ -186,7 +195,7 @@ class ModelManager:
                         # 读取配置
                         content = file.file.read()
                         data = yaml.safe_load(content.decode("utf-8"))
-                        if isinstance(data, dict) and "code" in data:
+                        if isinstance(data, dict):
                             config_data = data
                         file.file.seek(0)
                     else:
@@ -197,12 +206,17 @@ class ModelManager:
             
             # 更新模型信息
             if config_data:
+                names_dict = config_data.get("names", {})
+                # 确保names字典的键是整数类型
+                names = {int(k): str(v) for k, v in names_dict.items()}
                 model_info = ModelInfo(
-                    name=config_data.get("names", ["Unknown"])[0],
-                    code=model_info.code,  # 保持原有的code
-                    version=config_data.get("version", "1.0.0"),
-                    author=config_data.get("author", ""),
-                    description=config_data.get("description", "")
+                    name=model_info.name or config_data.get("name", model_info.code),
+                    code=model_info.code,
+                    version=model_info.version or config_data.get("version", "1.0.0"),
+                    author=model_info.author or config_data.get("author", ""),
+                    description=model_info.description or config_data.get("description", ""),
+                    nc=config_data.get("nc", 0),
+                    names=names
                 )
             
             # 验证必要的文件

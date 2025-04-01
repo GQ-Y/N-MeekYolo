@@ -7,9 +7,9 @@ import json
 import uuid
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
 from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Form, BackgroundTasks, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from analysis_service.core.detector import YOLODetector
 from analysis_service.core.queue import TaskQueueManager
 from analysis_service.core.resource import ResourceMonitor
@@ -53,6 +53,8 @@ import time
 from sqlalchemy.orm import Session
 from analysis_service.core.config import settings
 from datetime import datetime
+import base64
+import re
 
 logger = setup_logger(__name__)
 
@@ -93,8 +95,30 @@ class BaseAnalysisRequest(BaseModel):
 
 class ImageAnalysisRequest(BaseAnalysisRequest):
     """图片分析请求"""
-    image_urls: List[str] = Field(..., description="图片URL列表")
+    image_urls: List[str] = Field(..., description="图片URL列表，支持以下格式：\n- HTTP/HTTPS URL\n- Base64编码的图片数据（以 'data:image/' 开头）\n- Blob URL（以 'blob:' 开头）")
     is_base64: bool = Field(False, description="是否返回base64编码的结果图片")
+
+    @validator('image_urls')
+    def validate_image_urls(cls, v):
+        for url in v:
+            # 检查是否是有效的 HTTP/HTTPS URL
+            if url.startswith(('http://', 'https://')):
+                continue
+            # 检查是否是有效的 Base64 图片数据
+            elif url.startswith('data:image/'):
+                try:
+                    # 提取实际的 base64 数据
+                    base64_data = url.split(',')[1]
+                    base64.b64decode(base64_data)
+                except:
+                    raise ValueError(f"Invalid base64 image data: {url[:50]}...")
+            # 检查是否是有效的 Blob URL
+            elif url.startswith('blob:'):
+                if not re.match(r'^blob:(http[s]?://[^/]+/[a-f0-9-]+)$', url):
+                    raise ValueError(f"Invalid blob URL: {url}")
+            else:
+                raise ValueError(f"Unsupported image URL format: {url}")
+        return v
 
 class VideoAnalysisRequest(BaseAnalysisRequest):
     """视频分析请求"""
