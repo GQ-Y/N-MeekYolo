@@ -7,7 +7,10 @@ from api_service.core.config import settings
 SQLALCHEMY_DATABASE_URL = settings.DATABASE.url
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
-    connect_args={"check_same_thread": False}  # 允许跨线程访问SQLite
+    pool_size=10,
+    max_overflow=20,
+    pool_recycle=3600,
+    pool_pre_ping=True
 )
 
 # 创建会话工厂

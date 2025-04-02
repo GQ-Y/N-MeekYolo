@@ -18,9 +18,13 @@ MODEL_SERVICE:
 
 # 数据库配置
 DATABASE:
-  url: "sqlite:///data/api_service.db"
-  dir: "data"
-  name: "api_service.db"
+  type: "mysql"
+  host: "localhost"
+  port: 3306
+  username: "meekyolo"
+  password: "123456"
+  database: "api_service"
+  url: "mysql+pymysql://meekyolo:123456@localhost:3306/api_service?charset=utf8mb4"
 
 # 默认分组配置
 DEFAULT_GROUP:

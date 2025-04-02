@@ -11,7 +11,8 @@ from sqlalchemy import (
     Table,
     Boolean,
     JSON,
-    Text
+    Text,
+    Index
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
@@ -24,32 +25,40 @@ Base = declarative_base()
 group_stream_association = Table(
     'group_stream_association',
     Base.metadata,
-    Column('group_id', Integer, ForeignKey('stream_groups.id')),
-    Column('stream_id', Integer, ForeignKey('streams.id'))
+    Column('group_id', Integer, ForeignKey('stream_groups.id', ondelete='CASCADE')),
+    Column('stream_id', Integer, ForeignKey('streams.id', ondelete='CASCADE')),
+    Index('idx_gs_group_id', 'group_id'),
+    Index('idx_gs_stream_id', 'stream_id')
 )
 
 # 任务与视频源的多对多关系表
 task_stream_association = Table(
     'task_stream_association',
     Base.metadata,
-    Column('task_id', Integer, ForeignKey('tasks.id')),
-    Column('stream_id', Integer, ForeignKey('streams.id'))
+    Column('task_id', Integer, ForeignKey('tasks.id', ondelete='CASCADE')),
+    Column('stream_id', Integer, ForeignKey('streams.id', ondelete='CASCADE')),
+    Index('idx_ts_task_id', 'task_id'),
+    Index('idx_ts_stream_id', 'stream_id')
 )
 
 # 任务与模型的多对多关系表
 task_model_association = Table(
     'task_model_association',
     Base.metadata,
-    Column('task_id', Integer, ForeignKey('tasks.id')),
-    Column('model_id', Integer, ForeignKey('models.id'))
+    Column('task_id', Integer, ForeignKey('tasks.id', ondelete='CASCADE')),
+    Column('model_id', Integer, ForeignKey('models.id', ondelete='CASCADE')),
+    Index('idx_tm_task_id', 'task_id'),
+    Index('idx_tm_model_id', 'model_id')
 )
 
 # 任务与回调服务的多关系表
 task_callback_association = Table(
     'task_callback_association',
     Base.metadata,
-    Column('task_id', Integer, ForeignKey('tasks.id')),
-    Column('callback_id', Integer, ForeignKey('callbacks.id'))
+    Column('task_id', Integer, ForeignKey('tasks.id', ondelete='CASCADE')),
+    Column('callback_id', Integer, ForeignKey('callbacks.id', ondelete='CASCADE')),
+    Index('idx_tc_task_id', 'task_id'),
+    Index('idx_tc_callback_id', 'callback_id')
 )
 
 # 流分组和流的多对多关系表
@@ -57,7 +66,9 @@ stream_group_association = Table(
     'stream_group_association',
     Base.metadata,
     Column('stream_id', Integer, ForeignKey('streams.id', ondelete='CASCADE')),
-    Column('group_id', Integer, ForeignKey('stream_groups.id', ondelete='CASCADE'))
+    Column('group_id', Integer, ForeignKey('stream_groups.id', ondelete='CASCADE')),
+    Index('idx_sg_stream_id', 'stream_id'),
+    Index('idx_sg_group_id', 'group_id')
 )
 
 class StreamGroup(Base):
@@ -75,6 +86,10 @@ class StreamGroup(Base):
         "Stream",
         secondary=stream_group_association,
         back_populates="groups"
+    )
+    
+    __table_args__ = (
+        Index('idx_streamgroup_name', 'name'),
     )
 
 class Stream(Base):
@@ -98,21 +113,32 @@ class Stream(Base):
     )
     # 关联任务
     tasks = relationship('Task', secondary=task_stream_association, back_populates='streams')
+    
+    __table_args__ = (
+        Index('idx_stream_name', 'name'),
+        Index('idx_stream_status', 'status'),
+        Index('idx_stream_url', 'url'),
+    )
 
 class Model(Base):
     """模型表"""
     __tablename__ = "models"
 
     id = Column(Integer, primary_key=True, index=True)
-    code = Column(String, unique=True, index=True)
-    name = Column(String)
-    path = Column(String)
-    description = Column(String, nullable=True)
+    code = Column(String(100), unique=True, index=True)
+    name = Column(String(100))
+    path = Column(String(500))
+    description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # 关联任务
     tasks = relationship('Task', secondary=task_model_association, back_populates='models')
+    
+    __table_args__ = (
+        Index('idx_model_code', 'code'),
+        Index('idx_model_name', 'name'),
+    )
 
 class Callback(Base):
     """回调服务"""
@@ -132,6 +158,11 @@ class Callback(Base):
     
     # 关联任务
     tasks = relationship('Task', secondary=task_callback_association, back_populates='callbacks')
+    
+    __table_args__ = (
+        Index('idx_callback_name', 'name'),
+        Index('idx_callback_url', 'url'),
+    )
 
 class Task(Base):
     """分析任务"""
@@ -169,7 +200,13 @@ class Task(Base):
     @property
     def callback_ids(self) -> List[int]:
         """获取回调ID列表"""
-        return [callback.id for callback in self.callbacks] 
+        return [callback.id for callback in self.callbacks]
+        
+    __table_args__ = (
+        Index('idx_task_name', 'name'),
+        Index('idx_task_status', 'status'),
+        Index('idx_task_created_at', 'created_at'),
+    )
 
 class SubTask(Base):
     """子任务表"""
@@ -181,7 +218,7 @@ class SubTask(Base):
     stream_id = Column(Integer, ForeignKey('streams.id'))
     model_id = Column(Integer, ForeignKey('models.id'))
     status = Column(String(20), default="created")
-    error_message = Column(String, nullable=True)
+    error_message = Column(String(200), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     started_at = Column(DateTime, nullable=True)
@@ -191,6 +228,13 @@ class SubTask(Base):
     task = relationship("Task", back_populates="sub_tasks")
     stream = relationship("Stream")
     model = relationship("Model")
+    
+    __table_args__ = (
+        Index('idx_subtask_task_id', 'task_id'),
+        Index('idx_subtask_stream_id', 'stream_id'),
+        Index('idx_subtask_model_id', 'model_id'),
+        Index('idx_subtask_status', 'status'),
+    )
 
 class Node(Base):
     """节点模型"""
@@ -208,3 +252,9 @@ class Node(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_heartbeat = Column(DateTime, nullable=True)
+    
+    __table_args__ = (
+        Index('idx_node_ip_port', 'ip', 'port'),
+        Index('idx_node_service_name', 'service_name'),
+        Index('idx_node_service_status', 'service_status'),
+    )

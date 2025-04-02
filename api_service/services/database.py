@@ -6,25 +6,16 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 from api_service.core.config import settings
 from shared.utils.logger import setup_logger
-import os
 
 logger = setup_logger(__name__)
 
-# 获取服务根目录
-SERVICE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-# 数据库目录和文件
-DB_DIR = os.path.join(SERVICE_ROOT, "data")
-DB_FILE = "api_service.db"
-DB_PATH = os.path.join(DB_DIR, DB_FILE)
-
-# 确保数据库目录存在
-os.makedirs(DB_DIR, exist_ok=True)
-
 # 创建数据库引擎
 engine = create_engine(
-    f"sqlite:///{DB_PATH}",
-    connect_args={"check_same_thread": False}
+    settings.DATABASE.url,
+    pool_size=10,
+    max_overflow=20,
+    pool_recycle=3600,
+    pool_pre_ping=True
 )
 
 # 创建会话工厂
@@ -86,16 +77,7 @@ def init_db():
                 Stream.status == StreamStatus.ONLINE
             ).count()
             
-            if online_count > 0:
-                logger.warning(f"发现 {online_count} 个视频源状态未被重置为离线")
-                # 再次尝试重置
-                db.query(Stream).update(
-                    {Stream.status: StreamStatus.OFFLINE},
-                    synchronize_session=False
-                )
-                db.commit()
-            
-            logger.info(f"数据库初始化完成, 重置了 {affected} 个视频源状态")
+            logger.info(f"数据库初始化完成，在线视频源：{online_count}")
             
         except Exception as e:
             db.rollback()
@@ -103,11 +85,8 @@ def init_db():
             raise
         finally:
             db.close()
-            
-        logger.info(f"数据库已初始化: {DB_PATH}")
-        
     except Exception as e:
-        logger.error(f"数据库初始化失败: {str(e)}")
+        logger.error(f"数据库初始化过程出错: {str(e)}")
         raise
 
 def get_db():

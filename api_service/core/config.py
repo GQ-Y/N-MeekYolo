@@ -34,9 +34,13 @@ class APIServiceConfig(BaseSettings):
     
     # 数据库配置
     class DatabaseConfig(BaseModel):
-        url: str = "sqlite:///data/api_service.db"
-        dir: str = "data"
-        name: str = "api_service.db"
+        type: str = "mysql"
+        host: str = "localhost"
+        port: int = 3306
+        username: str = "meekyolo"
+        password: str = "123456"
+        database: str = "api_service"
+        url: str = "mysql+pymysql://meekyolo:123456@localhost:3306/api_service?charset=utf8mb4"
     
     # 默认分组配置
     class DefaultGroupConfig(BaseModel):
