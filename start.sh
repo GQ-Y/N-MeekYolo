@@ -83,7 +83,15 @@ start_service() {
     # 启动服务
     log "INFO" "Starting $name service on port $port..."
     cd "$PROJECT_ROOT"
-    PYTHONPATH="$PROJECT_ROOT" python -m uvicorn "$service_name.app:app" --host 0.0.0.0 --port $port --reload > "$LOG_DIR/${name}.log" 2>&1 &
+    
+    # 特殊处理分析服务
+    if [ "$name" = "Analysis" ]; then
+        cd analysis_service
+        PYTHONPATH="$PROJECT_ROOT" python -m uvicorn app:app --host 0.0.0.0 --port $port --reload > "$LOG_DIR/${name}.log" 2>&1 &
+        cd "$PROJECT_ROOT"
+    else
+        PYTHONPATH="$PROJECT_ROOT" python -m uvicorn "$service_name.app:app" --host 0.0.0.0 --port $port --reload > "$LOG_DIR/${name}.log" 2>&1 &
+    fi
     
     # 等待服务启动
     wait_for_service "$name" "$port"

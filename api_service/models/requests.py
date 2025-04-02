@@ -10,6 +10,8 @@ class AnalysisRequest(BaseModel):
     """分析请求基础模型"""
     model_code: str
     callback_url: Optional[str] = None
+    
+    model_config = {"protected_namespaces": ()}
 
 class ImageAnalysisRequest(AnalysisRequest):
     """图片分析请求"""
@@ -109,6 +111,8 @@ class TaskCreate(BaseModel):
     model_ids: List[int] = Field(..., description="模型ID列表")
     callback_ids: Optional[List[int]] = Field(None, description="回调服务ID列表")
     callback_interval: Optional[int] = Field(1, description="回调间隔(秒)")
+    
+    model_config = {"protected_namespaces": ()}
 
 class TaskUpdate(BaseModel):
     """更新任务请求"""
@@ -117,6 +121,8 @@ class TaskUpdate(BaseModel):
     model_ids: Optional[List[int]] = Field(None, description="模型ID列表")
     callback_ids: Optional[List[int]] = Field(None, description="回调服务ID列表")
     callback_interval: Optional[int] = Field(None, description="回调间隔(秒)")
+    
+    model_config = {"protected_namespaces": ()}
 
 class TaskStatus(str, Enum):
     """任务状态枚举"""
@@ -195,6 +201,8 @@ class CreateTaskRequest(BaseModel):
     model_ids: List[int]
     callback_ids: Optional[List[int]] = None
     callback_interval: Optional[int] = 1
+    
+    model_config = {"protected_namespaces": ()}
 
 class UpdateTaskRequest(BaseModel):
     """更新任务请求"""
@@ -204,6 +212,8 @@ class UpdateTaskRequest(BaseModel):
     callback_ids: Optional[List[int]] = None
     callback_interval: Optional[int] = None
     status: Optional[str] = None
+    
+    model_config = {"protected_namespaces": ()}
 
 class AnalysisCreate(BaseModel):
     """创建分析服务请求"""
@@ -213,6 +223,8 @@ class AnalysisCreate(BaseModel):
     stream_id: int
     callback_id: Optional[int] = None
     config: Optional[Dict[str, Any]] = None
+    
+    model_config = {"protected_namespaces": ()}
 
 class AnalysisUpdate(BaseModel):
     """更新分析服务请求"""
@@ -222,4 +234,6 @@ class AnalysisUpdate(BaseModel):
     model_id: Optional[int] = None
     stream_id: Optional[int] = None
     callback_id: Optional[int] = None
-    config: Optional[Dict[str, Any]] = None 
+    config: Optional[Dict[str, Any]] = None
+    
+    model_config = {"protected_namespaces": ()} 

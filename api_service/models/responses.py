@@ -20,8 +20,8 @@ class BaseResponse(BaseModel, Generic[T]):
     data: Optional[T] = Field(None, description="响应数据")
     timestamp: int = Field(default_factory=lambda: int(time.time() * 1000), description="时间戳")
 
-    class Config:
-        json_schema_extra = {
+    model_config = {
+        "json_schema_extra": {
             "example": {
                 "requestId": "550e8400-e29b-41d4-a716-446655440000",
                 "path": "/api/v1/stream/list",
@@ -41,6 +41,7 @@ class BaseResponse(BaseModel, Generic[T]):
                 "timestamp": 1616633599000
             }
         }
+    }
 
 class NodeBase(BaseModel):
     """节点基础模型"""
@@ -83,8 +84,9 @@ class NodeResponse(NodeBase):
     updated_at: datetime = Field(..., description="更新时间")
     last_heartbeat: Optional[datetime] = Field(None, description="最后心跳时间")
 
-    class Config:
-        from_attributes = True
+    model_config = {
+        "from_attributes": True
+    }
 
 class NodeListResponse(BaseResponse[List[NodeResponse]]):
     """节点列表响应"""
@@ -99,8 +101,9 @@ class StreamGroupResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {
+        "from_attributes": True
+    }
 
 class StreamResponse(BaseModel):
     """视频源响应"""
@@ -114,8 +117,9 @@ class StreamResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = {
+        "from_attributes": True
+    }
 
     @classmethod
     def from_orm(cls, obj):
@@ -181,8 +185,9 @@ class ModelResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {
+        "from_attributes": True
+    }
 
 class ModelListResponse(BaseResponse):
     """模型列表响应"""
@@ -200,8 +205,9 @@ class CallbackResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {
+        "from_attributes": True
+    }
 
 class TaskResponse(BaseModel):
     """任务响应"""
@@ -220,11 +226,11 @@ class TaskResponse(BaseModel):
     model_ids: List[int] = Field(default_factory=list)   # 改名以更清晰
     callback_ids: List[int] = Field(default_factory=list) # 改名以更清晰
 
-    class Config:
-        from_attributes = True
-        
-        # 添加别名映射，使其能正确从数据库模型转换
-        alias_generator = lambda x: x.replace('_ids', 's')
+    model_config = {
+        "protected_namespaces": (),
+        "from_attributes": True,
+        "alias_generator": lambda x: x.replace('_ids', 's')
+    }
 
 class ResponseModel(BaseModel):
     """通用响应模型"""

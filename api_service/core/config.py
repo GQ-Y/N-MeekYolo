@@ -93,7 +93,9 @@ class APIServiceConfig(BaseSettings):
             if "CONFIG_PATH" in os.environ:
                 config_path = os.environ["CONFIG_PATH"]
             else:
-                config_path = "/app/config/config.yaml"
+                # 使用相对于当前文件的路径
+                current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                config_path = os.path.join(current_dir, "config", "config.yaml")
             
             logger.debug(f"Loading config from: {config_path}")
             
