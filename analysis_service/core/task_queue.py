@@ -34,17 +34,34 @@ class TaskQueue:
         self.retry_delay = settings.TASK_QUEUE.retry_delay
         self.result_ttl = settings.TASK_QUEUE.result_ttl
         
-    async def add_task(self, task_data: Dict[str, Any], priority: float = 0) -> str:
-        """添加任务到队列"""
+    async def add_task(self, task_data: Dict[str, Any], priority: float = 0, task_id: Optional[str] = None) -> str:
+        """添加任务到队列
+        
+        Args:
+            task_data: 任务数据
+            priority: 任务优先级，默认为0
+            task_id: 可选的任务ID，如果不提供则从task_data中获取
+            
+        Returns:
+            str: 任务ID
+        """
         try:
-            task_id = task_data.get('id')
-            if not task_id:
-                raise ValueError("任务ID不能为空")
-                
+            # 获取或使用提供的任务ID
+            if task_id is not None:
+                task_data['id'] = task_id
+            else:
+                task_id = task_data.get('id')
+                if not task_id:
+                    raise ValueError("任务ID不能为空")
+            
+            # 设置任务状态和创建时间
+            if 'status' not in task_data:
+                task_data['status'] = TaskStatus.WAITING
+            if 'created_at' not in task_data:
+                task_data['created_at'] = datetime.now().isoformat()
+            
             # 保存任务数据
             task_key = f"task:{task_id}"
-            task_data['status'] = TaskStatus.WAITING
-            task_data['created_at'] = datetime.now().isoformat()
             await self.redis.set_value(task_key, task_data)
             
             # 添加到等待队列
@@ -168,7 +185,7 @@ class TaskQueue:
                 task_data['retry_count'] = retry_count + 1
                 task_data['status'] = TaskStatus.WAITING
                 task_data['last_error'] = error
-                await self.add_task(task_data, priority=time.time())
+                await self.add_task(task_data)
                 logger.info(f"任务将重试: {task_id}, 重试次数: {retry_count + 1}")
             else:
                 # 标记为最终失败

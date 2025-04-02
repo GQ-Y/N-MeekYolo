@@ -24,6 +24,12 @@ import colorsys
 from core.tracker import create_tracker, BaseTracker
 from core.redis_manager import RedisManager
 from core.task_queue import TaskQueue, TaskStatus
+from core.exceptions import (
+    InvalidInputException,
+    ModelLoadException,
+    ProcessingException,
+    ResourceNotFoundException
+)
 
 logger = setup_logger(__name__)
 
@@ -794,9 +800,7 @@ class YOLODetector:
         """启动流分析任务"""
         try:
             # 加载模型
-            model = await self._load_model(model_code)
-            if not model:
-                raise ModelLoadException(f"模型 {model_code} 加载失败")
+            await self.load_model(model_code)
             
             # 创建任务信息
             task_info = {
@@ -823,10 +827,10 @@ class YOLODetector:
             await self.redis.set_value(task_key, task_info)
             
             # 添加到任务队列
-            await self.task_queue.add_task(task_id, TaskStatus.PROCESSING, task_info)
+            await self.task_queue.add_task(task_info, task_id=task_id)
             
             # 启动流分析任务
-            asyncio.create_task(self._process_stream_analysis(task_id, model, task_info))
+            asyncio.create_task(self._process_stream_analysis(task_id))
             
             return task_info
             
@@ -836,14 +840,24 @@ class YOLODetector:
 
     async def _process_stream_analysis(
         self,
-        task_id: str,
-        model: YOLO,
-        task_info: Dict[str, Any]
+        task_id: str
     ) -> None:
         """处理流分析任务"""
         try:
+            # 获取任务信息
+            task_info = await self._get_task_info(task_id)
+            if not task_info:
+                raise ProcessingException(f"任务 {task_id} 不存在")
+            
             # 获取任务配置
             config = task_info.get("config", {})
+            if isinstance(config, str):
+                config = {}  # 如果是字符串，转换为空字典
+            elif hasattr(config, 'dict'):
+                config = config.dict()  # 如果是 Pydantic 模型，转换为字典
+            elif not isinstance(config, dict):
+                config = {}  # 如果不是字典类型，转换为空字典
+                
             stream_url = task_info["stream_url"]
             
             # 打开视频流
@@ -884,7 +898,7 @@ class YOLODetector:
                 # 处理帧
                 results = await self._process_frame(
                     frame=frame,
-                    model=model,
+                    model=self.model,
                     config=config
                 )
                 
@@ -1479,3 +1493,82 @@ class YOLODetector:
                 'status': TaskStatus.STOPPED,
                 'error': f'停止失败: {str(e)}'
             })
+
+    async def _process_frame(
+        self,
+        frame: np.ndarray,
+        model: YOLO,
+        config: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """处理单帧图像"""
+        try:
+            # 使用配置参数或默认值
+            conf = config.get('confidence', self.default_confidence)
+            iou = config.get('iou', self.default_iou)
+            classes = config.get('classes', None)
+            roi = config.get('roi', None)
+            imgsz = config.get('imgsz', None)
+            
+            # 保存原始图像尺寸
+            original_shape = frame.shape[:2]  # (height, width)
+            
+            # 如果指定了ROI，裁剪图像
+            if roi:
+                h, w = frame.shape[:2]
+                x1 = int(roi['x1'] * w)
+                y1 = int(roi['y1'] * h)
+                x2 = int(roi['x2'] * w)
+                y2 = int(roi['y2'] * h)
+                frame = frame[y1:y2, x1:x2]
+            
+            # 处理图片大小
+            if imgsz:
+                frame = cv2.resize(frame, (imgsz, imgsz))
+            
+            # 执行推理
+            results = model(
+                frame,
+                conf=conf,
+                iou=iou,
+                classes=classes
+            )
+            
+            # 处理检测结果
+            detections = []
+            for result in results:
+                boxes = result.boxes
+                for box in boxes:
+                    bbox = box.xyxy[0].cpu().numpy()
+                    conf = float(box.conf[0])
+                    cls = int(box.cls[0])
+                    name = result.names[cls]
+                    
+                    # 如果使用了ROI，需要调整坐标
+                    if roi and original_shape:
+                        h, w = original_shape
+                        bbox[0] = bbox[0] / w * (roi['x2'] - roi['x1']) * w + roi['x1'] * w
+                        bbox[1] = bbox[1] / h * (roi['y2'] - roi['y1']) * h + roi['y1'] * h
+                        bbox[2] = bbox[2] / w * (roi['x2'] - roi['x1']) * w + roi['x1'] * w
+                        bbox[3] = bbox[3] / h * (roi['y2'] - roi['y1']) * h + roi['y1'] * h
+                    
+                    detection = {
+                        "bbox": {
+                            "x1": float(bbox[0]),
+                            "y1": float(bbox[1]),
+                            "x2": float(bbox[2]),
+                            "y2": float(bbox[3])
+                        },
+                        "confidence": conf,
+                        "class_id": cls,
+                        "class_name": name,
+                        "area": float((bbox[2] - bbox[0]) * (bbox[3] - bbox[1])),  # 计算面积
+                        "parent_idx": None,  # 用于存储父目标的索引
+                        "children": []  # 用于存储子目标列表
+                    }
+                    detections.append(detection)
+            
+            return detections
+            
+        except Exception as e:
+            logger.error(f"处理帧失败: {str(e)}", exc_info=True)
+            raise ProcessingException(f"处理帧失败: {str(e)}")
