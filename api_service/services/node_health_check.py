@@ -5,6 +5,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from api_service.crud.node import NodeCRUD
+from api_service.models.node import Node
 from api_service.core.database import SessionLocal
 from shared.utils.logger import setup_logger
 
@@ -60,7 +61,7 @@ class NodeHealthChecker:
                 return
 
             # 获取当前在线节点数量
-            online_count = db.query(NodeCRUD).filter_by(service_status="online").count()
+            online_count = db.query(Node).filter_by(service_status="online").count()
             logger.info(f"当前在线节点数: {online_count}")
 
             # 检查节点健康状态
@@ -69,7 +70,7 @@ class NodeHealthChecker:
             after_check = datetime.now()
 
             # 获取更新后的在线节点数量
-            new_online_count = db.query(NodeCRUD).filter_by(service_status="online").count()
+            new_online_count = db.query(Node).filter_by(service_status="online").count()
             offline_count = online_count - new_online_count
 
             if offline_count > 0:
