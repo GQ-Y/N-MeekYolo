@@ -48,6 +48,8 @@ class NodeBase(BaseModel):
     ip: str = Field(..., description="节点IP地址")
     port: str = Field(..., description="节点端口")
     service_name: str = Field(..., description="服务名称")
+    weight: int = Field(1, description="负载均衡权重")
+    max_tasks: int = Field(10, description="最大任务数量")
 
 class NodeCreate(NodeBase):
     """节点创建模型"""
@@ -59,6 +61,8 @@ class NodeUpdate(NodeBase):
     port: Optional[str] = Field(None, description="节点端口")
     service_name: Optional[str] = Field(None, description="服务名称")
     service_status: Optional[str] = Field(None, description="服务状态")
+    weight: Optional[int] = Field(None, description="负载均衡权重")
+    max_tasks: Optional[int] = Field(None, description="最大任务数量")
 
 class NodeStatusUpdate(BaseModel):
     """节点状态更新模型"""
@@ -79,6 +83,8 @@ class NodeResponse(NodeBase):
     image_task_count: int = Field(0, description="图像任务数量")
     video_task_count: int = Field(0, description="视频任务数量")
     stream_task_count: int = Field(0, description="流任务数量")
+    weight: int = Field(1, description="负载均衡权重")
+    max_tasks: int = Field(10, description="最大任务数量")
     is_active: bool = Field(True, description="是否激活")
     created_at: datetime = Field(..., description="创建时间")
     updated_at: datetime = Field(..., description="更新时间")
@@ -87,6 +93,16 @@ class NodeResponse(NodeBase):
     model_config = {
         "from_attributes": True
     }
+    
+    def get_total_tasks(self) -> int:
+        """获取总任务数量"""
+        return self.image_task_count + self.video_task_count + self.stream_task_count
+    
+    # 模型方法，用于自定义序列化
+    def model_dump(self, **kwargs):
+        data = super().model_dump(**kwargs)
+        data["total_tasks"] = self.get_total_tasks()
+        return data
 
 class NodeListResponse(BaseResponse[List[NodeResponse]]):
     """节点列表响应"""
@@ -216,6 +232,10 @@ class TaskResponse(BaseModel):
     status: str
     error_message: Optional[str] = None
     callback_interval: int = 1
+    enable_callback: bool = Field(True, description="是否启用回调")
+    save_result: bool = Field(False, description="是否保存结果")
+    config: Dict[str, Any] = Field(default_factory=dict, description="任务配置")
+    node_id: Optional[int] = Field(None, description="节点ID")
     created_at: datetime
     updated_at: datetime
     started_at: Optional[datetime] = None

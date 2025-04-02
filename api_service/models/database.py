@@ -173,6 +173,10 @@ class Task(Base):
     status = Column(String(20), default='created')  # created, running, paused, error, completed
     error_message = Column(String(200))
     callback_interval = Column(Integer, default=1)  # 回调间隔(秒)
+    enable_callback = Column(Boolean, default=True)  # 是否启用回调
+    save_result = Column(Boolean, default=False)  # 是否保存结果
+    config = Column(JSON, nullable=True)  # 任务配置
+    node_id = Column(Integer, ForeignKey('nodes.id', ondelete='SET NULL'), nullable=True)  # 指定节点ID
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     started_at = Column(DateTime)
@@ -183,6 +187,7 @@ class Task(Base):
     streams = relationship('Stream', secondary=task_stream_association, back_populates='tasks')
     models = relationship('Model', secondary=task_model_association, back_populates='tasks')
     callbacks = relationship('Callback', secondary=task_callback_association, back_populates='tasks')
+    node = relationship('Node', foreign_keys=[node_id])  # 关联节点
     
     # 添加子任务关联
     sub_tasks = relationship("SubTask", back_populates="task", cascade="all, delete-orphan")
@@ -248,10 +253,15 @@ class Node(Base):
     image_task_count = Column(Integer, default=0)
     video_task_count = Column(Integer, default=0)
     stream_task_count = Column(Integer, default=0)
+    weight = Column(Integer, default=1)  # 负载均衡权重，默认为1
+    max_tasks = Column(Integer, default=10)  # 最大任务数量
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_heartbeat = Column(DateTime, nullable=True)
+    
+    # 关联任务
+    tasks = relationship('Task', foreign_keys='Task.node_id', back_populates='node')
     
     __table_args__ = (
         Index('idx_node_ip_port', 'ip', 'port'),

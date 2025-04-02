@@ -37,7 +37,11 @@ async def create_task(
             task_data.stream_ids,
             task_data.model_ids,
             task_data.callback_ids,
-            task_data.callback_interval
+            task_data.callback_interval,
+            task_data.enable_callback,
+            task_data.save_result,
+            task_data.config,
+            task_data.node_id
         )
         
         # 构造响应数据
@@ -53,7 +57,11 @@ async def create_task(
             "completed_at": result.completed_at,
             "stream_ids": [stream.id for stream in result.streams],
             "model_ids": [model.id for model in result.models],
-            "callback_ids": [callback.id for callback in result.callbacks]
+            "callback_ids": [callback.id for callback in result.callbacks],
+            "enable_callback": result.enable_callback if hasattr(result, 'enable_callback') else True,
+            "save_result": result.save_result if hasattr(result, 'save_result') else False,
+            "config": result.config if hasattr(result, 'config') else {},
+            "node_id": result.node_id if hasattr(result, 'node_id') else None
         }
         
         return BaseResponse(
@@ -172,7 +180,11 @@ async def update_task(
             stream_ids=task_data.stream_ids,
             model_ids=task_data.model_ids,
             callback_ids=task_data.callback_ids,
-            callback_interval=task_data.callback_interval
+            callback_interval=task_data.callback_interval,
+            enable_callback=task_data.enable_callback,
+            save_result=task_data.save_result,
+            config=task_data.config,
+            node_id=task_data.node_id
         )
         if not result:
             return BaseResponse(
@@ -195,7 +207,11 @@ async def update_task(
             "completed_at": result.completed_at,
             "stream_ids": [stream.id for stream in result.streams],
             "model_ids": [model.id for model in result.models],
-            "callback_ids": [callback.id for callback in result.callbacks]
+            "callback_ids": [callback.id for callback in result.callbacks],
+            "enable_callback": result.enable_callback if hasattr(result, 'enable_callback') else True,
+            "save_result": result.save_result if hasattr(result, 'save_result') else False,
+            "config": result.config if hasattr(result, 'config') else {},
+            "node_id": result.node_id if hasattr(result, 'node_id') else None
         }
         
         return BaseResponse(

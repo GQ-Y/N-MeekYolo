@@ -29,6 +29,19 @@ class StreamAnalysisRequest(AnalysisRequest):
     callback_url: str = None
     output_url: str = None
     callback_interval: int = 1
+    enable_callback: bool = True
+    save_result: bool = False
+    config: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {
+            "confidence": 0.5,
+            "iou": 0.45,
+            "classes": None,
+            "roi": None,
+            "imgsz": 640,
+            "nested_detection": True
+        },
+        description="任务配置"
+    )
 
 # 视频源分组请求模型
 class StreamGroupCreate(BaseModel):
@@ -94,6 +107,7 @@ class CallbackCreate(BaseModel):
 
 class CallbackUpdate(BaseModel):
     """更新回调服务请求"""
+    id: int = Field(..., description="回调服务ID")
     name: Optional[str] = Field(None, description="回调服务名称")
     url: Optional[str] = Field(None, description="回调URL")
     description: Optional[str] = Field(None, description="回调服务描述")
@@ -111,16 +125,35 @@ class TaskCreate(BaseModel):
     model_ids: List[int] = Field(..., description="模型ID列表")
     callback_ids: Optional[List[int]] = Field(None, description="回调服务ID列表")
     callback_interval: Optional[int] = Field(1, description="回调间隔(秒)")
+    enable_callback: bool = Field(True, description="启用回调")
+    save_result: bool = Field(False, description="保存结果")
+    config: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {
+            "confidence": 0.5,
+            "iou": 0.45,
+            "classes": None,
+            "roi": None,
+            "imgsz": 640,
+            "nested_detection": True
+        },
+        description="任务配置，支持目标检测、实例分割、目标跟踪等"
+    )
+    node_id: Optional[int] = Field(None, description="指定节点ID，不指定则自动负载均衡")
     
     model_config = {"protected_namespaces": ()}
 
 class TaskUpdate(BaseModel):
     """更新任务请求"""
+    id: int = Field(..., description="任务ID")
     name: Optional[str] = Field(None, description="任务名称")
     stream_ids: Optional[List[int]] = Field(None, description="视频源ID列表")
     model_ids: Optional[List[int]] = Field(None, description="模型ID列表")
     callback_ids: Optional[List[int]] = Field(None, description="回调服务ID列表")
     callback_interval: Optional[int] = Field(None, description="回调间隔(秒)")
+    enable_callback: Optional[bool] = Field(None, description="启用回调")
+    save_result: Optional[bool] = Field(None, description="保存结果")
+    config: Optional[Dict[str, Any]] = Field(None, description="任务配置")
+    node_id: Optional[int] = Field(None, description="指定节点ID")
     
     model_config = {"protected_namespaces": ()}
 
@@ -187,12 +220,15 @@ class CreateCallbackRequest(BaseModel):
 
 class UpdateCallbackRequest(BaseModel):
     """更新回调服务请求"""
-    name: Optional[str] = None
-    url: Optional[str] = None
-    description: Optional[str] = None
-    headers: Optional[dict] = None
-    retry_count: Optional[int] = None
-    retry_interval: Optional[int] = None
+    id: int = Field(..., description="回调服务ID")
+    name: Optional[str] = Field(None, description="回调服务名称")
+    url: Optional[str] = Field(None, description="回调URL")
+    description: Optional[str] = Field(None, description="回调服务描述")
+    headers: Optional[dict] = Field(None, description="自定义请求头")
+    method: Optional[str] = Field(None, description="请求方法(GET/POST)")
+    body_template: Optional[dict] = Field(None, description="请求体模板")
+    retry_count: Optional[int] = Field(None, description="重试次数")
+    retry_interval: Optional[int] = Field(None, description="重试间隔(秒)")
 
 class CreateTaskRequest(BaseModel):
     """创建任务请求"""

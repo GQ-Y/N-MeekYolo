@@ -91,7 +91,7 @@ class AnalysisService:
         """
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                self._get_api_url("/stream"),
+                self._get_api_url("/analyze/stream"),
                 json={
                     "model_code": model_code,
                     "stream_url": stream_url,

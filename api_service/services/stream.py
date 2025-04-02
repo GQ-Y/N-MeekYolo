@@ -40,14 +40,14 @@ class StreamService:
             else:
                 # 如果没有指定分组，关联到默认分组
                 default_group = db.query(StreamGroup).filter(
-                    StreamGroup.name == settings.DEFAULT_GROUP["name"]
+                    StreamGroup.name == settings.DEFAULT_GROUP.name
                 ).first()
                 
                 if not default_group:
                     # 如果默认分组不存在(异常情况),创建默认分组
                     default_group = StreamGroup(
-                        name=settings.DEFAULT_GROUP["name"],
-                        description=settings.DEFAULT_GROUP["description"]
+                        name=settings.DEFAULT_GROUP.name,
+                        description=settings.DEFAULT_GROUP.description
                     )
                     db.add(default_group)
                     db.flush()  # 获取分组ID
@@ -168,13 +168,39 @@ class StreamService:
             if not stream:
                 return False
                 
-            db.delete(stream)
-            db.commit()
-            return True
-            
+            try:
+                # 先检查是否有关联的任务
+                logger.info(f"正在检查流 {stream_id} 是否有关联的任务...")
+                associated_tasks = stream.tasks
+                
+                if associated_tasks:
+                    logger.info(f"流 {stream_id} 有 {len(associated_tasks)} 个关联任务，解除关联...")
+                    # 解除与任务的关联
+                    for task in associated_tasks:
+                        # 从task.streams中移除此stream
+                        task.streams.remove(stream)
+                    
+                    # 提交更改，以确保任务关联已更新
+                    db.commit()
+                    logger.info(f"已解除流 {stream_id} 与任务的关联")
+                
+                # 删除流
+                logger.info(f"正在删除流 {stream_id}...")
+                db.delete(stream)
+                db.commit()
+                logger.info(f"流 {stream_id} 删除成功")
+                return True
+                
+            except Exception as e:
+                db.rollback()
+                logger.error(f"删除流失败: {str(e)}", exc_info=True)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"删除失败: {str(e)}"
+                )
+                
         except Exception as e:
-            db.rollback()
-            logger.error(f"Delete stream failed: {str(e)}", exc_info=True)
+            logger.error(f"获取流信息失败: {str(e)}", exc_info=True)
             raise HTTPException(
                 status_code=500,
                 detail=f"删除失败: {str(e)}"

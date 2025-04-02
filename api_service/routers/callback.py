@@ -12,7 +12,7 @@
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from api_service.models.requests import CallbackCreate, CallbackUpdate
+from api_service.models.requests import CallbackCreate, CallbackUpdate, CreateCallbackRequest, UpdateCallbackRequest
 from api_service.models.responses import BaseResponse
 from api_service.crud import callback
 from api_service.services.database import get_db
@@ -172,7 +172,7 @@ async def get_callback(
 @router.post("/update", response_model=BaseResponse, summary="更新回调配置")
 async def update_callback(
     request: Request,
-    callback_data: CallbackUpdate,
+    callback_data: UpdateCallbackRequest,
     db: Session = Depends(get_db)
 ):
     """
@@ -185,6 +185,8 @@ async def update_callback(
     - headers: 新的请求头配置(可选)
     - method: 新的请求方法(可选)
     - body_template: 新的请求体模板(可选)
+    - retry_count: 新的重试次数(可选)
+    - retry_interval: 新的重试间隔(可选)
     
     返回:
     - 更新后的回调配置信息
@@ -197,7 +199,9 @@ async def update_callback(
             url=callback_data.url,
             headers=callback_data.headers,
             method=callback_data.method,
-            body_template=callback_data.body_template
+            body_template=callback_data.body_template,
+            retry_count=callback_data.retry_count,
+            retry_interval=callback_data.retry_interval
         )
         if not result:
             return BaseResponse(
@@ -217,6 +221,8 @@ async def update_callback(
                 "headers": result.headers,
                 "method": result.method,
                 "body_template": result.body_template,
+                "retry_count": result.retry_count if hasattr(result, 'retry_count') else None,
+                "retry_interval": result.retry_interval if hasattr(result, 'retry_interval') else None,
                 "created_at": result.created_at,
                 "updated_at": result.updated_at
             }
