@@ -272,7 +272,7 @@ class NodeHealthChecker:
             await self._start_pending_tasks(db)
             
             after_check = datetime.now()
-            
+
             # 获取更新后的在线节点数量
             new_online_count = db.query(Node).filter_by(service_status="online").count()
             offline_count = online_count - new_online_count if online_count > new_online_count else 0

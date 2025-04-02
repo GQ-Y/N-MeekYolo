@@ -42,7 +42,7 @@ def init_db():
         try:
             # 重置所有视频源状态
             affected = db.query(Stream).update(
-                {Stream.status: StreamStatus.OFFLINE},
+                {Stream.status: 0},
                 synchronize_session=False
             )
             
