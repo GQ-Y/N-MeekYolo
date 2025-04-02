@@ -73,6 +73,15 @@ async def startup_event():
         await asyncio.sleep(1)  # 等待服务启动
         if not health_check_task.done():
             logger.info("节点健康检查服务启动成功")
+            
+            # 启动后立即手动执行一次节点健康检查
+            from api_service.services.node_health_check import health_checker
+            logger.info("执行首次节点健康检查...")
+            try:
+                await health_checker.check_nodes_health()
+                logger.info("首次节点健康检查完成")
+            except Exception as e:
+                logger.error(f"首次节点健康检查失败: {str(e)}")
         else:
             error = health_check_task.exception()
             if error:

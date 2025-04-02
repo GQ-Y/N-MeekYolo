@@ -4,7 +4,7 @@
 import httpx
 from typing import Dict, Any, List
 from sqlalchemy.orm import Session
-from api_service.models.database import Task, Stream, Model, SubTask
+from api_service.models.database import Task, Stream, Model, SubTask, Node
 from api_service.core.config import settings
 from shared.utils.logger import setup_logger
 from api_service.models.requests import StreamStatus
@@ -12,6 +12,7 @@ from datetime import datetime
 from api_service.services.analysis import AnalysisService
 from api_service.services.database import get_db
 import asyncio
+from api_service.crud.node import NodeCRUD
 
 logger = setup_logger(__name__)
 
@@ -35,13 +36,76 @@ class TaskController:
             
             logger.info(f"开始启动任务 {task_id}，包含 {len(task.streams)} 个视频流和 {len(task.models)} 个模型")
             
+            # 删除旧的子任务记录
+            if task.sub_tasks:
+                old_sub_tasks_count = len(task.sub_tasks)
+                logger.info(f"删除任务 {task_id} 的 {old_sub_tasks_count} 个旧子任务记录")
+                for sub_task in task.sub_tasks:
+                    logger.info(f"删除子任务记录: ID={sub_task.id}, 分析任务ID={sub_task.analysis_task_id}")
+                    db.delete(sub_task)
+                db.commit()
+                logger.info(f"旧子任务记录删除完成")
+                
             # 更新任务状态
             task.status = "starting"
             task.started_at = datetime.now()
+            task.error_message = None  # 清除错误信息
             
             # 构建回调URL列表
-            callback_urls = ",".join([cb.url for cb in task.callbacks])
+            callback_urls = ",".join([cb.url for cb in task.callbacks]) if task.callbacks else ""
             logger.debug(f"回调URL列表: {callback_urls}")
+            
+            # 获取任务配置，如果没有则使用默认值
+            config = task.config or {
+                "confidence": 0.1,
+                "iou": 0.45,
+                "nested_detection": True
+            }
+            
+            # 获取节点信息
+            node = task.node
+            
+            # 检查节点状态，如果节点不存在或不在线或未激活，则重新选择可用节点
+            if not node or node.service_status != "online" or not node.is_active:
+                if not node:
+                    logger.warning(f"任务 {task_id} 未指定节点，尝试重新分配节点")
+                else:
+                    logger.warning(f"节点 {node.id} 不在线或未激活，尝试重新分配节点")
+                
+                # 使用负载均衡算法选择新节点
+                available_node = NodeCRUD.get_available_node(db)
+                
+                if not available_node:
+                    logger.error("无可用节点，任务启动失败")
+                    task.status = "failed"
+                    task.error_message = "无可用节点"
+                    db.commit()
+                    return False
+                
+                # 更新任务节点
+                old_node_id = task.node_id
+                task.node_id = available_node.id
+                node = available_node
+                
+                logger.info(f"成功将任务 {task_id} 重新分配到节点 {node.id}")
+                
+                # 如果原节点存在，更新其任务计数
+                if old_node_id:
+                    old_node = db.query(Node).filter(Node.id == old_node_id).first()
+                    if old_node:
+                        stream_count = len(task.streams)
+                        if old_node.stream_task_count >= stream_count:
+                            old_node.stream_task_count -= stream_count
+                        else:
+                            old_node.stream_task_count = 0
+                
+                # 更新新节点的任务计数
+                node.stream_task_count += len(task.streams)
+                db.commit()
+            
+            # 构建节点URL
+            node_url = f"http://{node.ip}:{node.port}"
+            logger.info(f"使用节点 {node.id} URL: {node_url}")
             
             # 为每个视频流和模型组合创建分析任务
             sub_tasks_to_create = []
@@ -50,27 +114,36 @@ class TaskController:
                     try:
                         # 调用分析服务创建任务
                         task_name = f"{task.name}-{stream.name}-{model.name}"
-                        analysis_task_id = await self.analysis_service.analyze_stream(
-                            model_code=model.code,
-                            stream_url=stream.url,
-                            task_name=task_name,
-                            callback_urls=callback_urls,
-                            enable_callback=bool(callback_urls),
-                            save_result=True,
-                            config={
-                                "confidence": 0.5,
-                                "iou": 0.45,
-                                "imgsz": 640,
-                                "nested_detection": True
-                            },
-                            analysis_type="detection"
-                        )
+                        
+                        # 使用httpx直接调用节点API
+                        try:
+                            async with httpx.AsyncClient() as client:
+                                response = await client.post(
+                                    f"{node_url}/api/v1/analyze/stream",
+                                    json={
+                                        "model_code": model.code,
+                                        "stream_url": stream.url,
+                                        "task_name": task_name,
+                                        "callback_urls": callback_urls,
+                                        "enable_callback": task.enable_callback and bool(callback_urls),
+                                        "save_result": task.save_result,
+                                        "config": config or {},
+                                        "analysis_type": "detection"
+                                    }
+                                )
+                                response.raise_for_status()
+                                data = response.json()
+                                analysis_task_id = data.get("data", {}).get("task_id")
+                        except Exception as e:
+                            logger.error(f"调用节点API失败: {str(e)}")
+                            raise
                         
                         logger.info(f"创建分析任务成功:")
                         logger.info(f"  - 任务名称: {task_name}")
                         logger.info(f"  - 分析任务ID: {analysis_task_id}")
                         logger.info(f"  - 视频流: {stream.url}")
                         logger.info(f"  - 模型: {model.code}")
+                        logger.info(f"  - 配置: {config}")
                         
                         # 创建子任务记录
                         sub_task = SubTask(
@@ -99,7 +172,7 @@ class TaskController:
                 
                 # 更新流状态
                 for stream in task.streams:
-                    stream.status = "active"
+                    stream.status = 1  # 在线状态，使用整数1而不是字符串
                 
                 # 更新任务状态
                 task.status = "running"
@@ -274,3 +347,99 @@ class TaskController:
                 logger.error(f"回退任务状态失败: {str(e2)}", exc_info=True)
         finally:
             db.close()
+
+    async def check_and_migrate_task(self, db: Session, task_id: int, target_node_id: int = None) -> bool:
+        """
+        检查任务并迁移到其他节点
+        
+        参数:
+        - db: 数据库会话
+        - task_id: 任务ID
+        - target_node_id: 目标节点ID，如果不指定则自动选择
+        
+        返回:
+        - 是否成功迁移
+        """
+        try:
+            # 获取任务信息
+            task = db.query(Task).filter(Task.id == task_id).first()
+            if not task:
+                logger.error(f"未找到任务 {task_id}")
+                return False
+                
+            # 如果任务不在运行状态，不需要迁移
+            if task.status not in ["running", "starting"]:
+                logger.info(f"任务 {task_id} 不在运行状态，无需迁移")
+                return False
+                
+            # 获取当前节点信息
+            old_node = task.node
+            if not old_node:
+                logger.warning(f"任务 {task_id} 没有关联节点，无法迁移")
+                return False
+                
+            # 如果当前节点在线，不需要迁移
+            if old_node.service_status == "online" and old_node.is_active:
+                logger.info(f"任务 {task_id} 当前节点 {old_node.id} 在线，无需迁移")
+                return False
+                
+            # 记录旧节点ID
+            old_node_id = old_node.id
+                
+            # 查找目标节点
+            target_node = None
+            if target_node_id:
+                # 使用指定的节点
+                target_node = db.query(Node).filter(
+                    Node.id == target_node_id,
+                    Node.service_status == "online",
+                    Node.is_active == True
+                ).first()
+                
+                if not target_node:
+                    logger.error(f"指定的目标节点 {target_node_id} 不存在或不在线")
+            
+            if not target_node:
+                # 使用负载均衡算法选择节点
+                target_node = NodeCRUD.get_available_node(db)
+                
+            if not target_node:
+                logger.error(f"无可用节点，任务 {task_id} 迁移失败")
+                return False
+                
+            logger.info(f"开始将任务 {task_id} 从节点 {old_node_id} 迁移到节点 {target_node.id}")
+            
+            # 停止当前任务的子任务
+            await self.stop_task(db, task_id)
+            
+            # 更新任务节点
+            task.node_id = target_node.id
+            
+            # 更新节点任务计数
+            stream_count = len(task.streams)
+            
+            # 减少旧节点的任务计数
+            if old_node.stream_task_count >= stream_count:
+                old_node.stream_task_count -= stream_count
+            else:
+                old_node.stream_task_count = 0
+                
+            # 增加新节点的任务计数
+            target_node.stream_task_count += stream_count
+            
+            # 提交更改
+            db.commit()
+            
+            # 重新启动任务
+            result = await self.start_task(db, task_id)
+            
+            if result:
+                logger.info(f"任务 {task_id} 已成功迁移到节点 {target_node.id}")
+                return True
+            else:
+                logger.error(f"任务 {task_id} 迁移失败：无法在新节点上启动")
+                return False
+                
+        except Exception as e:
+            logger.error(f"迁移任务 {task_id} 失败: {str(e)}")
+            return False

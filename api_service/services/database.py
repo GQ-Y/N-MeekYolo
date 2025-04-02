@@ -60,14 +60,19 @@ def init_db():
             
             # 重置所有节点状态为离线
             try:
-                nodes_affected = db.query(Node).update(
-                    {Node.service_status: "offline"},
-                    synchronize_session=False
-                )
-                if nodes_affected > 0:
-                    logger.info(f"重置了 {nodes_affected} 个节点状态为离线")
+                # 不再每次启动时重置节点状态
+                # 改为仅记录当前节点状态信息
+                online_nodes = db.query(Node).filter(
+                    Node.service_status == "online"
+                ).count()
+                
+                offline_nodes = db.query(Node).filter(
+                    Node.service_status == "offline"
+                ).count()
+                
+                logger.info(f"数据库中节点状态: 在线 {online_nodes} 个, 离线 {offline_nodes} 个")
             except Exception as e:
-                logger.warning(f"重置节点状态失败: {str(e)}")
+                logger.warning(f"查询节点状态失败: {str(e)}")
             
             # 提交事务
             db.commit()

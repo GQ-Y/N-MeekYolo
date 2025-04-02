@@ -233,20 +233,20 @@ def update_node(
 @router.post("/delete", response_model=BaseResponse, summary="删除节点")
 def delete_node(
     request: Request,
-    node_id: int = Body(..., description="节点ID"),
+    node_data: NodeIdRequest,
     db: Session = Depends(get_db)
 ):
     """
     删除指定节点
     
     参数:
-    - node_id: 节点ID
+    - node_id: 节点ID (请求体参数)
     
     返回:
     - 删除结果
     """
     try:
-        result = node_crud.delete_node(db, node_id)
+        result = node_crud.delete_node(db, node_data.node_id)
         if not result:
             return BaseResponse(
                 path=str(request.url),

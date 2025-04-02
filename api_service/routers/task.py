@@ -17,7 +17,7 @@ from api_service.crud import task
 from api_service.services.database import get_db
 from shared.utils.logger import setup_logger
 from api_service.services.task_controller import TaskController
-from api_service.models.database import Task
+from api_service.models.database import Task, SubTask, Node
 
 logger = setup_logger(__name__)
 router = APIRouter(prefix="/api/v1/tasks", tags=["任务"])
@@ -138,23 +138,69 @@ async def get_task(
                 message="Task not found"
             )
             
+        # 构造基本响应数据
+        response_data = {
+            "id": result.id,
+            "name": result.name,
+            "status": result.status,
+            "error_message": result.error_message,
+            "callback_interval": result.callback_interval,
+            "created_at": result.created_at,
+            "updated_at": result.updated_at,
+            "started_at": result.started_at,
+            "completed_at": result.completed_at,
+            "stream_ids": [stream.id for stream in result.streams],
+            "model_ids": [model.id for model in result.models],
+            "callback_ids": [callback.id for callback in result.callbacks]
+        }
+        
+        # 若任务为运行状态，添加子任务详情
+        if result.status == "running":
+            # 获取子任务列表
+            sub_tasks = db.query(SubTask).filter(SubTask.task_id == task_id).all()
+            
+            # 构造子任务数据
+            sub_tasks_data = []
+            for sub_task in sub_tasks:
+                # 获取节点信息
+                node = None
+                if result.node_id:
+                    node = db.query(Node).filter(Node.id == result.node_id).first()
+                
+                sub_task_data = {
+                    "id": sub_task.id,
+                    "analysis_task_id": sub_task.analysis_task_id,
+                    "status": sub_task.status,
+                    "stream_id": sub_task.stream_id,
+                    "model_id": sub_task.model_id,
+                    "started_at": sub_task.started_at,
+                    "completed_at": sub_task.completed_at,
+                    "node_id": result.node_id,
+                    "node_info": {
+                        "id": node.id,
+                        "ip": node.ip,
+                        "port": node.port,
+                        "status": node.service_status
+                    } if node else None
+                }
+                sub_tasks_data.append(sub_task_data)
+            
+            # 添加子任务数据到响应
+            response_data["sub_tasks"] = sub_tasks_data
+            
+            # 添加节点信息
+            if result.node_id and result.node:
+                response_data["node"] = {
+                    "id": result.node.id,
+                    "ip": result.node.ip,
+                    "port": result.node.port,
+                    "status": result.node.service_status
+                }
+        
         return BaseResponse(
             path=str(request.url),
             message="获取成功",
-            data={
-                "id": result.id,
-                "name": result.name,
-                "status": result.status,
-                "error_message": result.error_message,
-                "callback_interval": result.callback_interval,
-                "created_at": result.created_at,
-                "updated_at": result.updated_at,
-                "started_at": result.started_at,
-                "completed_at": result.completed_at,
-                "stream_ids": [stream.id for stream in result.streams],
-                "model_ids": [model.id for model in result.models],
-                "callback_ids": [callback.id for callback in result.callbacks]
-            }
+            data=response_data
         )
     except Exception as e:
         logger.error(f"Get task failed: {str(e)}")
