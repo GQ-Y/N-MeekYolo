@@ -1,44 +1,39 @@
 """
 日志工具模块
 """
-import logging
+from loguru import logger
 import sys
-from logging.handlers import RotatingFileHandler
-from pathlib import Path
+from core.config import settings
 
-def setup_logger(name: str) -> logging.Logger:
-    """设置日志记录器
+def setup_logger(name: str):
+    """设置日志配置
     
     Args:
         name: 日志记录器名称
-        
-    Returns:
-        logging.Logger: 配置好的日志记录器
     """
-    # 创建日志记录器
-    logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
+    # 移除所有默认处理器
+    logger.remove()
     
-    # 创建格式化器
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    # 只在调试模式启用时添加日志处理器
+    if settings.DEBUG.enabled:
+        # 添加控制台处理器
+        logger.add(
+            sys.stderr,
+            format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+            level=settings.DEBUG.log_level,
+            backtrace=True,
+            diagnose=True
+        )
+        
+        # 添加文件处理器
+        logger.add(
+            settings.DEBUG.log_file,
+            rotation=settings.DEBUG.log_rotation,
+            retention=settings.DEBUG.log_retention,
+            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+            level=settings.DEBUG.log_level,
+            backtrace=True,
+            diagnose=True
+        )
     
-    # 创建控制台处理器
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-    
-    # 创建文件处理器
-    log_dir = Path("logs")
-    log_dir.mkdir(exist_ok=True)
-    
-    file_handler = RotatingFileHandler(
-        log_dir / f"{name.split('.')[-1]}.log",
-        maxBytes=10*1024*1024,  # 10MB
-        backupCount=5
-    )
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-    
-    return logger 
+    return logger.bind(name=name) 

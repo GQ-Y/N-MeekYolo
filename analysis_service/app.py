@@ -14,8 +14,16 @@ from core.models import StandardResponse
 from shared.utils.logger import setup_logger
 import time
 import uuid
+import logging
+import uvicorn
 
+# 设置日志
 logger = setup_logger(__name__)
+
+# 关闭 uvicorn 和 fastapi 的访问日志
+if not settings.DEBUG:
+    logging.getLogger("uvicorn.access").setLevel(logging.ERROR)
+    logging.getLogger("fastapi").setLevel(logging.ERROR)
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """请求日志中间件"""
@@ -23,27 +31,31 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         start_time = time.time()
         request_id = str(uuid.uuid4())
         
-        # 添加请求ID到请求状态
+        # 添加请求ID和开始时间到请求状态
         request.state.request_id = request_id
-        
-        # 记录请求信息
-        logger.info(f"请求开始: {request_id} - {request.method} {request.url.path}")
+        request.state.start_time = int(start_time * 1000)
         
         try:
+            # 只在调试模式下记录请求开始信息
+            if settings.DEBUG:
+                logger.info(f"请求开始: {request_id} - {request.method} {request.url.path}")
+            
             response = await call_next(request)
             
-            # 记录响应信息
-            process_time = (time.time() - start_time) * 1000
-            logger.info(
-                f"请求完成: {request_id} - {request.method} {request.url.path} "
-                f"- 状态: {response.status_code} - 耗时: {process_time:.2f}ms"
-            )
+            # 只在调试模式下记录响应信息
+            if settings.DEBUG:
+                process_time = (time.time() - start_time) * 1000
+                logger.info(
+                    f"请求完成: {request_id} - {request.method} {request.url.path} "
+                    f"- 状态: {response.status_code} - 耗时: {process_time:.2f}ms"
+                )
             
             # 添加请求ID到响应头
             response.headers["X-Request-ID"] = request_id
             return response
             
         except Exception as e:
+            # 错误日志仍然需要记录，但使用 ERROR 级别
             process_time = (time.time() - start_time) * 1000
             logger.error(
                 f"请求失败: {request_id} - {request.method} {request.url.path} "
@@ -67,7 +79,8 @@ app = FastAPI(
     version=settings.VERSION,
     docs_url="/api/v1/docs",
     redoc_url="/api/v1/redoc",
-    openapi_url="/api/v1/openapi.json"
+    openapi_url="/api/v1/openapi.json",
+    debug=settings.DEBUG
 )
 
 # 添加中间件
@@ -82,8 +95,9 @@ app.add_middleware(
 # 添加Gzip压缩
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-# 添加请求日志中间件
-app.add_middleware(RequestLoggingMiddleware)
+# 只在调试模式下添加请求日志中间件
+if settings.DEBUG:
+    app.add_middleware(RequestLoggingMiddleware)
 
 # 注册路由
 app.include_router(
@@ -108,19 +122,25 @@ async def analysis_exception_handler(request: Request, exc: AnalysisException):
     )
 
 @app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
-    """处理通用异常"""
-    logger.error(f"未处理的异常: {str(exc)}", exc_info=True)
+async def global_exception_handler(request: Request, exc: Exception):
+    """全局异常处理器"""
+    error_msg = f"请求处理失败: {str(exc)}"
+    if settings.DEBUG:
+        logger.exception(error_msg)
+    else:
+        logger.error(error_msg)
+        
     return JSONResponse(
         status_code=500,
-        content=StandardResponse(
-            requestId=getattr(request.state, "request_id", str(uuid.uuid4())),
-            path=request.url.path,
-            success=False,
-            code=500,
-            message="服务器内部错误",
-            data={"error": str(exc)} if settings.DEBUG else None
-        ).dict()
+        content={
+            "requestId": request.state.request_id,
+            "path": request.url.path,
+            "success": False,
+            "message": error_msg,
+            "code": 500,
+            "data": None,
+            "timestamp": request.state.start_time
+        }
     )
 
 # 健康检查
@@ -143,13 +163,23 @@ async def health_check():
 @app.on_event("startup")
 async def startup_event():
     """启动事件"""
-    logger.info("分析服务启动...")
-    logger.info(f"环境: {settings.ENVIRONMENT}")
-    logger.info(f"调试模式: {settings.DEBUG}")
-    logger.info(f"版本: {settings.VERSION}")
-    logger.info(f"注册的路由: {[route.path for route in app.routes]}")
+    if settings.DEBUG:
+        logger.info("分析服务启动...")
+        logger.info(f"环境: {settings.ENVIRONMENT}")
+        logger.info(f"调试模式: {settings.DEBUG}")
+        logger.info(f"版本: {settings.VERSION}")
+        logger.info(f"注册的路由: {[route.path for route in app.routes]}")
     
 @app.on_event("shutdown")
 async def shutdown_event():
     """关闭事件"""
-    logger.info("分析服务关闭...")
+    if settings.DEBUG:
+        logger.info("分析服务关闭...")
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "app:app",
+        host=settings.HOST,
+        port=settings.PORT,
+        reload=settings.DEBUG
+    )

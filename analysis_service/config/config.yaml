@@ -1,6 +1,6 @@
 # 服务基础配置
 PROJECT_NAME: "MeekYolo Analysis Service"
-VERSION: "1.0.0"
+VERSION: "2.0.0"
 
 # 服务配置
 SERVICES:
@@ -33,14 +33,14 @@ ANALYSIS:
   analyze_interval: 1  # 默认分析间隔
   alarm_interval: 60   # 默认报警间隔
   random_interval: [0, 0]  # 默认随机间隔范围
-  push_interval: 5     # 默认推送间隔
+  push_interval: 1     # 默认推送间隔
 
 # 存储配置
 STORAGE:
   base_dir: "data"
   model_dir: "models"
   temp_dir: "temp"
-  max_size: 1073741824  # 1GB
+  max_size: 10737418240  # 1GB
 
 # 输出配置
 OUTPUT:
@@ -51,8 +51,15 @@ OUTPUT:
 
 # 任务队列配置
 TASK_QUEUE:
-  max_concurrent: 3  # 最大并发任务数
+  max_concurrent: 30  # 最大并发任务数
   max_retries: 3    # 最大重试次数
   retry_delay: 5    # 重试延迟(秒)
   result_ttl: 7200  # 结果缓存时间(秒)
   cleanup_interval: 3600  # 清理间隔(秒) 
+
+DEBUG:
+  enabled: false  # 设置为 true 开启调试模式
+  log_level: "DEBUG"  # 日志级别：DEBUG, INFO, WARNING, ERROR, CRITICAL
+  log_file: "logs/debug.log"  # 日志文件路径
+  log_rotation: "1 day"  # 日志轮转周期
+  log_retention: "7 days"  # 日志保留时间

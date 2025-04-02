@@ -10,14 +10,22 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+class DebugConfig(BaseModel):
+    """调试配置"""
+    enabled: bool = False
+    log_level: str = "INFO"
+    log_file: str = "logs/debug.log"
+    log_rotation: str = "1 day"
+    log_retention: str = "7 days"
+
 class AnalysisServiceConfig(BaseSettings):
     """分析服务配置"""
     
     # 基础信息
     PROJECT_NAME: str = "MeekYolo Analysis Service"
     VERSION: str = "1.0.0"
-    ENVIRONMENT: str = "development"  # 环境: development, production, testing
-    DEBUG: bool = True  # 调试模式
+    ENVIRONMENT: str = "production"  # 环境: development, production, testing
+    DEBUG: DebugConfig = DebugConfig()  # 调试配置
     
     # CORS配置
     CORS_ORIGINS: List[str] = ["*"]
@@ -49,7 +57,7 @@ class AnalysisServiceConfig(BaseSettings):
     
     # 任务队列配置
     class TaskQueueConfig(BaseModel):
-        max_concurrent: int = 5  # 最大并发任务数
+        max_concurrent: int = 30  # 最大并发任务数
         max_retries: int = 3  # 最大重试次数
         retry_delay: int = 5  # 重试延迟（秒）
         cleanup_interval: int = 300  # 清理间隔（秒）
@@ -76,7 +84,7 @@ class AnalysisServiceConfig(BaseSettings):
         analyze_interval: int = 1
         alarm_interval: int = 60
         random_interval: List[int] = [0, 0]
-        push_interval: int = 5
+        push_interval: int = 1
     
     # 存储配置
     class StorageConfig(BaseModel):
