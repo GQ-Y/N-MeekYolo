@@ -1,21 +1,24 @@
 """
 响应数据模型
 """
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, TypeVar, Generic
 from pydantic import BaseModel, Field
 from datetime import datetime
 from api_service.models.requests import StreamStatus
 import uuid
+import time
 
-class BaseResponse(BaseModel):
+T = TypeVar('T')
+
+class BaseResponse(BaseModel, Generic[T]):
     """标准响应模型"""
     requestId: str = Field(default_factory=lambda: str(uuid.uuid4()), description="请求ID")
     path: str = Field("", description="请求路径")
     success: bool = Field(True, description="是否成功")
     message: str = Field("Success", description="响应消息")
     code: int = Field(200, description="状态码")
-    data: Optional[Any] = Field(None, description="响应数据")
-    timestamp: int = Field(default_factory=lambda: int(datetime.now().timestamp() * 1000), description="时间戳")
+    data: Optional[T] = Field(None, description="响应数据")
+    timestamp: int = Field(default_factory=lambda: int(time.time() * 1000), description="时间戳")
 
     class Config:
         json_schema_extra = {
@@ -38,6 +41,54 @@ class BaseResponse(BaseModel):
                 "timestamp": 1616633599000
             }
         }
+
+class NodeBase(BaseModel):
+    """节点基础模型"""
+    ip: str = Field(..., description="节点IP地址")
+    port: str = Field(..., description="节点端口")
+    service_name: str = Field(..., description="服务名称")
+
+class NodeCreate(NodeBase):
+    """节点创建模型"""
+    pass
+
+class NodeUpdate(NodeBase):
+    """节点更新模型"""
+    ip: Optional[str] = Field(None, description="节点IP地址")
+    port: Optional[str] = Field(None, description="节点端口")
+    service_name: Optional[str] = Field(None, description="服务名称")
+    service_status: Optional[str] = Field(None, description="服务状态")
+
+class NodeStatusUpdate(BaseModel):
+    """节点状态更新模型"""
+    node_id: int = Field(..., description="节点ID")
+    service_status: str = Field(..., description="服务状态")
+
+class NodeTaskCountsUpdate(BaseModel):
+    """节点任务数量更新模型"""
+    node_id: int = Field(..., description="节点ID")
+    image_task_count: int = Field(0, description="图像任务数量")
+    video_task_count: int = Field(0, description="视频任务数量")
+    stream_task_count: int = Field(0, description="流任务数量")
+
+class NodeResponse(NodeBase):
+    """节点响应模型"""
+    id: int = Field(..., description="节点ID")
+    service_status: str = Field(..., description="服务状态")
+    image_task_count: int = Field(0, description="图像任务数量")
+    video_task_count: int = Field(0, description="视频任务数量")
+    stream_task_count: int = Field(0, description="流任务数量")
+    is_active: bool = Field(True, description="是否激活")
+    created_at: datetime = Field(..., description="创建时间")
+    updated_at: datetime = Field(..., description="更新时间")
+    last_heartbeat: Optional[datetime] = Field(None, description="最后心跳时间")
+
+    class Config:
+        from_attributes = True
+
+class NodeListResponse(BaseResponse[List[NodeResponse]]):
+    """节点列表响应"""
+    data: List[NodeResponse] = Field(default_factory=list, description="节点列表")
 
 class StreamGroupResponse(BaseModel):
     """流分组响应"""

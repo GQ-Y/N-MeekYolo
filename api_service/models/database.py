@@ -191,3 +191,20 @@ class SubTask(Base):
     task = relationship("Task", back_populates="sub_tasks")
     stream = relationship("Stream")
     model = relationship("Model")
+
+class Node(Base):
+    """节点模型"""
+    __tablename__ = "nodes"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    ip = Column(String(50), nullable=False)
+    port = Column(String(10), nullable=False)
+    service_name = Column(String(100), nullable=False)
+    service_status = Column(String(20), default="offline")  # online, offline
+    image_task_count = Column(Integer, default=0)
+    video_task_count = Column(Integer, default=0)
+    stream_task_count = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_heartbeat = Column(DateTime, nullable=True)

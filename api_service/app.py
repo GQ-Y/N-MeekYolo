@@ -1,9 +1,11 @@
 """
 API服务入口
 """
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+import logging
 import asyncio
+from datetime import datetime
 from api_service.core.config import settings
 from api_service.routers import (
     stream_router,
@@ -11,9 +13,11 @@ from api_service.routers import (
     model_router,
     callback_router,
     task_router,
-    analysis_router
+    analysis_router,
+    node_router
 )
 from api_service.services.monitor import StreamMonitor
+from api_service.services.node_health_check import start_health_checker, stop_health_checker
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -43,6 +47,7 @@ app.include_router(model_router)
 app.include_router(callback_router)
 app.include_router(task_router)
 app.include_router(analysis_router)
+app.include_router(node_router)
 
 # 创建视频源监控器
 stream_monitor = StreamMonitor()
@@ -62,6 +67,18 @@ async def startup_event():
         await stream_monitor.start()
         logger.info("视频源监控服务启动成功")
         
+        # 启动节点健康检查服务
+        logger.info("正在启动节点健康检查服务...")
+        health_check_task = asyncio.create_task(start_health_checker())
+        await asyncio.sleep(1)  # 等待服务启动
+        if not health_check_task.done():
+            logger.info("节点健康检查服务启动成功")
+        else:
+            error = health_check_task.exception()
+            if error:
+                logger.error(f"节点健康检查服务启动失败: {str(error)}")
+                raise error
+            
     except Exception as e:
         logger.error(f"启动失败: {str(e)}")
         raise
@@ -72,9 +89,13 @@ async def shutdown_event():
     try:
         # 停止视频源监控
         await stream_monitor.stop()
-        logger.info("Stream monitor stopped successfully")
+        logger.info("视频源监控服务已停止")
+        
+        # 停止节点健康检查服务
+        stop_health_checker()
+        logger.info("节点健康检查服务已停止")
     except Exception as e:
-        logger.error(f"Failed to stop stream monitor: {str(e)}")
+        logger.error(f"服务停止失败: {str(e)}")
 
 # 健康检查
 @app.get("/health")

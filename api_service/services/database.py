@@ -37,27 +37,23 @@ def init_db():
     """初始化数据库"""
     try:
         # 导入所有模型
-        from api_service.models.database import Base, StreamGroup, Stream
+        from api_service.models.database import Base as DBBase
+        from api_service.models.database import StreamGroup, Stream
         from api_service.models.requests import StreamStatus
+        from api_service.models.node import Node  # 导入节点模型
         
-        # 创建表
-        Base.metadata.create_all(bind=engine)
+        # 创建所有表
+        DBBase.metadata.create_all(bind=engine)
+        Node.__table__.create(bind=engine, checkfirst=True)
         
         # 使用显式的事务管理
         db = SessionLocal()
         try:
-            # 方案1: 使用ORM API
+            # 重置所有视频源状态
             affected = db.query(Stream).update(
                 {Stream.status: StreamStatus.OFFLINE},
                 synchronize_session=False
             )
-            
-            # 或者方案2: 使用text()包装SQL
-            # result = db.execute(
-            #     text("UPDATE streams SET status = :status"),
-            #     {"status": StreamStatus.OFFLINE}
-            # )
-            # affected = result.rowcount
             
             # 创建默认分组
             default_group = db.query(StreamGroup).filter(
@@ -71,10 +67,21 @@ def init_db():
                 )
                 db.add(default_group)
             
+            # 重置所有节点状态为离线
+            try:
+                nodes_affected = db.query(Node).update(
+                    {Node.service_status: "offline"},
+                    synchronize_session=False
+                )
+                if nodes_affected > 0:
+                    logger.info(f"重置了 {nodes_affected} 个节点状态为离线")
+            except Exception as e:
+                logger.warning(f"重置节点状态失败: {str(e)}")
+            
             # 提交事务
             db.commit()
             
-            # 验证状态
+            # 验证视频源状态
             online_count = db.query(Stream).filter(
                 Stream.status == StreamStatus.ONLINE
             ).count()
