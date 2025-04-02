@@ -114,6 +114,8 @@ class ImageAnalysisRequest(BaseModel):
         None,
         description="检测配置参数"
     )
+    
+    model_config = {"protected_namespaces": ()}
 
 class VideoAnalysisRequest(BaseModel):
     """视频分析请求"""
@@ -157,6 +159,8 @@ class VideoAnalysisRequest(BaseModel):
         None,
         description="目标跟踪配置参数，仅在enable_tracking为true时有效"
     )
+    
+    model_config = {"protected_namespaces": ()}
 
     @property
     def has_valid_video_source(self) -> bool:
@@ -197,6 +201,8 @@ class StreamTask(BaseModel):
         None,
         description="检测配置参数"
     )
+    
+    model_config = {"protected_namespaces": ()}
 
 class StreamAnalysisRequest(BaseModel):
     """流分析请求"""

@@ -92,6 +92,8 @@ class AnalysisServiceConfig(BaseSettings):
         model_dir: str = "models"
         temp_dir: str = "temp"
         max_size: int = 1073741824  # 1GB
+        
+        model_config = {"protected_namespaces": ()}
     
     # 输出配置
     class OutputConfig(BaseModel):
@@ -122,10 +124,11 @@ class AnalysisServiceConfig(BaseSettings):
     REDIS: RedisConfig = RedisConfig()
     TASK_QUEUE: TaskQueueConfig = TaskQueueConfig()
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
-        extra = "allow"  # 允许额外的字段
+    model_config = {
+        "env_file": ".env",
+        "case_sensitive": True,
+        "extra": "allow"  # 允许额外的字段
+    }
     
     @classmethod
     def load_config(cls) -> "AnalysisServiceConfig":

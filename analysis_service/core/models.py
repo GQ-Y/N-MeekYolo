@@ -17,8 +17,8 @@ class StandardResponse(BaseModel):
     data: Optional[Any] = Field(None, description="响应数据")
     timestamp: int = Field(default_factory=lambda: int(datetime.now().timestamp() * 1000), description="时间戳")
 
-    class Config:
-        json_schema_extra = {
+    model_config = {
+        "json_schema_extra": {
             "example": {
                 "requestId": "550e8400-e29b-41d4-a716-446655440000",
                 "path": "/api/v1/analyze",
@@ -31,6 +31,7 @@ class StandardResponse(BaseModel):
                 "timestamp": 1616633599000
             }
         }
+    }
 
 class AnalysisType(str, Enum):
     """分析类型"""

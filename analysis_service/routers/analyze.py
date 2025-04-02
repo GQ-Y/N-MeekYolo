@@ -89,6 +89,8 @@ class BaseAnalysisRequest(BaseModel):
     enable_callback: bool = Field(False, description="是否启用回调")
     save_result: bool = Field(False, description="是否保存结果")
     config: Optional[dict] = Field(None, description="分析配置")
+    
+    model_config = {"protected_namespaces": ()}
 
 class ImageAnalysisRequest(BaseAnalysisRequest):
     """图片分析请求"""
