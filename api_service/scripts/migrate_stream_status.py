@@ -1,23 +1,23 @@
 """
-初始化视频源状态
+初始化数据库和视频源状态
 """
 from sqlalchemy import create_engine, text
 from api_service.core.config import settings
-from api_service.models.database import Base, Stream, StreamGroup, Model, Callback, Task
+from api_service.models.database import Base, Stream, StreamGroup, Model, Callback, Task, Node, SubTask
 from api_service.services.database import init_db, get_db
 
-def init_stream_status():
-    """初始化视频源状态为整数"""
+def init_database():
+    """初始化数据库表结构和基础数据"""
     try:
         # 创建数据库引擎
         engine = create_engine(settings.DATABASE.url)
         
-        # 创建表结构
+        # 创建表结构 - 确保所有表都被创建
         print("正在创建数据库表...")
         Base.metadata.create_all(engine)
         
-        # 初始化数据库
-        print("正在初始化数据库...")
+        # 初始化数据库基础数据
+        print("正在初始化数据库基础数据...")
         init_db()
         
         print("正在设置视频源状态...")
@@ -37,9 +37,23 @@ def init_stream_status():
             
         print("视频源状态设置完成")
         
+        # 确认表结构完整性
+        print("\n数据库初始化完成，检查表结构:")
+        tables = ["streams", "stream_groups", "models", "callbacks", "tasks", "nodes", "sub_tasks", 
+                  "group_stream_association", "task_stream_association", "task_model_association", 
+                  "task_callback_association", "stream_group_association"]
+        
+        with engine.connect() as conn:
+            for table in tables:
+                try:
+                    result = conn.execute(text(f"SELECT 1 FROM {table} LIMIT 1"))
+                    print(f" - 表 {table} 已创建 ✓")
+                except Exception as e:
+                    print(f" - 表 {table} 创建失败: {str(e)} ✗")
+        
     except Exception as e:
         print(f"初始化失败: {str(e)}")
         raise
 
 if __name__ == "__main__":
-    init_stream_status() 
+    init_database() 

@@ -58,10 +58,8 @@ def init_db():
                 )
                 db.add(default_group)
             
-            # 重置所有节点状态为离线
+            # 查询并记录节点状态，但不重置
             try:
-                # 不再每次启动时重置节点状态
-                # 改为仅记录当前节点状态信息
                 online_nodes = db.query(Node).filter(
                     Node.service_status == "online"
                 ).count()
