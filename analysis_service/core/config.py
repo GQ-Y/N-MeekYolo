@@ -25,6 +25,38 @@ class AnalysisServiceConfig(BaseSettings):
     CORS_ALLOW_METHODS: List[str] = ["*"]
     CORS_ALLOW_HEADERS: List[str] = ["*"]
     
+    # Redis配置
+    class RedisConfig(BaseModel):
+        host: str = "localhost"
+        port: int = 6379
+        password: str = "123456"
+        db: int = 0
+        max_connections: int = 50
+        socket_timeout: int = 5
+        retry_on_timeout: bool = True
+        
+        # 任务队列配置
+        task_queue_key: str = "analysis:task:queue"
+        task_hash_key: str = "analysis:task:hash"
+        task_result_key: str = "analysis:task:result"
+        task_status_key: str = "analysis:task:status"
+        task_callback_key: str = "analysis:task:callback"
+        
+        # 键过期时间（秒）
+        task_expire: int = 86400  # 24小时
+        result_expire: int = 3600  # 1小时
+        callback_expire: int = 1800  # 30分钟
+    
+    # 任务队列配置
+    class TaskQueueConfig(BaseModel):
+        max_concurrent: int = 5  # 最大并发任务数
+        max_retries: int = 3  # 最大重试次数
+        retry_delay: int = 5  # 重试延迟（秒）
+        cleanup_interval: int = 300  # 清理间隔（秒）
+        task_timeout: int = 3600  # 任务超时时间（秒）
+        batch_size: int = 10  # 批处理大小
+        result_ttl: int = 3600  # 结果保存时间（秒）
+    
     # 服务配置
     class ServiceConfig(BaseModel):
         host: str = "0.0.0.0"
@@ -79,6 +111,8 @@ class AnalysisServiceConfig(BaseSettings):
     OUTPUT: OutputConfig = OutputConfig()
     DISCOVERY: DiscoveryConfig = DiscoveryConfig()
     SERVICES: ServicesConfig = ServicesConfig()
+    REDIS: RedisConfig = RedisConfig()
+    TASK_QUEUE: TaskQueueConfig = TaskQueueConfig()
     
     class Config:
         env_file = ".env"
@@ -98,28 +132,28 @@ class AnalysisServiceConfig(BaseSettings):
                 current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                 config_path = os.path.join(current_dir, "config", "config.yaml")
             
-            logger.debug(f"Loading config from: {config_path}")
+            logger.debug(f"正在从以下路径加载配置: {config_path}")
             
             if os.path.exists(config_path):
-                logger.debug(f"Config file exists: {config_path}")
+                logger.debug(f"配置文件存在: {config_path}")
                 with open(config_path, "r", encoding="utf-8") as f:
                     config_content = f.read()
-                    logger.debug(f"Config content:\n{config_content}")
+                    logger.debug(f"配置文件内容:\n{config_content}")
                     config.update(yaml.safe_load(config_content))
             else:
-                logger.warning(f"Config file not found: {config_path}, using default values")
+                logger.warning(f"配置文件未找到: {config_path}, 使用默认值")
             
-            logger.debug(f"Final config dict: {config}")
+            logger.debug(f"最终配置字典: {config}")
             return cls(**config)
             
         except Exception as e:
-            logger.error(f"Failed to load config: {str(e)}")
+            logger.error(f"加载配置失败: {str(e)}")
             raise
 
 # 加载配置
 try:
     settings = AnalysisServiceConfig.load_config()
-    logger.debug(f"Settings loaded successfully: {settings}")
+    logger.debug(f"配置加载成功: {settings}")
 except Exception as e:
-    logger.error(f"Failed to load config: {str(e)}")
+    logger.error(f"加载配置失败: {str(e)}")
     raise 

@@ -7,19 +7,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from analysis_service.core.config import settings
-from analysis_service.routers.analyze import router as analyze_router
-from analysis_service.core.exceptions import AnalysisException
-from analysis_service.core.models import StandardResponse
+from core.config import settings
+from routers.analyze import router as analyze_router
+from core.exceptions import AnalysisException
+from core.models import StandardResponse
 from shared.utils.logger import setup_logger
-from analysis_service.services.init_db import init_database
 import time
 import uuid
 
 logger = setup_logger(__name__)
-
-# 初始化数据库
-init_database()
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """请求日志中间件"""
@@ -31,7 +27,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         request.state.request_id = request_id
         
         # 记录请求信息
-        logger.info(f"Request started: {request_id} - {request.method} {request.url.path}")
+        logger.info(f"请求开始: {request_id} - {request.method} {request.url.path}")
         
         try:
             response = await call_next(request)
@@ -39,8 +35,8 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             # 记录响应信息
             process_time = (time.time() - start_time) * 1000
             logger.info(
-                f"Request completed: {request_id} - {request.method} {request.url.path} "
-                f"- Status: {response.status_code} - Time: {process_time:.2f}ms"
+                f"请求完成: {request_id} - {request.method} {request.url.path} "
+                f"- 状态: {response.status_code} - 耗时: {process_time:.2f}ms"
             )
             
             # 添加请求ID到响应头
@@ -50,8 +46,8 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         except Exception as e:
             process_time = (time.time() - start_time) * 1000
             logger.error(
-                f"Request failed: {request_id} - {request.method} {request.url.path} "
-                f"- Error: {str(e)} - Time: {process_time:.2f}ms"
+                f"请求失败: {request_id} - {request.method} {request.url.path} "
+                f"- 错误: {str(e)} - 耗时: {process_time:.2f}ms"
             )
             raise
 
@@ -92,7 +88,7 @@ app.add_middleware(RequestLoggingMiddleware)
 # 注册路由
 app.include_router(
     analyze_router,
-    prefix="/api/v1"
+    prefix="/api/v1/analyze"
 )
 
 # 全局异常处理
@@ -114,7 +110,7 @@ async def analysis_exception_handler(request: Request, exc: AnalysisException):
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
     """处理通用异常"""
-    logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
+    logger.error(f"未处理的异常: {str(exc)}", exc_info=True)
     return JSONResponse(
         status_code=500,
         content=StandardResponse(
@@ -122,7 +118,7 @@ async def general_exception_handler(request: Request, exc: Exception):
             path=request.url.path,
             success=False,
             code=500,
-            message="Internal server error",
+            message="服务器内部错误",
             data={"error": str(exc)} if settings.DEBUG else None
         ).dict()
     )
@@ -136,7 +132,7 @@ async def health_check():
         path="/health",
         success=True,
         code=200,
-        message="Service is healthy",
+        message="服务正常运行",
         data={
             "status": "healthy",
             "name": "analysis",

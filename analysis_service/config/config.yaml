@@ -7,6 +7,16 @@ SERVICES:
   host: "0.0.0.0"
   port: 8002
 
+# Redis配置
+REDIS:
+  host: "localhost"
+  port: 6379
+  password: "123456"
+  db: 0
+  max_connections: 50
+  socket_timeout: 5
+  retry_on_timeout: true
+
 # 模型服务配置
 MODEL_SERVICE:
   url: "http://localhost:8003"
@@ -38,3 +48,11 @@ OUTPUT:
   save_txt: false
   save_img: true
   return_base64: true 
+
+# 任务队列配置
+TASK_QUEUE:
+  max_concurrent: 3  # 最大并发任务数
+  max_retries: 3    # 最大重试次数
+  retry_delay: 5    # 重试延迟(秒)
+  result_ttl: 7200  # 结果缓存时间(秒)
+  cleanup_interval: 3600  # 清理间隔(秒) 

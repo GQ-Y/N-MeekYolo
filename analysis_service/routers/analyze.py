@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import List, Optional, Union
 from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Form, BackgroundTasks, Request
 from pydantic import BaseModel, Field, validator
-from analysis_service.core.detector import YOLODetector
-from analysis_service.core.queue import TaskQueueManager
-from analysis_service.core.resource import ResourceMonitor
-from analysis_service.core.models import (
+from core.detector import YOLODetector
+from core.redis_manager import RedisManager
+from core.task_queue import TaskQueue, TaskStatus
+from core.resource import ResourceMonitor
+from core.models import (
     StandardResponse,
     AnalysisType,
     AnalysisStatus,
@@ -22,13 +23,13 @@ from analysis_service.core.models import (
     TrackingResult,
     CrossCameraResult
 )
-from analysis_service.core.exceptions import (
+from core.exceptions import (
     InvalidInputException,
     ModelLoadException,
     ProcessingException,
     ResourceNotFoundException
 )
-from analysis_service.models.responses import (
+from models.responses import (
     ImageAnalysisResponse,
     VideoAnalysisResponse,
     StreamAnalysisResponse,
@@ -38,20 +39,15 @@ from analysis_service.models.responses import (
     VideoAnalysisData,
     ResourceStatusResponse
 )
-from analysis_service.models.requests import (
+from models.requests import (
     ImageAnalysisRequest,
     VideoAnalysisRequest,
     StreamAnalysisRequest,
-    StreamTask
+    StreamTask,
+    TaskStatusRequest
 )
-from analysis_service.models.database import Task, TaskQueue
 from shared.utils.logger import setup_logger
-from analysis_service.services.database import get_db_dependency
-from analysis_service.crud import task as task_crud
-import asyncio
-import time
-from sqlalchemy.orm import Session
-from analysis_service.core.config import settings
+from core.config import settings
 from datetime import datetime
 import base64
 import re
@@ -61,7 +57,8 @@ logger = setup_logger(__name__)
 # 初始化组件
 detector = YOLODetector()
 resource_monitor = ResourceMonitor()
-task_queue = None
+redis_manager = RedisManager()
+task_queue = TaskQueue()
 
 # 创建路由器
 router = APIRouter(
@@ -138,12 +135,12 @@ async def get_detector() -> YOLODetector:
     """获取检测器实例"""
     return detector
 
-async def get_task_queue(db: Session = Depends(get_db_dependency)) -> TaskQueueManager:
-    """获取任务队列管理器"""
-    global task_queue
-    if task_queue is None:
-        task_queue = TaskQueueManager(db)
-        await task_queue.start()
+async def get_redis() -> RedisManager:
+    """获取Redis管理器实例"""
+    return redis_manager
+
+async def get_task_queue() -> TaskQueue:
+    """获取任务队列实例"""
     return task_queue
 
 @router.post(
@@ -294,7 +291,7 @@ async def analyze_video(
         task_id = f"vid_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         
         # 启动视频分析任务
-        task = await detector.start_video_analysis(
+        result = await detector.start_video_analysis(
             task_id=task_id,
             model_code=body.model_code,
             video_url=body.video_url,
@@ -305,7 +302,7 @@ async def analyze_video(
             save_result=body.save_result
         )
         
-        # 记录任务信息
+        # 记录结果
         logger.info(f"视频分析任务已启动: task_id={task_id}")
         
         return StandardResponse(
@@ -315,20 +312,149 @@ async def analyze_video(
             message="视频分析任务已启动",
             code=200,
             data={
-                "task_id": task["task_id"],
-                "task_name": task["task_name"],
-                "status": AnalysisStatus.PROCESSING,
-                "video_url": task["video_url"],
-                "saved_path": task["saved_path"],
-                "start_time": task["start_time"]
+                "task_id": task_id,
+                "task_name": body.task_name,
+                "status": result.get("status", TaskStatus.PROCESSING),
+                "video_url": body.video_url,
+                "start_time": result.get("start_time"),
+                "progress": result.get("progress", 0)
             }
         )
         
     except Exception as e:
-        logger.error(f"视频分析任务启动失败: {str(e)}", exc_info=True)
+        logger.error(f"启动视频分析任务失败: {str(e)}", exc_info=True)
         if isinstance(e, (InvalidInputException, ModelLoadException, ProcessingException)):
             raise
-        raise ProcessingException(f"视频分析任务启动失败: {str(e)}")
+        raise ProcessingException(f"启动视频分析任务失败: {str(e)}")
+
+@router.post(
+    "/task/status",
+    response_model=StandardResponse,
+    summary="获取任务状态",
+    description="获取分析任务的状态信息"
+)
+async def get_task_status(
+    request: Request,
+    body: TaskStatusRequest,
+    task_queue: TaskQueue = Depends(get_task_queue)
+) -> StandardResponse:
+    """获取任务状态"""
+    try:
+        # 获取任务信息
+        task_info = await task_queue.get_task(body.task_id)
+        if not task_info:
+            raise ResourceNotFoundException(f"任务 {body.task_id} 不存在")
+            
+        return StandardResponse(
+            requestId=str(uuid.uuid4()),
+            path=str(request.url.path),
+            success=True,
+            message="获取任务状态成功",
+            code=200,
+            data=task_info
+        )
+        
+    except Exception as e:
+        logger.error(f"获取任务状态失败: {str(e)}", exc_info=True)
+        if isinstance(e, ResourceNotFoundException):
+            raise
+        raise ProcessingException(f"获取任务状态失败: {str(e)}")
+
+@router.post("/task/stop", response_model=StandardResponse, summary="停止任务", description="停止指定的任务")
+async def stop_task(
+    request: Request,
+    body: TaskStatusRequest,
+    detector: YOLODetector = Depends(get_detector)
+) -> StandardResponse:
+    """停止任务"""
+    try:
+        # 获取任务信息
+        task_info = await detector._get_task_info(body.task_id)
+        if not task_info:
+            raise ResourceNotFoundException(f"任务 {body.task_id} 不存在")
+            
+        # 更新任务状态为停止中
+        task_info["status"] = TaskStatus.STOPPING
+        await detector._update_task_info(body.task_id, task_info)
+        await detector.task_queue.update_task_status(body.task_id, TaskStatus.STOPPING, task_info)
+        
+        return StandardResponse(
+            requestId=str(uuid.uuid4()),
+            path=str(request.url.path),
+            success=True,
+            message="任务已开始停止",
+            code=200,
+            data={
+                "task_id": body.task_id,
+                "status": TaskStatus.STOPPING
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"停止任务失败: {str(e)}", exc_info=True)
+        if isinstance(e, ResourceNotFoundException):
+            raise
+        raise ProcessingException(f"停止任务失败: {str(e)}")
+
+@router.post(
+    "/resource",
+    response_model=StandardResponse,
+    summary="获取资源状态",
+    description="获取系统资源使用状况"
+)
+async def get_resource_status(request: Request) -> StandardResponse:
+    """获取资源状态"""
+    try:
+        status = resource_monitor.get_status()
+        return StandardResponse(
+            requestId=str(uuid.uuid4()),
+            path=str(request.url.path),
+            success=True,
+            message="获取资源状态成功",
+            code=200,
+            data=status
+        )
+    except Exception as e:
+        logger.error(f"获取资源状态失败: {str(e)}", exc_info=True)
+        raise ProcessingException(f"获取资源状态失败: {str(e)}")
+
+# 添加新的请求模型
+class VideoStatusRequest(BaseModel):
+    """视频状态查询请求"""
+    task_id: str = Field(..., description="任务ID")
+
+@router.post(
+    "/video/status",
+    response_model=StandardResponse,
+    summary="获取视频状态",
+    description="获取指定视频分析任务的状态"
+)
+async def get_video_status(
+    request: Request,
+    body: TaskStatusRequest,
+    detector: YOLODetector = Depends(get_detector)
+) -> StandardResponse:
+    """获取视频分析任务状态"""
+    try:
+        # 获取任务状态
+        status_info = await detector.get_video_task_status(body.task_id)
+        if not status_info:
+            raise ResourceNotFoundException(f"任务 {body.task_id} 不存在")
+            
+        return StandardResponse(
+            requestId=str(uuid.uuid4()),
+            path=str(request.url.path),
+            success=True,
+            message="获取任务状态成功",
+            code=200,
+            data=status_info
+        )
+        
+    except Exception as e:
+        logger.error(f"获取任务状态失败: {str(e)}", exc_info=True)
+        if isinstance(e, ResourceNotFoundException):
+            raise
+        raise ProcessingException(f"获取任务状态失败: {str(e)}")
 
 @router.post(
     "/stream",
@@ -337,11 +463,15 @@ async def analyze_video(
     description="""
     分析视频流中的目标
     
+    支持以下格式:
+    - RTSP流 (rtsp://)
+    - RTMP流 (rtmp://)
+    - HTTP流 (http://, https://)
+    
     支持以下功能:
     - 目标检测
     - 实例分割
     - 目标跟踪
-    - 跨摄像头跟踪
     
     请求示例:
     ```json
@@ -349,7 +479,6 @@ async def analyze_video(
         "model_code": "yolov8",
         "task_name": "流分析-1",
         "stream_url": "rtsp://example.com/stream",
-        "analysis_type": "detection",
         "callback_urls": "http://callback1,http://callback2",
         "enable_callback": true,
         "save_result": false,
@@ -373,7 +502,8 @@ async def analyze_video(
 async def analyze_stream(
     request: Request,
     body: StreamAnalysisRequest,
-    queue: TaskQueueManager = Depends(get_task_queue)
+    background_tasks: BackgroundTasks,
+    detector: YOLODetector = Depends(get_detector)
 ) -> StandardResponse:
     """流分析接口"""
     try:
@@ -383,12 +513,11 @@ async def analyze_stream(
         # 生成任务ID
         task_id = f"str_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         
-        # 创建流分析任务
-        task = await queue.create_stream_task(
+        # 启动流分析任务
+        result = await detector.start_stream_analysis(
             task_id=task_id,
             model_code=body.model_code,
             stream_url=body.stream_url,
-            analysis_type=body.analysis_type,
             callback_urls=body.callback_urls,
             config=body.config,
             task_name=body.task_name,
@@ -396,46 +525,48 @@ async def analyze_stream(
             save_result=body.save_result
         )
         
-        # 记录任务信息
-        logger.info(f"流分析任务已创建: task_id={task_id}")
+        # 记录结果
+        logger.info(f"流分析任务已启动: task_id={task_id}")
         
         return StandardResponse(
             requestId=str(uuid.uuid4()),
             path=str(request.url.path),
             success=True,
-            message="流分析任务已创建",
+            message="流分析任务已启动",
             code=200,
             data={
-                "task_id": task.id,
-                "task_name": task.task_name,
-                "model_code": task.model_code,
-                "stream_url": task.stream_url
+                "task_id": task_id,
+                "task_name": body.task_name,
+                "status": result.get("status", TaskStatus.PROCESSING),
+                "stream_url": body.stream_url,
+                "start_time": result.get("start_time"),
+                "progress": result.get("progress", 0)
             }
         )
         
     except Exception as e:
-        logger.error(f"流分析任务创建失败: {str(e)}", exc_info=True)
+        logger.error(f"启动流分析任务失败: {str(e)}", exc_info=True)
         if isinstance(e, (InvalidInputException, ModelLoadException, ProcessingException)):
             raise
-        raise ProcessingException(f"流分析任务创建失败: {str(e)}")
+        raise ProcessingException(f"启动流分析任务失败: {str(e)}")
 
 @router.post(
-    "/task/status",
+    "/stream/status",
     response_model=StandardResponse,
-    summary="获取任务状态",
-    description="获取分析任务的状态信息"
+    summary="获取流状态",
+    description="获取指定流分析任务的状态"
 )
-async def get_task_status(
+async def get_stream_status(
     request: Request,
     body: TaskStatusRequest,
-    queue: TaskQueueManager = Depends(get_task_queue)
+    detector: YOLODetector = Depends(get_detector)
 ) -> StandardResponse:
-    """获取任务状态"""
+    """获取流分析任务状态"""
     try:
         # 获取任务状态
-        task = await queue.get_task_status(body.task_id)
-        if not task:
-            raise ResourceNotFoundException(f"任务不存在: {body.task_id}")
+        status_info = await detector.get_video_task_status(body.task_id)
+        if not status_info:
+            raise ResourceNotFoundException(f"任务 {body.task_id} 不存在")
             
         return StandardResponse(
             requestId=str(uuid.uuid4()),
@@ -443,208 +574,11 @@ async def get_task_status(
             success=True,
             message="获取任务状态成功",
             code=200,
-            data=task
+            data=status_info
         )
         
     except Exception as e:
         logger.error(f"获取任务状态失败: {str(e)}", exc_info=True)
-        if isinstance(e, (ResourceNotFoundException,)):
+        if isinstance(e, ResourceNotFoundException):
             raise
         raise ProcessingException(f"获取任务状态失败: {str(e)}")
-
-@router.post(
-    "/task/stop",
-    response_model=StandardResponse,
-    summary="停止任务",
-    description="停止指定的分析任务"
-)
-async def stop_task(
-    request: Request,
-    body: TaskStatusRequest,
-    queue: TaskQueueManager = Depends(get_task_queue)
-) -> StandardResponse:
-    """停止任务"""
-    try:
-        # 停止任务
-        result = await queue.stop_task(body.task_id)
-        if not result:
-            raise ResourceNotFoundException(f"任务不存在: {body.task_id}")
-            
-        return StandardResponse(
-            requestId=str(uuid.uuid4()),
-            path=str(request.url.path),
-            success=True,
-            message="停止任务成功",
-            code=200,
-            data={"task_id": body.task_id}
-        )
-        
-    except Exception as e:
-        logger.error(f"停止任务失败: {str(e)}", exc_info=True)
-        if isinstance(e, (ResourceNotFoundException,)):
-            raise
-        raise ProcessingException(f"停止任务失败: {str(e)}")
-
-@router.post(
-    "/resource",
-    response_model=StandardResponse,
-    summary="获取资源状态",
-    description="获取系统资源使用状况"
-)
-async def get_resource_status(request: Request) -> StandardResponse:
-    """获取资源状态"""
-    try:
-        # 获取资源状态
-        status = resource_monitor.get_status()
-        
-        return StandardResponse(
-            requestId=str(uuid.uuid4()),
-            path=str(request.url.path),
-            success=True,
-            message="获取资源状态成功",
-            code=200,
-            data=status
-        )
-        
-    except Exception as e:
-        logger.error(f"获取资源状态失败: {str(e)}", exc_info=True)
-        raise ProcessingException(f"获取资源状态失败: {str(e)}")
-
-# 添加新的请求模型
-class VideoStatusRequest(BaseModel):
-    """视频状态查询请求"""
-    task_id: str = Field(..., description="任务ID")
-
-@router.post("/video/status", response_model=VideoAnalysisResponse, summary="获取视频状态", description="获取指定视频分析任务的状态")
-async def get_video_status(
-    request: Request,
-    body: VideoStatusRequest
-) -> VideoAnalysisResponse:
-    """
-    获取视频分析任务状态
-    
-    Args:
-        request: FastAPI请求对象
-        body: 视频状态查询请求体
-    
-    Returns:
-        VideoAnalysisResponse: 视频分析状态
-        
-    请求示例:
-    ```json
-    {
-        "task_id": "550e8400-e29b-41d4-a716-446655440000"  // 任务ID
-    }
-    ```
-    """
-    try:
-        # 获取任务状态
-        task = await detector.get_video_task_status(body.task_id)
-        if not task:
-            return VideoAnalysisResponse(
-                requestId=str(uuid.uuid4()),
-                path=str(request.url.path),
-                success=False,
-                message=f"任务 {body.task_id} 不存在",
-                code=404,
-                data=None
-            )
-            
-        # 将字符串状态转换为数字状态
-        status = status_map.get(task.get('status', 'processing'), 1)  # 默认为运行中
-        
-        # 构建响应数据
-        analysis_data = VideoAnalysisData(
-            task_id=body.task_id,
-            task_name=task.get('task_name'),
-            status=status,
-            video_url=task.get('video_url'),
-            saved_path=task.get('saved_path'),
-            start_time=task.get('start_time'),
-            end_time=task.get('end_time'),
-            analysis_duration=task.get('analysis_duration'),
-            progress=task.get('progress'),
-            total_frames=task.get('total_frames'),
-            processed_frames=task.get('processed_frames')
-        )
-        
-        return VideoAnalysisResponse(
-            requestId=str(uuid.uuid4()),
-            path=str(request.url.path),
-            success=True,
-            message="获取任务状态成功",
-            code=200,
-            data=analysis_data
-        )
-        
-    except Exception as e:
-        logger.error(f"获取视频分析任务状态失败: {str(e)}", exc_info=True)
-        return VideoAnalysisResponse(
-            requestId=str(uuid.uuid4()),
-            path=str(request.url.path),
-            success=False,
-            message=f"获取任务状态失败: {str(e)}",
-            code=500,
-            data=None
-        )
-
-class VideoStopRequest(BaseModel):
-    """停止视频分析任务请求"""
-    task_id: str = Field(..., description="任务ID")
-
-@router.post("/video/stop", response_model=BaseApiResponse, summary="停止视频分析", description="停止指定的视频分析任务")
-async def stop_video_analysis(
-    request: Request,
-    body: VideoStopRequest
-) -> BaseApiResponse:
-    """
-    停止视频分析任务
-    
-    Args:
-        request: FastAPI请求对象
-        body: 停止视频分析请求体
-    
-    Returns:
-        BaseApiResponse: 停止结果
-        
-    请求示例:
-    ```json
-    {
-        "task_id": "550e8400-e29b-41d4-a716-446655440000"  // 任务ID
-    }
-    ```
-    """
-    try:
-        # 停止任务
-        result = await detector.stop_video_task(body.task_id)
-        if not result:
-            return BaseApiResponse(
-                requestId=str(uuid.uuid4()),
-                path=str(request.url.path),
-                success=False,
-                message=f"任务 {body.task_id} 不存在",
-                code=404,
-                data=None
-            )
-            
-        return BaseApiResponse(
-            requestId=str(uuid.uuid4()),
-            path=str(request.url.path),
-            success=True,
-            message="任务已停止",
-            code=200,
-            data={
-                "task_id": body.task_id
-            }
-        )
-        
-    except Exception as e:
-        logger.error(f"停止视频分析任务失败: {str(e)}", exc_info=True)
-        return BaseApiResponse(
-            requestId=str(uuid.uuid4()),
-            path=str(request.url.path),
-            success=False,
-            message=f"停止任务失败: {str(e)}",
-            code=500,
-            data=None
-        )

@@ -12,18 +12,18 @@ import torch
 from ultralytics import YOLO
 from typing import List, Dict, Any, Optional, Union, Tuple
 from shared.utils.logger import setup_logger
-from analysis_service.core.config import settings
+from core.config import settings
 import time
 import asyncio
-from analysis_service.services.database import get_db
-from analysis_service.crud import task as task_crud
 from PIL import Image, ImageDraw, ImageFont
 import random
 from datetime import datetime
 from loguru import logger
 import httpx
 import colorsys
-from analysis_service.core.tracker import create_tracker, BaseTracker
+from core.tracker import create_tracker, BaseTracker
+from core.redis_manager import RedisManager
+from core.task_queue import TaskQueue, TaskStatus
 
 logger = setup_logger(__name__)
 
@@ -145,8 +145,10 @@ class YOLODetector:
         self.current_model_code = None
         self.tracker: Optional[BaseTracker] = None
         self.device = torch.device("cuda" if torch.cuda.is_available() and settings.ANALYSIS.device != "cpu" else "cpu")
-        self.stop_flags = {}
-        self.tasks = {}
+        
+        # Redis相关
+        self.redis = RedisManager()
+        self.task_queue = TaskQueue()
         
         # 模型服务配置
         self.model_service_url = settings.MODEL_SERVICE.url
@@ -171,42 +173,55 @@ class YOLODetector:
         logger.info(f"Results directory: {self.results_dir}")
         
     async def get_model_path(self, model_code: str) -> str:
-        """获取模型路径"""
+        """获取模型路径
+        
+        Args:
+            model_code: 模型代码,例如'model-gcc'
+            
+        Returns:
+            str: 本地模型文件路径
+            
+        Raises:
+            Exception: 当模型下载或保存失败时抛出异常
+        """
         try:
-            # 检查本地模型
-            model_dir = os.path.join("data", "models", model_code)
-            model_path = os.path.join(model_dir, "best.pt")
+            # 检查本地缓存
+            cache_dir = os.path.join("data", "models", model_code)
+            model_path = os.path.join(cache_dir, "best.pt")
             
             if os.path.exists(model_path):
-                logger.info(f"Found local model at: {model_path}")
+                logger.info(f"找到本地缓存模型: {model_path}")
                 return model_path
             
-            # 如果本地不存在，从模型服务下载
-            os.makedirs(model_dir, exist_ok=True)
-            url = f"{settings.MODEL_SERVICE.url}{settings.MODEL_SERVICE.api_prefix}/models/{model_code}/download"
+            # 本地不存在,从模型服务下载
+            logger.info(f"本地未找到模型 {model_code},准备从模型服务下载...")
             
-            logger.info(f"Trying to download model from: {url}")
+            # 构建API URL
+            api_url = f"{self.model_service_url}{self.api_prefix}/models/download?code={model_code}"
+            logger.info(f"开始从模型服务下载: {api_url}")
+            
+            # 创建缓存目录
+            os.makedirs(cache_dir, exist_ok=True)
             
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(url) as response:
+                    async with session.get(api_url) as response:
                         if response.status == 200:
+                            # 保存模型文件
                             with open(model_path, "wb") as f:
                                 f.write(await response.read())
-                            logger.info(f"Model downloaded successfully to: {model_path}")
+                            logger.info(f"模型下载成功并保存到: {model_path}")
                             return model_path
                         else:
-                            error_text = await response.text()
-                            logger.error(f"Failed to download model. Status: {response.status}, Response: {error_text}")
-                            raise Exception(f"Failed to download model: {response.status}")
+                            error_msg = await response.text()
+                            raise Exception(f"模型下载失败: HTTP {response.status} - {error_msg}")
                             
-            except Exception as e:
-                logger.error(f"Failed to download model: {str(e)}")
-                raise
-                
+            except aiohttp.ClientError as e:
+                raise Exception(f"请求模型服务失败: {str(e)}")
+            
         except Exception as e:
-            logger.error(f"Error getting model path: {str(e)}")
-            raise
+            logger.error(f"获取模型路径时出错: {str(e)}")
+            raise Exception(f"获取模型失败: {str(e)}")
 
     async def load_model(self, model_code: str):
         """加载模型"""
@@ -691,15 +706,32 @@ class YOLODetector:
         save_result: bool = False
     ) -> Dict[str, Any]:
         """检测图片"""
+        if not model_code:
+            raise ValueError("No model code specified")
+            
+        task_id = f"img_{int(time.time() * 1000)}"
         try:
-            # 记录开始时间
-            start_time = time.time()
-            logger.info(f"开始图片分析任务, save_result={save_result}")
+            # 初始化任务信息
+            task_info = {
+                'id': task_id,
+                'task_name': task_name,
+                'model_code': model_code,
+                'image_urls': image_urls,
+                'callback_urls': callback_urls,
+                'enable_callback': enable_callback,
+                'save_result': save_result,
+                'config': config,
+                'status': TaskStatus.PROCESSING,
+                'start_time': datetime.now().isoformat(),
+                'type': 'image'
+            }
+            
+            # 保存任务信息到Redis
+            await self.task_queue.add_task(task_info)
             
             # 加载模型
-            if not self.model:
-                await self.load_model(model_code)
-                
+            await self.load_model(model_code)
+            
             results = []
             for url in image_urls:
                 # 下载图片
@@ -733,321 +765,196 @@ class YOLODetector:
                 }
                 results.append(result_dict)
             
-            # 计算分析耗时
-            end_time = time.time()
-            analysis_duration = end_time - start_time
-            
-            # 构建返回结果
-            result = results[0] if results else {
-                'image_url': image_urls[0] if image_urls else None,
-                'detections': [],
-                'result_image': None,
-                'saved_path': None
-            }
-            
-            # 添加时间信息和任务名称
-            result.update({
-                'task_name': task_name,
-                'start_time': start_time,
-                'end_time': end_time,
-                'analysis_duration': analysis_duration
+            # 更新任务状态和结果
+            task_info.update({
+                'status': TaskStatus.COMPLETED,
+                'end_time': datetime.now().isoformat(),
+                'results': results
             })
+            await self._save_task_result(task_id, task_info)
             
-            # 发送回调
-            if enable_callback and callback_urls:
-                logger.info(f"发送回调到: {callback_urls}")
-                await self._send_callbacks(callback_urls, result)
-            else:
-                logger.info("回调已禁用或未提供回调地址，跳过回调")
-                
-            return result
+            return results[0] if results else None
             
         except Exception as e:
             logger.error(f"Image detection failed: {str(e)}", exc_info=True)
+            await self._fail_task(task_id, str(e))
             raise
 
     async def start_stream_analysis(
         self,
         task_id: str,
-        stream_url: str,
         model_code: str,
+        stream_url: str,
         callback_urls: Optional[str] = None,
-        parent_task_id: Optional[str] = None,
-        analyze_interval: int = 1,
-        alarm_interval: int = 60,
-        random_interval: Tuple[int, int] = (0, 0),
-        config: Optional[Dict] = None,
-        push_interval: int = 5,
+        config: Optional[Dict[str, Any]] = None,
         task_name: Optional[str] = None,
-        enable_callback: bool = True,
+        enable_callback: bool = False,
         save_result: bool = False
-    ):
+    ) -> Dict[str, Any]:
         """启动流分析任务"""
-        cap = None
         try:
-            # 记录任务开始时间
-            task_start_time = time.time()
+            # 加载模型
+            model = await self._load_model(model_code)
+            if not model:
+                raise ModelLoadException(f"模型 {model_code} 加载失败")
             
-            logger.info(f"Starting stream analysis task: {task_id}")
-            logger.info(f"Task name: {task_name}")
-            logger.info(f"Model code: {model_code}")
-            logger.info(f"Stream URL: {stream_url}")
-            logger.info(f"Detection config: {config}")
-            logger.info(f"Enable callback: {enable_callback}")
-            logger.info(f"Save result: {save_result}")
+            # 创建任务信息
+            task_info = {
+                "task_id": task_id,
+                "task_name": task_name or task_id,
+                "model_code": model_code,
+                "stream_url": stream_url,
+                "callback_urls": callback_urls,
+                "enable_callback": enable_callback,
+                "save_result": save_result,
+                "config": config or {},
+                "status": TaskStatus.PROCESSING,
+                "start_time": datetime.now().isoformat(),
+                "progress": 0,
+                "processed_frames": 0,
+                "total_frames": 0,
+                "current_detections": [],
+                "last_update_time": datetime.now().isoformat(),
+                "stream_info": {}
+            }
             
-            if enable_callback:
-                if callback_urls:
-                    logger.info(f"Callback URLs: {callback_urls}")
-                else:
-                    logger.info("回调已启用但未提供回调地址，将不会发送回调")
-            else:
-                logger.info("回调已禁用")
+            # 保存任务信息
+            task_key = f"task:{task_id}"
+            await self.redis.set_value(task_key, task_info)
             
-            # 设置当前模型代码
-            self.current_model_code = model_code
+            # 添加到任务队列
+            await self.task_queue.add_task(task_id, TaskStatus.PROCESSING, task_info)
             
-            # 初始化停止标志
-            self.stop_flags[task_id] = False
+            # 启动流分析任务
+            asyncio.create_task(self._process_stream_analysis(task_id, model, task_info))
             
-            # 确保模型已加载
-            logger.info("Loading model...")
-            await self.load_model(model_code)
-            logger.info("Model loaded successfully")
+            return task_info
             
-            # 使用配置参数或默认值
-            config = config or {}
-            conf = config.get('confidence', self.default_confidence)
-            iou = config.get('iou', self.default_iou)
-            
-            # 确保置信度和IoU阈值有效
-            if conf is None:
-                conf = self.default_confidence
-            if iou is None:
-                iou = self.default_iou
-            
-            config['confidence'] = conf
-            config['iou'] = iou
+        except Exception as e:
+            logger.error(f"启动流分析任务失败: {str(e)}", exc_info=True)
+            raise ProcessingException(f"启动流分析任务失败: {str(e)}")
+
+    async def _process_stream_analysis(
+        self,
+        task_id: str,
+        model: YOLO,
+        task_info: Dict[str, Any]
+    ) -> None:
+        """处理流分析任务"""
+        try:
+            # 获取任务配置
+            config = task_info.get("config", {})
+            stream_url = task_info["stream_url"]
             
             # 打开视频流
             cap = cv2.VideoCapture(stream_url)
             if not cap.isOpened():
-                raise Exception(f"Cannot open stream: {stream_url}")
+                raise ProcessingException(f"无法打开流: {stream_url}")
             
-            # 初始化时间记录
-            current_time = time.time()
-            last_analyze_time = current_time
-            last_alarm_time = current_time
-            last_push_time = current_time
+            # 获取流信息
+            fps = int(cap.get(cv2.CAP_PROP_FPS))
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             
-            # 设置默认间隔
-            if analyze_interval is None:
-                analyze_interval = 0  # 不延迟
-            if alarm_interval is None:
-                alarm_interval = 0  # 不延迟
-            if push_interval is None:
-                push_interval = 0  # 不延迟
-            if random_interval is None:
-                random_interval = (0, 0)  # 不添加随机延迟
+            # 更新流信息
+            task_info["stream_info"] = {
+                "fps": fps,
+                "width": width,
+                "height": height
+            }
+            await self._update_task_info(task_id, task_info)
             
-            # 如果需要保存结果，创建保存目录
-            date_dir = None
-            if save_result:
-                date_dir = self.results_dir / datetime.now().strftime("%Y%m%d")
-                os.makedirs(date_dir, exist_ok=True)
-                logger.info(f"创建结果保存目录: {date_dir}")
-            
-            while not self.stop_flags.get(task_id, False):
-                current_time = time.time()
-                frame_start_time = current_time
+            # 处理每一帧
+            frame_count = 0
+            while True:
+                # 检查任务是否应该停止
+                if await self._should_stop(task_id):
+                    logger.info(f"任务 {task_id} 已停止")
+                    break
                 
-                # 检查分析间隔
-                if analyze_interval > 0 and current_time - last_analyze_time < analyze_interval:
-                    await asyncio.sleep(0.1)
-                    continue
-                
-                # 添加随机延迟
-                if random_interval and random_interval[1] > random_interval[0]:
-                    delay = random.uniform(random_interval[0], random_interval[1])
-                    await asyncio.sleep(delay)
-                
+                # 读取帧
                 ret, frame = cap.read()
                 if not ret:
-                    logger.warning("Failed to read frame")
-                    cap.release()
-                    cap = cv2.VideoCapture(stream_url)
-                    continue
+                    logger.warning(f"任务 {task_id} 读取帧失败")
+                    break
                 
-                try:
-                    # 执行检测
-                    detections = await self.detect(frame, config=config)
+                # 增加帧计数
+                frame_count += 1
+                
+                # 处理帧
+                results = await self._process_frame(
+                    frame=frame,
+                    model=model,
+                    config=config
+                )
+                
+                # 更新任务信息
+                task_info.update({
+                    "processed_frames": frame_count,
+                    "current_detections": results,
+                    "last_update_time": datetime.now().isoformat()
+                })
+                await self._update_task_info(task_id, task_info)
+                
+                # 回调通知
+                if task_info.get("enable_callback") and task_info.get("callback_urls"):
+                    await self._send_callback(task_id, results)
                     
-                    # 计算当前帧分析耗时
-                    frame_end_time = time.time()
-                    frame_duration = frame_end_time - frame_start_time
+                # 保存结果
+                if task_info.get("save_result"):
+                    await self._save_result(task_id, frame, results)
                     
-                    if detections:
-                        # 检查报警间隔
-                        if current_time - last_alarm_time >= alarm_interval:
-                            last_alarm_time = current_time
-                            
-                            # 检查推送间隔
-                            if current_time - last_push_time >= push_interval:
-                                last_push_time = current_time
-                                
-                                # 保存结果
-                                saved_path = None
-                                if save_result:
-                                    # 生成文件名
-                                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                    task_prefix = f"{task_name}_" if task_name else ""
-                                    filename = f"{task_prefix}{timestamp}.jpg"
-                                    file_path = date_dir / filename
-                                    
-                                    # 生成并保存结果图片
-                                    result_frame = await self._encode_result_image(frame, detections, return_image=True)
-                                    if result_frame is not None:
-                                        cv2.imwrite(str(file_path), result_frame)
-                                        saved_path = str(file_path.relative_to(self.project_root))
-                                        logger.info(f"保存检测结果: {saved_path}")
-                                
-                                # 发送回调
-                                if enable_callback and callback_urls:
-                                    await self._send_callbacks(callback_urls, {
-                                        "task_id": task_id,
-                                        "task_name": task_name,
-                                        "parent_task_id": parent_task_id,
-                                        "detections": detections,
-                                        "stream_url": stream_url,
-                                        "image": frame,
-                                        "timestamp": current_time,
-                                        "task_start_time": task_start_time,
-                                        "frame_start_time": frame_start_time,
-                                        "frame_end_time": frame_end_time,
-                                        "frame_duration": frame_duration,
-                                        "total_duration": frame_end_time - task_start_time,
-                                        "saved_path": saved_path
-                                    })
-                                else:
-                                    logger.debug("回调已禁用或未提供回调地址，跳过回调")
-                
-                except Exception as e:
-                    logger.error(f"Frame processing error: {str(e)}")
-                    continue
-                
-                last_analyze_time = current_time
-                await asyncio.sleep(0.01)
-                
-        except Exception as e:
-            logger.error(f"Stream analysis failed: {str(e)}")
-            raise
+            # 关闭视频流
+            cap.release()
             
-        finally:
-            if cap is not None:
-                cap.release()
+            # 更新任务状态
+            task_info["status"] = TaskStatus.COMPLETED
+            await self._update_task_info(task_id, task_info)
+            await self.task_queue.update_task_status(task_id, TaskStatus.COMPLETED, task_info)
+            
+        except Exception as e:
+            logger.error(f"处理流分析任务失败: {str(e)}", exc_info=True)
+            # 更新任务状态为失败
+            task_info["status"] = TaskStatus.FAILED
+            task_info["error"] = str(e)
+            await self._update_task_info(task_id, task_info)
+            await self.task_queue.update_task_status(task_id, TaskStatus.FAILED, task_info)
 
     async def stop_stream_analysis(self, task_id: str) -> Dict[str, Any]:
-        """
-        停止流分析任务
-        
-        Args:
-            task_id: 任务ID
-            
-        Returns:
-            Dict[str, Any]: 任务状态
-        """
+        """停止流分析任务"""
         try:
-            if task_id in self.stop_flags:
-                self.stop_flags[task_id] = True
-                logger.info(f"发送停止信号到任务 {task_id}")
-                return {
-                    "task_id": task_id,
-                    "status": "stopping",
-                    "message": "Stop signal sent"
-                }
-            else:
-                raise Exception(f"任务 {task_id} 不存在")
+            # 获取任务信息
+            task_info = await self._get_task_info(task_id)
+            if not task_info:
+                raise ResourceNotFoundException(f"任务 {task_id} 不存在")
+            
+            # 更新任务状态为停止中
+            task_info["status"] = TaskStatus.STOPPING
+            await self._update_task_info(task_id, task_info)
+            await self.task_queue.update_task_status(task_id, TaskStatus.STOPPING, task_info)
+            
+            return task_info
+            
         except Exception as e:
-            logger.error(f"停止任务失败: {str(e)}")
-            raise
-            
-    async def stop_task(self, task_id: str) -> bool:
-        """停止指定任务"""
-        try:
-            if task_id not in self.stop_flags:
-                logger.warning(f"任务 {task_id} 不存在")
-                return False
-            
-            # 设置停止志
-            self.stop_flags[task_id] = True
-            logger.info(f"已发送停止信号到任务 {task_id}")
-            
-            # 等待任务实际停止
-            for _ in range(10):  # 最多等待5秒
-                if task_id not in self.stop_flags:
-                    break
-                await asyncio.sleep(0.5)
-            
-            return True
-        
-        except Exception as e:
-            logger.error(f"停止任务失败: {str(e)}", exc_info=True)
-            return False
+            logger.error(f"停止流分析任务失败: {str(e)}", exc_info=True)
+            raise ProcessingException(f"停止流分析任务失败: {str(e)}")
 
-    async def get_video_task_status(self, task_id: str) -> Optional[Dict[str, Any]]:
-        """获取视频分析任务状态
-        
-        Args:
-            task_id: 任务ID
+    async def _should_stop(self, task_id: str) -> bool:
+        """检查任务是否应该停止"""
+        try:
+            # 获取任务信息
+            task_info = await self._get_task_info(task_id)
+            if not task_info:
+                return True
             
-        Returns:
-            任务信息字典，包含以下字段：
-            - task_name: 任务名称
-            - status: 任务状态（waiting/processing/completed/failed）
-            - video_url: 视频URL
-            - saved_path: 保存路径
-            - start_time: 开始时间
-            - end_time: 结束时间
-            - analysis_duration: 分析耗时
-            - progress: 处理进度（0-100）
-            - total_frames: 总帧数
-            - processed_frames: 已处理帧数
-        """
-        task_info = self.tasks.get(task_id)
-        if task_info:
-            # 计算进度
-            total_frames = task_info.get('total_frames', 0)
-            processed_frames = task_info.get('processed_frames', 0)
-            progress = (processed_frames / total_frames * 100) if total_frames > 0 else 0
+            # 检查任务状态
+            status = task_info.get("status")
+            return status in [TaskStatus.STOPPING, TaskStatus.CANCELLED]
             
-            # 更新进度信息
-            task_info.update({
-                'progress': round(progress, 2),
-                'total_frames': total_frames,
-                'processed_frames': processed_frames
-            })
-            
-        return task_info
-        
-    async def stop_video_task(self, task_id: str) -> bool:
-        """停止视频分析任务
-        
-        Args:
-            task_id: 任务ID
-            
-        Returns:
-            bool: 是否成功停止任务
-        """
-        if task_id in self.stop_flags:
-            self.stop_flags[task_id] = True
-            # 等待任务真正停止
-            for _ in range(10):  # 最多等待5秒
-                if task_id not in self.tasks or self.tasks[task_id]['status'] in ['completed', 'failed']:
-                    break
-                await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.error(f"检查任务状态失败: {str(e)}", exc_info=True)
             return True
-        return False
-        
+
     async def start_video_analysis(
         self,
         task_id: str,
@@ -1058,67 +965,30 @@ class YOLODetector:
         task_name: Optional[str] = None,
         enable_callback: bool = True,
         save_result: bool = False,
-        enable_tracking: bool = False,  # 新增: 是否启用跟踪
-        tracking_config: Optional[Dict] = None  # 新增: 跟踪配置
+        enable_tracking: bool = False,
+        tracking_config: Optional[Dict] = None
     ) -> Dict[str, Any]:
-        """开始视频分析任务
-        
-        Args:
-            task_id: 任务ID
-            model_code: 模型代码
-            video_url: 视频URL
-            callback_urls: 回调URL
-            config: 检测配置参数
-            task_name: 任务名称
-            enable_callback: 是否启用回调
-            save_result: 是否保存分析结果
-            enable_tracking: 是否启用目标跟踪
-            tracking_config: 跟踪配置,包含以下参数:
-                - tracker_type: 跟踪器类型,默认为"sort"
-                - max_age: 最大跟踪帧数,默认为30
-                - min_hits: 最小命中次数,默认为3
-                - iou_threshold: IOU阈值,默认为0.3
-                - visualization: 可视化配置
-                    - show_tracks: 是否显示轨迹
-                    - show_track_ids: 是否显示跟踪ID
-        """
+        """开始视频分析任务"""
         try:
-            # 记录任务开始时间
-            start_time = time.time()
-            logger.info(f"开始视频分析任务: {task_id}")
-            
-            # 初始化跟踪配置
-            if enable_tracking:
-                tracking_config = tracking_config or {}
-                if "visualization" not in tracking_config:
-                    tracking_config["visualization"] = {
-                        "show_tracks": True,
-                        "show_track_ids": True
-                    }
-            
             # 初始化任务信息
-            self.tasks[task_id] = {
-                'task_id': task_id,
+            task_info = {
+                'id': task_id,
                 'task_name': task_name,
-                'status': 'processing',
-                'video_url': video_url,
-                'saved_path': None,
-                'start_time': start_time,
-                'end_time': None,
-                'analysis_duration': None,
-                'progress': 0.0,
-                'total_frames': 0,
-                'processed_frames': 0,
-                'tracking_enabled': enable_tracking,
-                'tracking_config': tracking_config,  # 保存跟踪配置
-                'tracking_stats': {
-                    'total_tracks': 0,
-                    'active_tracks': 0,
-                    'avg_track_length': 0.0,
-                    'tracker_type': tracking_config.get('tracker_type', 'sort') if enable_tracking else None,
-                    'tracking_fps': 0.0
-                } if enable_tracking else None
+                'model_code': model_code,
+                'stream_url': video_url,
+                'callback_urls': callback_urls,
+                'enable_callback': enable_callback,
+                'save_result': save_result,
+                'config': config,
+                'status': TaskStatus.PROCESSING,
+                'start_time': datetime.now().isoformat(),
+                'type': 'video',
+                'enable_tracking': enable_tracking,
+                'tracking_config': tracking_config
             }
+            
+            # 保存任务信息到Redis
+            await self.task_queue.add_task(task_info)
             
             # 启动异步处理任务
             asyncio.create_task(self._process_video_analysis(
@@ -1134,56 +1004,49 @@ class YOLODetector:
                 tracking_config=tracking_config
             ))
             
-            return self.tasks[task_id]
+            return await self._get_task_info(task_id)
             
         except Exception as e:
             logger.error(f"启动视频分析任务失败: {str(e)}", exc_info=True)
-            # 更新任务状态为失败
-            if task_id in self.tasks:
-                self.tasks[task_id].update({
-                    'status': 'failed',
-                    'end_time': time.time(),
-                    'analysis_duration': time.time() - start_time
-                })
+            await self._fail_task(task_id, str(e))
             raise
 
-    async def _download_video(self, url: str) -> Optional[str]:
-        """下载视频到本地
-        
-        Args:
-            url: 视频URL
-            
-        Returns:
-            str: 本地视频文件路径
-        """
+    async def _get_task_info(self, task_id: str) -> Optional[Dict]:
+        """从Redis获取任务信息"""
+        return await self.task_queue.get_task(task_id)
+
+    async def _update_task_info(self, task_id: str, info: Dict[str, Any]):
+        """更新任务信息"""
         try:
-            # 生成本地文件路径
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"video_{timestamp}.mp4"
-            local_path = str(self.videos_dir / filename)
-            
-            logger.info(f"开始下载视频: {url}")
-            logger.info(f"保存到: {local_path}")
-            
-            # 使用 httpx 下载视频
-            async with httpx.AsyncClient() as client:
-                async with client.stream("GET", url) as response:
-                    response.raise_for_status()
-                    
-                    # 打开本地文件
-                    with open(local_path, "wb") as f:
-                        # 分块下载
-                        async for chunk in response.aiter_bytes():
-                            f.write(chunk)
-            
-            logger.info(f"视频下载完成: {local_path}")
-            return local_path
-            
+            # 获取当前任务信息
+            current_info = await self._get_task_info(task_id)
+            if not current_info:
+                logger.warning(f"任务 {task_id} 不存在，无法更新信息")
+                return
+
+            # 更新任务信息
+            current_info.update(info)
+
+            # 保存更新后的信息
+            task_key = f"task:{task_id}"
+            await self.redis.set_value(task_key, current_info)
+
+            # 如果包含状态更新，同时更新任务状态
+            if 'status' in info:
+                await self.task_queue.update_task_status(task_id, info['status'], current_info)
+
+            logger.debug(f"任务 {task_id} 信息已更新: {info}")
+
         except Exception as e:
-            logger.error(f"下载视频失败: {str(e)}", exc_info=True)
-            if os.path.exists(local_path):
-                os.remove(local_path)
-            raise
+            logger.error(f"更新任务 {task_id} 信息失败: {str(e)}")
+
+    async def _save_task_result(self, task_id: str, result: Dict):
+        """保存任务结果到Redis"""
+        await self.task_queue.complete_task(task_id, result)
+
+    async def _fail_task(self, task_id: str, error: str):
+        """标记任务失败"""
+        await self.task_queue.fail_task(task_id, error)
 
     async def _process_video_analysis(
         self,
@@ -1195,8 +1058,8 @@ class YOLODetector:
         task_name: Optional[str] = None,
         enable_callback: bool = True,
         save_result: bool = False,
-        enable_tracking: bool = False,  # 新增: 是否启用跟踪
-        tracking_config: Optional[Dict] = None  # 新增: 跟踪配置
+        enable_tracking: bool = False,
+        tracking_config: Optional[Dict] = None
     ):
         """实际的视频处理逻辑"""
         cap = None
@@ -1206,6 +1069,16 @@ class YOLODetector:
         
         try:
             logger.info(f"开始处理视频分析任务: {task_id}")
+            
+            # 获取任务信息
+            task_info = await self._get_task_info(task_id)
+            if not task_info:
+                raise Exception(f"任务 {task_id} 不存在")
+                
+            # 更新任务状态为处理中
+            task_info['status'] = TaskStatus.PROCESSING
+            task_info['process_start_time'] = datetime.now().isoformat()
+            await self._update_task_info(task_id, task_info)
             
             # 加载模型
             if not self.model:
@@ -1236,8 +1109,41 @@ class YOLODetector:
             config_dict['confidence'] = conf
             config_dict['iou'] = iou
             
-            # 下载视频到本地
-            local_video_path = await self._download_video(video_url)
+            # 下载视频
+            try:
+                # 生成本地文件路径
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"video_{timestamp}.mp4"
+                videos_dir = self.project_root / "data" / "videos" / "temp"
+                os.makedirs(videos_dir, exist_ok=True)
+                local_video_path = str(videos_dir / filename)
+                
+                logger.info(f"开始下载视频: {video_url}")
+                logger.info(f"保存到: {local_video_path}")
+                
+                # 使用 httpx 下载视频
+                async with httpx.AsyncClient() as client:
+                    async with client.stream("GET", video_url) as response:
+                        response.raise_for_status()
+                        
+                        # 打开本地文件
+                        with open(local_video_path, "wb") as f:
+                            # 分块下载
+                            total_size = 0
+                            async for chunk in response.aiter_bytes():
+                                f.write(chunk)
+                                total_size += len(chunk)
+                                # 更新下载进度
+                                task_info['download_progress'] = total_size
+                                await self._update_task_info(task_id, task_info)
+                
+                logger.info(f"视频下载完成: {local_video_path}")
+                
+            except Exception as e:
+                logger.error(f"下载视频失败: {str(e)}")
+                if os.path.exists(local_video_path):
+                    os.remove(local_video_path)
+                raise
             
             # 打开视频
             cap = cv2.VideoCapture(local_video_path)
@@ -1251,24 +1157,22 @@ class YOLODetector:
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             frame_interval = 3  # 每3帧检测一次
             
-            # 更新任务信息中的总帧数和跟踪状态
-            if task_id in self.tasks:
-                self.tasks[task_id].update({
+            # 更新任务信息
+            task_info.update({
+                'video_info': {
+                    'fps': fps,
+                    'width': frame_width,
+                    'height': frame_height,
                     'total_frames': total_frames,
-                    'processed_frames': 0,
-                    'tracking_enabled': enable_tracking,
-                    'tracking_stats': {
-                        'total_tracks': 0,
-                        'active_tracks': 0,
-                        'avg_track_length': 0.0,
-                        'tracker_type': tracking_config.get('tracker_type', 'sort') if enable_tracking else None,
-                        'tracking_fps': 0.0
-                    } if enable_tracking else None
-                })
+                    'frame_interval': frame_interval
+                },
+                'progress': 0,
+                'processed_frames': 0
+            })
+            await self._update_task_info(task_id, task_info)
             
-            logger.info(f"视频信息 - FPS: {fps}, 尺寸: {frame_width}x{frame_height}, 总帧数: {total_frames}, 处理间隔: {frame_interval}（每{frame_interval}帧检测一次）")
-            logger.info(f"目标跟踪: {'启用' if enable_tracking else '禁用'}")
-
+            logger.info(f"视频信息 - FPS: {fps}, 尺寸: {frame_width}x{frame_height}, 总帧数: {total_frames}")
+            
             # 如果需要保存结果，创建视频写入器
             saved_path = None
             relative_saved_path = None
@@ -1285,9 +1189,8 @@ class YOLODetector:
                 # 完整的保存路径
                 saved_path = str(date_dir / filename)
                 relative_saved_path = str(Path(saved_path).relative_to(self.project_root))
-                logger.info(f"视频将保存到: {saved_path}")
                 
-                # 创建视频写入器，使用 H.264 编码
+                # 创建视频写入器
                 if os.name == 'nt':  # Windows
                     fourcc = cv2.VideoWriter_fourcc(*'H264')
                 else:  # macOS/Linux
@@ -1302,7 +1205,6 @@ class YOLODetector:
                 
                 if not video_writer.isOpened():
                     logger.error("无法创建视频写入器，尝试使用其他编码格式")
-                    # 尝试其他编码格式
                     video_writer.release()
                     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                     video_writer = cv2.VideoWriter(
@@ -1315,63 +1217,30 @@ class YOLODetector:
             frame_count = 0
             processed_count = 0
             last_progress_time = time.time()
-            last_detections = None  # 存储上一次的检测结果
-            frames_buffer = []  # 用于存储检测间隔内的所有帧
+            last_detections = None
+            frames_buffer = []
             tracking_start_time = time.time()
             total_tracking_time = 0
             
+            # 检查任务是否应该停止
+            async def should_stop():
+                task_info = await self._get_task_info(task_id)
+                return task_info.get('status') == TaskStatus.STOPPING or task_info.get('status') == TaskStatus.CANCELLED
+            
             while True:
+                # 检查是否需要停止
+                if await should_stop():
+                    logger.info(f"任务 {task_id} 收到停止信号")
+                    break
+                
                 ret, frame = cap.read()
                 if not ret:
                     break
                 
                 frame_count += 1
-                frames_buffer.append(frame.copy())  # 将当前帧添加到缓冲区
+                frames_buffer.append(frame.copy())
                 
-                # 检查是否需要停止任务
-                if self.stop_flags.get(task_id, False):
-                    logger.info(f"任务 {task_id} 收到停止信号，开始处理剩余帧...")
-                    # 如果需要保存结果，使用最后一次的检测结果处理剩余的所有帧
-                    if save_result and video_writer is not None:
-                        # 处理缓冲区中的帧
-                        if last_detections is not None:
-                            for buffered_frame in frames_buffer:
-                                result_frame = await self._encode_result_image(
-                                    buffered_frame, 
-                                    last_detections,
-                                    return_image=True,
-                                    draw_tracks=enable_tracking and tracking_config.get('visualization', {}).get('show_tracks', True),
-                                    draw_track_ids=enable_tracking and tracking_config.get('visualization', {}).get('show_track_ids', True)
-                                )
-                                if result_frame is not None:
-                                    video_writer.write(result_frame)
-                        
-                        # 继续读取剩余的帧
-                        while True:
-                            ret, remaining_frame = cap.read()
-                            if not ret:
-                                break
-                            frame_count += 1
-                            # 使用最后一次的检测结果
-                            if last_detections is not None:
-                                result_frame = await self._encode_result_image(
-                                    remaining_frame,
-                                    last_detections,
-                                    return_image=True,
-                                    draw_tracks=enable_tracking and tracking_config.get('visualization', {}).get('show_tracks', True),
-                                    draw_track_ids=enable_tracking and tracking_config.get('visualization', {}).get('show_track_ids', True)
-                                )
-                                if result_frame is not None:
-                                    video_writer.write(result_frame)
-                            else:
-                                video_writer.write(remaining_frame)
-                            # 更新进度
-                            if task_id in self.tasks:
-                                self.tasks[task_id]['processed_frames'] = frame_count
-                                self.tasks[task_id]['progress'] = round(frame_count / total_frames * 100, 2)
-                    break
-                
-                # 控制处理帧率
+                # 按间隔处理帧
                 if frame_count % frame_interval == 0:
                     processed_count += 1
                     current_time = time.time()
@@ -1387,66 +1256,77 @@ class YOLODetector:
                             tracking_time = time.time() - tracking_start
                             total_tracking_time += tracking_time
                             
-                            # 更新检测结果，添加跟踪信息
+                            # 更新检测结果
                             for det, track in zip(detections, tracked_objects):
                                 det.update(track.to_dict())
                             
                             # 更新跟踪统计信息
-                            if task_id in self.tasks and self.tasks[task_id].get('tracking_stats'):
-                                stats = self.tasks[task_id]['tracking_stats']
-                                stats.update({
-                                    'total_tracks': self.tracker.next_track_id - 1,
-                                    'active_tracks': len([t for t in tracked_objects if t.time_since_update == 0]),
-                                    'avg_track_length': sum(t.age for t in tracked_objects) / len(tracked_objects) if tracked_objects else 0,
-                                    'tracking_fps': processed_count / total_tracking_time if total_tracking_time > 0 else 0
-                                })
+                            tracking_stats = {
+                                'total_tracks': self.tracker.next_track_id - 1,
+                                'active_tracks': len([t for t in tracked_objects if t.time_since_update == 0]),
+                                'avg_track_length': sum(t.age for t in tracked_objects) / len(tracked_objects) if tracked_objects else 0,
+                                'tracking_fps': processed_count / total_tracking_time if total_tracking_time > 0 else 0
+                            }
+                            task_info['tracking_stats'] = tracking_stats
                         
                         last_detections = detections
                         
-                        # 更新处理进度
-                        if task_id in self.tasks:
-                            self.tasks[task_id]['processed_frames'] = frame_count
-                            self.tasks[task_id]['progress'] = round(frame_count / total_frames * 100, 2)
+                        # 更新进度
+                        progress = (frame_count / total_frames) * 100
+                        task_info.update({
+                            'progress': round(progress, 2),
+                            'processed_frames': frame_count,
+                            'total_frames': total_frames,
+                            'current_detections': detections,
+                            'last_update_time': datetime.now().isoformat(),
+                            'video_info': {
+                                'total_frames': total_frames,
+                                'fps': cap.get(cv2.CAP_PROP_FPS),
+                                'width': int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                                'height': int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                            }
+                        })
+                        await self._update_task_info(task_id, task_info)
                         
                         # 每秒最多更新一次进度日志
                         if current_time - last_progress_time >= 1.0:
-                            progress = (frame_count / total_frames) * 100
                             logger.info(f"处理进度: {progress:.1f}% ({frame_count}/{total_frames})")
                             last_progress_time = current_time
                         
                         # 发送回调
-                        if enable_callback and callback_urls:
-                            await self._send_callbacks(callback_urls, {
+                        if enable_callback and callback_urls and detections:
+                            callback_data = {
                                 "task_id": task_id,
                                 "task_name": task_name,
                                 "frame_index": frame_count,
                                 "total_frames": total_frames,
                                 "progress": progress,
-                                "detections": last_detections,
+                                "detections": detections,
                                 "tracking_enabled": enable_tracking,
-                                "tracking_stats": self.tasks[task_id].get('tracking_stats') if enable_tracking else None,
-                                "timestamp": time.time()
-                            })
+                                "tracking_stats": task_info.get('tracking_stats'),
+                                "timestamp": current_time
+                            }
+                            # 将回调数据缓存到Redis
+                            await self.redis.hset_dict(
+                                f"task:{task_id}:callbacks",
+                                str(int(current_time * 1000)),
+                                callback_data
+                            )
+                            # 发送回调
+                            await self._send_callbacks(callback_urls, callback_data)
                         
-                        # 如果需要保存结果，处理缓冲区中的所有帧
-                        if save_result and video_writer is not None and last_detections is not None:
+                        # 处理结果帧
+                        if save_result and video_writer is not None:
                             for buffered_frame in frames_buffer:
-                                # 获取可视化配置
-                                vis_config = tracking_config.get('visualization', {}) if enable_tracking and tracking_config else {}
-                                show_tracks = vis_config.get('show_tracks', True)
-                                show_track_ids = vis_config.get('show_track_ids', True)
-                                
                                 result_frame = await self._encode_result_image(
-                                    buffered_frame, 
+                                    buffered_frame,
                                     last_detections,
                                     return_image=True,
-                                    draw_tracks=enable_tracking and show_tracks,
-                                    draw_track_ids=enable_tracking and show_track_ids
+                                    draw_tracks=enable_tracking and tracking_config.get('visualization', {}).get('show_tracks', True),
+                                    draw_track_ids=enable_tracking and tracking_config.get('visualization', {}).get('show_track_ids', True)
                                 )
                                 if result_frame is not None:
                                     video_writer.write(result_frame)
-                            
-                            # 清空缓冲区
                             frames_buffer = []
                             
                     except Exception as e:
@@ -1457,7 +1337,7 @@ class YOLODetector:
                 if frame_count % 5 == 0:
                     await asyncio.sleep(0.01)
             
-            # 处理缓冲区中剩余的帧
+            # 处理剩余帧
             if save_result and video_writer is not None and frames_buffer:
                 for buffered_frame in frames_buffer:
                     if last_detections is not None:
@@ -1470,64 +1350,41 @@ class YOLODetector:
                         )
                         if result_frame is not None:
                             video_writer.write(result_frame)
-                    else:
-                        # 如果没有检测结果，直接写入原始帧
-                        video_writer.write(buffered_frame)
             
-            # 计算分析耗时
+            # 更新最终状态
             end_time = time.time()
             analysis_duration = end_time - start_time
             
-            # 更新任务状态
-            status = 'completed' if not self.stop_flags.get(task_id, False) else 'stopped'
-            if task_id in self.tasks:
-                self.tasks[task_id].update({
-                    'status': status,
-                    'saved_path': relative_saved_path if save_result else None,
-                    'end_time': end_time,
-                    'analysis_duration': analysis_duration,
-                    'total_frames': total_frames,
-                    'processed_frames': frame_count,
-                    'progress': round(frame_count / total_frames * 100, 2)
-                })
-                
-                # 如果启用了跟踪，更新最终的跟踪统计信息
-                if enable_tracking and self.tracker:
-                    self.tasks[task_id]['tracking_stats'].update({
-                        'total_tracks': self.tracker.next_track_id - 1,
-                        'tracking_fps': processed_count / total_tracking_time if total_tracking_time > 0 else 0
-                    })
+            final_status = TaskStatus.COMPLETED
+            if await should_stop():
+                final_status = TaskStatus.CANCELLED
+            
+            task_info.update({
+                'status': final_status,
+                'end_time': datetime.now().isoformat(),
+                'analysis_duration': analysis_duration,
+                'saved_path': relative_saved_path if save_result else None,
+                'final_progress': 100 if final_status == TaskStatus.COMPLETED else round((frame_count / total_frames) * 100, 2)
+            })
+            
+            if final_status == TaskStatus.COMPLETED:
+                await self._save_task_result(task_id, task_info)
+            else:
+                await self._update_task_info(task_id, task_info)
             
             logger.info(f"视频分析完成: {task_id}")
             logger.info(f"- 总帧数: {total_frames}")
             logger.info(f"- 处理帧数: {frame_count}")
             logger.info(f"- 分析耗时: {analysis_duration:.2f}秒")
             if enable_tracking:
-                logger.info(f"- 跟踪目标数: {self.tracker.next_track_id - 1}")
-                logger.info(f"- 跟踪处理帧率: {processed_count / total_tracking_time if total_tracking_time > 0 else 0:.2f} FPS")
+                logger.info(f"- 跟踪目标数: {task_info.get('tracking_stats', {}).get('total_tracks', 0)}")
+                logger.info(f"- 跟踪处理帧率: {task_info.get('tracking_stats', {}).get('tracking_fps', 0):.2f} FPS")
             
-            return self.tasks[task_id]
+            return task_info
             
         except Exception as e:
             logger.error(f"视频分析失败: {str(e)}", exc_info=True)
-            
-            # 更新任务状态
-            if task_id in self.tasks:
-                self.tasks[task_id].update({
-                    'status': 'failed',
-                    'end_time': time.time(),
-                    'analysis_duration': time.time() - start_time
-                })
-            
-            # 发送错误回调
-            if enable_callback and callback_urls:
-                await self._send_callbacks(callback_urls, {
-                    "task_id": task_id,
-                    "task_name": task_name,
-                    "status": "failed",
-                    "error": str(e)
-                })
-            
+            await self._fail_task(task_id, str(e))
             raise
             
         finally:
@@ -1544,3 +1401,81 @@ class YOLODetector:
             
             # 重置跟踪器
             self.tracker = None
+
+    async def get_video_task_status(self, task_id: str) -> Optional[Dict]:
+        """获取视频分析任务状态
+        
+        Args:
+            task_id: 任务ID
+            
+        Returns:
+            Optional[Dict]: 任务状态信息，包含进度、检测结果等
+        """
+        try:
+            # 从Redis获取任务信息
+            task_info = await self._get_task_info(task_id)
+            if not task_info:
+                logger.warning(f"任务不存在: {task_id}")
+                return None
+                
+            # 获取回调数据
+            callback_data = {}
+            if task_info.get('enable_callback'):
+                callback_key = f"task:{task_id}:callbacks"
+                callback_data = await self.redis.hgetall(callback_key)
+            
+            # 构造完整的状态信息
+            status_info = {
+                'task_id': task_id,
+                'task_name': task_info.get('task_name'),
+                'status': task_info.get('status'),
+                'progress': task_info.get('progress', 0),
+                'processed_frames': task_info.get('processed_frames', 0),
+                'total_frames': task_info.get('video_info', {}).get('total_frames', 0),
+                'start_time': task_info.get('start_time'),
+                'end_time': task_info.get('end_time'),
+                'analysis_duration': task_info.get('analysis_duration'),
+                'saved_path': task_info.get('saved_path'),
+                'error_message': task_info.get('error'),
+                'current_detections': task_info.get('current_detections', []),
+                'tracking_stats': task_info.get('tracking_stats'),
+                'callback_data': callback_data
+            }
+            
+            return status_info
+            
+        except Exception as e:
+            logger.error(f"获取任务状态失败: {str(e)}", exc_info=True)
+            return None
+
+    async def stop_stream_analysis(self, task_id: str):
+        """停止视频流分析"""
+        try:
+            # 更新任务状态为停止中
+            await self._update_task_info(task_id, {'status': TaskStatus.STOPPING})
+            
+            # 等待任务实际停止
+            max_wait = 30  # 最大等待30秒
+            while max_wait > 0:
+                task_info = await self._get_task_info(task_id)
+                if not task_info or task_info.get('status') in [TaskStatus.STOPPED, TaskStatus.FAILED, TaskStatus.COMPLETED]:
+                    break
+                await asyncio.sleep(1)
+                max_wait -= 1
+            
+            # 如果任务仍在运行，强制更新状态为已停止
+            if max_wait == 0:
+                await self._update_task_info(task_id, {
+                    'status': TaskStatus.STOPPED,
+                    'error': '任务停止超时'
+                })
+            
+            logger.info(f"任务 {task_id} 已停止")
+            
+        except Exception as e:
+            logger.error(f"停止任务 {task_id} 失败: {str(e)}")
+            # 确保任务状态被更新为已停止
+            await self._update_task_info(task_id, {
+                'status': TaskStatus.STOPPED,
+                'error': f'停止失败: {str(e)}'
+            })

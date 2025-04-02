@@ -280,3 +280,11 @@ class StreamAnalysisRequest(BaseModel):
             ]
         }
     }
+
+class TaskStatusRequest(BaseModel):
+    """任务状态请求"""
+    task_id: str = Field(
+        ...,
+        description="任务ID",
+        example="vid_20240402_123456_abcd1234"
+    )
