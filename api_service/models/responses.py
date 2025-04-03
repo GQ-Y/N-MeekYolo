@@ -280,3 +280,49 @@ class ResponseModel(BaseModel):
     code: int = 200
     message: str = "success"
     data: Optional[Dict[str, Any]] = None
+
+class SubTaskResponse(BaseModel):
+    """子任务响应模型"""
+    id: int
+    task_id: int
+    stream_id: int
+    model_id: int
+    status: str
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+    config: Optional[Dict[str, Any]] = None
+    enable_callback: bool = False
+    callback_url: Optional[str] = None
+    roi_type: int = 0
+    analysis_type: str = "detection"
+    node_id: Optional[int] = None
+    analysis_task_id: Optional[str] = None
+    
+    # 关联信息
+    stream_name: Optional[str] = None
+    model_name: Optional[str] = None
+    node_info: Optional[Dict[str, Any]] = None
+    
+    class Config:
+        orm_mode = True
+
+class TaskDetailResponse(BaseModel):
+    """任务详情响应模型"""
+    id: int
+    name: str
+    status: str
+    error_message: Optional[str] = None
+    save_result: bool = False
+    created_at: datetime
+    updated_at: datetime
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    active_subtasks: int
+    total_subtasks: int
+    
+    # 子任务列表
+    sub_tasks: List[SubTaskResponse] = []
+    
+    class Config:
+        orm_mode = True

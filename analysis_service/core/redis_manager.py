@@ -45,23 +45,63 @@ class RedisManager:
     async def get_value(self, key: str, as_json: bool = False) -> Any:
         """获取键值"""
         try:
+            logger.info(f"Redis.get_value - 获取键: {key}")
             value = await self.redis.get(key)
-            if value and as_json:
-                return json.loads(value)
-            return value
+            
+            if value:
+                logger.info(f"Redis.get_value - 成功获取键 {key} 的值")
+                if as_json:
+                    try:
+                        parsed_value = json.loads(value)
+                        return parsed_value
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Redis.get_value - JSON解析失败 - {key}: {str(e)}")
+                        return None
+                return value
+            else:
+                logger.warning(f"Redis.get_value - 键 {key} 不存在")
+                return None
+                
         except Exception as e:
-            logger.error(f"获取Redis键值失败 - {key}: {str(e)}")
+            logger.error(f"Redis.get_value - 获取键值失败 - {key}: {str(e)}")
             return None
             
     async def set_value(self, key: str, value: Any, ex: Optional[int] = None) -> bool:
         """设置键值"""
         try:
+            logger.info(f"Redis.set_value - 设置键: {key}")
+            
             if isinstance(value, (dict, list)):
-                value = json.dumps(value)
-            await self.redis.set(key, value, ex=ex)
-            return True
+                try:
+                    value = json.dumps(value)
+                    logger.info(f"Redis.set_value - 字典/列表转为JSON字符串: {key}")
+                except Exception as e:
+                    logger.error(f"Redis.set_value - JSON序列化失败 - {key}: {str(e)}")
+                    raise
+            
+            result = await self.redis.set(key, value, ex=ex)
+            
+            if result:
+                logger.info(f"Redis.set_value - 成功设置键 {key} 的值")
+                if ex:
+                    logger.info(f"Redis.set_value - 键 {key} 设置过期时间: {ex}秒")
+            else:
+                logger.warning(f"Redis.set_value - 设置键 {key} 返回结果: {result}")
+                
+            # 验证键是否成功设置
+            try:
+                exists = await self.exists_key(key)
+                if exists:
+                    logger.info(f"Redis.set_value - 验证键 {key} 已成功设置")
+                else:
+                    logger.warning(f"Redis.set_value - 验证失败，键 {key} 不存在")
+            except Exception as e:
+                logger.error(f"Redis.set_value - 验证键设置失败 - {key}: {str(e)}")
+            
+            return bool(result)
+            
         except Exception as e:
-            logger.error(f"设置Redis键值失败 - {key}: {str(e)}")
+            logger.error(f"Redis.set_value - 设置键值失败 - {key}: {str(e)}")
             return False
             
     async def delete_key(self, key: str) -> bool:

@@ -30,6 +30,7 @@ from core.exceptions import (
     ProcessingException,
     ResourceNotFoundException
 )
+import uuid
 
 logger = setup_logger(__name__)
 
@@ -792,51 +793,109 @@ class YOLODetector:
         model_code: str,
         stream_url: str,
         callback_urls: Optional[str] = None,
+        system_callback_url: Optional[str] = None,  # 新增：系统回调URL
         config: Optional[Dict[str, Any]] = None,
         task_name: Optional[str] = None,
         enable_callback: bool = False,
-        save_result: bool = False
+        save_result: bool = False,
+        analysis_type: str = "detection"
     ) -> Dict[str, Any]:
-        """启动流分析任务"""
-        try:
-            # 加载模型
-            await self.load_model(model_code)
+        """启动流分析任务
+        
+        Args:
+            task_id: 任务ID
+            model_code: 模型代码
+            stream_url: 流URL
+            callback_urls: 回调URL，多个用逗号分隔
+            system_callback_url: 系统回调URL（必须执行）
+            config: 配置参数
+            task_name: 任务名称
+            enable_callback: 是否启用用户回调
+            save_result: 是否保存结果
+            analysis_type: 分析类型，支持detection、tracking、counting等
             
-            # 创建任务信息
+        Returns:
+            Dict[str, Any]: 任务信息
+        """
+        try:
+            logger.info(f"YOLODetector.start_stream_analysis - 开始启动任务: task_id={task_id}")
+            logger.info(f"YOLODetector.start_stream_analysis - 参数: model_code={model_code}, stream_url={stream_url}")
+            logger.info(f"YOLODetector.start_stream_analysis - 回调: system={system_callback_url}, user={callback_urls}, enabled={enable_callback}")
+            logger.info(f"YOLODetector.start_stream_analysis - 配置: task_name={task_name}, save_result={save_result}, analysis_type={analysis_type}")
+            
+            if config:
+                logger.info(f"YOLODetector.start_stream_analysis - 任务配置: {config}")
+            
+            # 生成任务ID
+            if not task_id:
+                task_id = f"str_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+                logger.info(f"YOLODetector.start_stream_analysis - 生成任务ID: {task_id}")
+            
+            # 检查任务是否已存在
+            existing_task = await self._get_task_info(task_id)
+            if existing_task:
+                # 如果任务已存在但状态是完成或失败，则重置任务
+                if existing_task.get("status") in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.ERROR]:
+                    logger.info(f"YOLODetector.start_stream_analysis - 任务 {task_id} 已存在但已完成或失败，重置任务")
+                # 否则返回已存在的任务信息
+                else:
+                    logger.info(f"YOLODetector.start_stream_analysis - 任务 {task_id} 已存在，返回已存在的任务信息: {existing_task}")
+                    return existing_task
+            else:
+                logger.info(f"YOLODetector.start_stream_analysis - 任务 {task_id} 不存在，将创建新任务")
+            
+            # 创建任务并保存信息
+            start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             task_info = {
                 "task_id": task_id,
-                "task_name": task_name or task_id,
                 "model_code": model_code,
                 "stream_url": stream_url,
                 "callback_urls": callback_urls,
+                "system_callback_url": system_callback_url,  # 保存系统回调URL
+                "config": config,
+                "task_name": task_name,
                 "enable_callback": enable_callback,
                 "save_result": save_result,
-                "config": config or {},
                 "status": TaskStatus.PROCESSING,
-                "start_time": datetime.now().isoformat(),
+                "start_time": start_time,
                 "progress": 0,
-                "processed_frames": 0,
-                "total_frames": 0,
-                "current_detections": [],
-                "last_update_time": datetime.now().isoformat(),
-                "stream_info": {}
+                "analysis_type": analysis_type,
+                "frame_count": 0,
+                "detection_count": 0,
+                "frame_width": 0,
+                "frame_height": 0
             }
             
             # 保存任务信息
-            task_key = f"task:{task_id}"
-            await self.redis.set_value(task_key, task_info)
+            logger.info(f"YOLODetector.start_stream_analysis - 保存任务信息到Redis")
+            try:
+                await self._update_task_info(task_id, task_info)
+                logger.info(f"YOLODetector.start_stream_analysis - 任务信息保存成功")
+            except Exception as e:
+                logger.error(f"YOLODetector.start_stream_analysis - 保存任务信息失败: {str(e)}")
+                raise
             
-            # 添加到任务队列
-            await self.task_queue.add_task(task_info, task_id=task_id)
-            
-            # 启动流分析任务
+            # 启动处理任务
+            logger.info(f"YOLODetector.start_stream_analysis - 创建异步任务处理流")
             asyncio.create_task(self._process_stream_analysis(task_id))
+            
+            logger.info(f"YOLODetector.start_stream_analysis - 流分析任务启动成功: task_id={task_id}")
+            
+            # 检查任务信息是否正确保存
+            try:
+                saved_task = await self._get_task_info(task_id)
+                if saved_task:
+                    logger.info(f"YOLODetector.start_stream_analysis - 验证任务已保存: {saved_task}")
+                else:
+                    logger.warning(f"YOLODetector.start_stream_analysis - 警告：验证时未找到任务 {task_id}")
+            except Exception as e:
+                logger.error(f"YOLODetector.start_stream_analysis - 验证任务保存时出错: {str(e)}")
             
             return task_info
             
         except Exception as e:
-            logger.error(f"启动流分析任务失败: {str(e)}", exc_info=True)
-            raise ProcessingException(f"启动流分析任务失败: {str(e)}")
+            logger.error(f"YOLODetector.start_stream_analysis - 启动流分析任务失败: {str(e)}", exc_info=True)
+            raise
 
     async def _process_stream_analysis(
         self,
@@ -847,115 +906,407 @@ class YOLODetector:
             # 获取任务信息
             task_info = await self._get_task_info(task_id)
             if not task_info:
-                raise ProcessingException(f"任务 {task_id} 不存在")
+                logger.error(f"任务 {task_id} 不存在")
+                return
             
-            # 获取任务配置
-            config = task_info.get("config", {})
-            if isinstance(config, str):
-                config = {}  # 如果是字符串，转换为空字典
-            elif hasattr(config, 'dict'):
-                config = config.dict()  # 如果是 Pydantic 模型，转换为字典
-            elif not isinstance(config, dict):
-                config = {}  # 如果不是字典类型，转换为空字典
-                
+            # 获取任务参数
+            model_code = task_info["model_code"]
             stream_url = task_info["stream_url"]
+            callback_urls = task_info.get("callback_urls")
+            system_callback_url = task_info.get("system_callback_url")
+            enable_callback = task_info.get("enable_callback", False)
+            save_result = task_info.get("save_result", False)
+            config = task_info.get("config", {})
+            task_name = task_info.get("task_name")
+            analysis_type = task_info.get("analysis_type", "detection")
             
-            # 打开视频流
+            # 确保配置是字典
+            if config is None:
+                config = {}
+                
+            # 设置默认参数
+            config.setdefault("confidence", self.default_confidence)
+            config.setdefault("iou", self.default_iou)
+            config.setdefault("max_det", self.default_max_det)
+            
+            # 加载模型
+            await self.load_model(model_code)
+            
+            # 打开流
+            logger.info(f"开始处理流 {stream_url}")
             cap = cv2.VideoCapture(stream_url)
             if not cap.isOpened():
-                raise ProcessingException(f"无法打开流: {stream_url}")
+                logger.error(f"无法打开流: {stream_url}")
+                task_info["status"] = TaskStatus.FAILED
+                task_info["error_message"] = f"无法打开流: {stream_url}"
+                await self._update_task_info(task_id, task_info)
+                return
             
             # 获取流信息
-            fps = int(cap.get(cv2.CAP_PROP_FPS))
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = int(cap.get(cv2.CAP_PROP_FPS)) or 25  # 默认为25fps
             
-            # 更新流信息
-            task_info["stream_info"] = {
-                "fps": fps,
-                "width": width,
-                "height": height
-            }
+            # 更新任务信息
+            task_info["frame_width"] = width
+            task_info["frame_height"] = height
+            task_info["fps"] = fps
             await self._update_task_info(task_id, task_info)
             
-            # 处理每一帧
+            # 设置帧处理计数器
             frame_count = 0
-            while True:
-                # 检查任务是否应该停止
-                if await self._should_stop(task_id):
-                    logger.info(f"任务 {task_id} 已停止")
-                    break
-                
-                # 读取帧
-                ret, frame = cap.read()
-                if not ret:
-                    logger.warning(f"任务 {task_id} 读取帧失败")
-                    break
-                
-                # 增加帧计数
-                frame_count += 1
-                
-                # 处理帧
-                results = await self._process_frame(
-                    frame=frame,
-                    model=self.model,
-                    config=config
-                )
-                
-                # 更新任务信息
-                task_info.update({
-                    "processed_frames": frame_count,
-                    "current_detections": results,
-                    "last_update_time": datetime.now().isoformat()
-                })
-                await self._update_task_info(task_id, task_info)
-                
-                # 回调通知
-                if task_info.get("enable_callback") and task_info.get("callback_urls"):
-                    await self._send_callback(task_id, results)
+            last_process_time = time.time()
+            process_interval = 1.0  # 默认处理间隔，单位秒
+            
+            # 设置回调参数
+            callback_interval = 10  # 回调间隔，单位帧
+            last_callback_frame = 0
+            
+            # 检测结果缓存
+            last_detections = []
+            
+            # 根据分析类型初始化相关组件
+            if analysis_type == "tracking":
+                tracker_type = config.get("tracker_type", "sort")
+                self.tracker = create_tracker(tracker_type)
+                logger.info(f"启用目标跟踪，跟踪器类型: {tracker_type}")
+            
+            # 主循环
+            while not await self._should_stop(task_id):
+                try:
+                    # 读取一帧
+                    ret, frame = cap.read()
+                    if not ret:
+                        # 对于大多数流，读取失败通常意味着流结束或出现错误
+                        # 重新打开流继续处理
+                        logger.warning(f"读取帧失败，尝试重新打开流: {stream_url}")
+                        cap.release()
+                        await asyncio.sleep(2)  # 等待一下再重试
+                        cap = cv2.VideoCapture(stream_url)
+                        if not cap.isOpened():
+                            logger.error(f"重新打开流失败: {stream_url}")
+                            break
+                        continue
                     
-                # 保存结果
-                if task_info.get("save_result"):
-                    await self._save_result(task_id, frame, results)
+                    # 更新帧计数
+                    frame_count += 1
+                    task_info["frame_count"] = frame_count
                     
-            # 关闭视频流
+                    # 控制处理频率
+                    current_time = time.time()
+                    if current_time - last_process_time < process_interval and frame_count > 1:
+                        continue
+                    
+                    last_process_time = current_time
+                    
+                    # 执行检测
+                    detections = await self._process_frame(frame, self.model, config)
+                    
+                    # 处理不同类型的ROI
+                    roi_type = config.get("roi_type", 0)
+                    roi = config.get("roi")
+                    
+                    # 如果配置了ROI，过滤检测结果
+                    if roi and roi_type > 0:
+                        # 矩形ROI
+                        if roi_type == 1 and all(k in roi for k in ["x1", "y1", "x2", "y2"]):
+                            x1, y1, x2, y2 = roi["x1"], roi["y1"], roi["x2"], roi["y2"]
+                            # 转换为像素坐标
+                            x1_px, y1_px = int(x1 * width), int(y1 * height)
+                            x2_px, y2_px = int(x2 * width), int(y2 * height)
+                            # 过滤检测结果
+                            filtered_detections = []
+                            for det in detections:
+                                bbox = det["bbox"]
+                                # 计算中心点
+                                cx = bbox["x"] + bbox["width"] / 2
+                                cy = bbox["y"] + bbox["height"] / 2
+                                # 检查是否在ROI内
+                                if x1_px <= cx <= x2_px and y1_px <= cy <= y2_px:
+                                    filtered_detections.append(det)
+                            detections = filtered_detections
+                            
+                        # 多边形ROI
+                        elif roi_type == 2 and "points" in roi:
+                            # 转换为像素坐标
+                            points = [(int(p[0] * width), int(p[1] * height)) for p in roi["points"]]
+                            points_array = np.array(points, np.int32)
+                            points_array = points_array.reshape((-1, 1, 2))
+                            
+                            # 过滤检测结果
+                            filtered_detections = []
+                            for det in detections:
+                                bbox = det["bbox"]
+                                # 计算中心点
+                                cx = int(bbox["x"] + bbox["width"] / 2)
+                                cy = int(bbox["y"] + bbox["height"] / 2)
+                                # 检查点是否在多边形内
+                                result = cv2.pointPolygonTest(points_array, (cx, cy), False)
+                                if result >= 0:  # 点在多边形内或在边界上
+                                    filtered_detections.append(det)
+                            detections = filtered_detections
+                            
+                        # 线段ROI
+                        elif roi_type == 3 and "points" in roi and len(roi["points"]) == 2:
+                            # 转换为像素坐标
+                            points = [(int(p[0] * width), int(p[1] * height)) for p in roi["points"]]
+                            line_start, line_end = points
+                            line_vec = np.array([line_end[0] - line_start[0], line_end[1] - line_start[1]])
+                            line_length = np.linalg.norm(line_vec)
+                            
+                            # 过滤检测结果 - 对于线段，检测目标是否与线段相交
+                            filtered_detections = []
+                            for det in detections:
+                                bbox = det["bbox"]
+                                # 定义边界框的四个角点
+                                box_left = bbox["x"]
+                                box_top = bbox["y"]
+                                box_right = box_left + bbox["width"]
+                                box_bottom = box_top + bbox["height"]
+                                
+                                # 检查线段是否与边界框相交
+                                # 使用简化的相交检测：检查线段的两个端点是否在边界框的两侧
+                                intersects = False
+                                
+                                # 计算点到线段的距离
+                                def point_to_line_distance(point, line_start, line_end):
+                                    # 线段向量
+                                    line_vec = np.array([line_end[0] - line_start[0], line_end[1] - line_start[1]])
+                                    # 点到线段起点的向量
+                                    point_vec = np.array([point[0] - line_start[0], point[1] - line_start[1]])
+                                    # 计算点在线段上的投影长度
+                                    line_length = np.linalg.norm(line_vec)
+                                    projection = np.dot(point_vec, line_vec) / line_length
+                                    
+                                    # 如果投影在线段外，返回到端点的距离
+                                    if projection < 0:
+                                        return np.linalg.norm(point_vec)
+                                    elif projection > line_length:
+                                        return np.linalg.norm(np.array([point[0] - line_end[0], point[1] - line_end[1]]))
+                                    
+                                    # 如果投影在线段上，计算点到线的垂直距离
+                                    unit_line_vec = line_vec / line_length
+                                    # 垂直向量
+                                    perp_vec = np.array([-unit_line_vec[1], unit_line_vec[0]])
+                                    # 垂直距离
+                                    distance = abs(np.dot(point_vec, perp_vec))
+                                    return distance
+                                
+                                # 计算边界框中心到线段的距离
+                                center = (box_left + box_right) / 2, (box_top + box_bottom) / 2
+                                distance = point_to_line_distance(center, line_start, line_end)
+                                
+                                # 如果距离小于阈值，认为相交
+                                threshold = (bbox["width"] + bbox["height"]) / 4  # 使用边界框尺寸的平均值的一半作为阈值
+                                if distance < threshold:
+                                    filtered_detections.append(det)
+                                    
+                            detections = filtered_detections
+                    
+                    # 更新检测计数
+                    task_info["detection_count"] = len(detections)
+                    
+                    # 是否需要执行用户回调
+                    need_user_callback = enable_callback and callback_urls and (
+                        frame_count - last_callback_frame >= callback_interval or 
+                        frame_count == 1  # 第一帧始终回调
+                    )
+                    
+                    # 是否需要执行系统回调（始终需要，除非未指定系统回调URL）
+                    need_system_callback = system_callback_url is not None and (
+                        frame_count - last_callback_frame >= callback_interval or 
+                        frame_count == 1  # 第一帧始终回调
+                    )
+                    
+                    # 结果图片
+                    result_image = None
+                    
+                    # 保存结果或需要回调时，绘制结果
+                    if save_result or need_user_callback or need_system_callback:
+                        result_image = await self._encode_result_image(
+                            frame, 
+                            detections,
+                            return_image=True,
+                            draw_tracks=analysis_type == "tracking",
+                            draw_track_ids=analysis_type == "tracking"
+                        )
+                    
+                    # 保存结果图片
+                    saved_path = None
+                    if save_result and result_image is not None:
+                        saved_path = await self._save_result_image(result_image, detections, task_name or task_id)
+                    
+                    # 如果需要回调
+                    if need_user_callback or need_system_callback:
+                        last_callback_frame = frame_count
+                        base64_image = None
+                        
+                        # 转换图片为base64
+                        if result_image is not None:
+                            _, buffer = cv2.imencode('.jpg', result_image)
+                            base64_image = base64.b64encode(buffer).decode('utf-8')
+                        
+                        # 准备回调数据
+                        callback_data = CallbackData(
+                            camera_device_stream_url=stream_url,
+                            camera_device_name=task_name or task_id,
+                            camera_device_id=0,
+                            algorithm_name=model_code,
+                            algorithm_id=0,
+                            data_id=task_id,
+                            task_id=int(task_id.split('_')[-1], 16) if task_id.split('_')[-1].isalnum() else 0,
+                            camera_url=stream_url,
+                            camera_name=task_name or task_id,
+                            timestamp=int(time.time()),
+                            image_width=width,
+                            image_height=height,
+                            src_pic_data=base64_image,
+                            alarm_pic_data=base64_image,
+                            parameter=config,
+                            result_data={
+                                "detections": detections,
+                                "task_id": task_id,
+                                "frame_index": frame_count
+                            },
+                            extra_info=detections
+                        )
+                        
+                        # 执行系统回调
+                        system_callback_success = True
+                        if need_system_callback:
+                            try:
+                                logger.info(f"发送系统级回调到 {system_callback_url}")
+                                system_callback_success = await self._send_callback(system_callback_url, callback_data.to_dict())
+                                
+                                if not system_callback_success:
+                                    logger.error(f"系统级回调失败! URL: {system_callback_url}")
+                                    # 停止任务，因为系统回调是必须的
+                                    logger.error(f"系统级回调失败，停止任务 {task_id}")
+                                    task_info["status"] = TaskStatus.STOPPING
+                                    task_info["error_message"] = "系统级回调失败，任务停止"
+                                    await self._update_task_info(task_id, task_info)
+                                    break
+                            except Exception as e:
+                                logger.error(f"系统级回调异常: {str(e)}")
+                                # 停止任务，因为系统回调是必须的
+                                logger.error(f"系统级回调异常，停止任务 {task_id}")
+                                task_info["status"] = TaskStatus.STOPPING
+                                task_info["error_message"] = f"系统级回调异常: {str(e)}"
+                                await self._update_task_info(task_id, task_info)
+                                break
+                        
+                        # 执行用户回调（仅当系统回调成功时）
+                        if need_user_callback and system_callback_success:
+                            try:
+                                await self._send_callback(callback_urls, callback_data.to_dict())
+                            except Exception as e:
+                                logger.error(f"用户回调异常: {str(e)}")
+                                # 用户回调失败不影响任务继续执行
+                    
+                    # 缓存检测结果
+                    last_detections = detections
+                    
+                    # 更新任务信息
+                    task_info["last_detections"] = detections
+                    task_info["last_update_time"] = datetime.now().isoformat()
+                    await self._update_task_info(task_id, task_info)
+                    
+                except Exception as e:
+                    logger.error(f"处理帧时出错: {str(e)}", exc_info=True)
+                    continue
+            
+            # 任务完成
             cap.release()
+            logger.info(f"流分析任务 {task_id} 已停止")
             
             # 更新任务状态
             task_info["status"] = TaskStatus.COMPLETED
+            task_info["end_time"] = datetime.now().isoformat()
             await self._update_task_info(task_id, task_info)
-            await self.task_queue.update_task_status(task_id, TaskStatus.COMPLETED, task_info)
             
         except Exception as e:
-            logger.error(f"处理流分析任务失败: {str(e)}", exc_info=True)
+            logger.error(f"流分析任务 {task_id} 处理时出错: {str(e)}", exc_info=True)
+            
             # 更新任务状态为失败
-            task_info["status"] = TaskStatus.FAILED
-            task_info["error"] = str(e)
-            await self._update_task_info(task_id, task_info)
-            await self.task_queue.update_task_status(task_id, TaskStatus.FAILED, task_info)
-
-    async def stop_stream_analysis(self, task_id: str) -> Dict[str, Any]:
-        """停止流分析任务"""
-        try:
-            # 获取任务信息
             task_info = await self._get_task_info(task_id)
-            if not task_info:
-                raise ResourceNotFoundException(f"任务 {task_id} 不存在")
+            if task_info:
+                task_info["status"] = TaskStatus.FAILED
+                task_info["error_message"] = str(e)
+                task_info["end_time"] = datetime.now().isoformat()
+                await self._update_task_info(task_id, task_info)
+
+    async def stop_stream_analysis(self, task_id: str):
+        """停止视频流分析"""
+        try:
+            # 创建一个全局字典来跟踪强制停止的任务
+            if not hasattr(self, '_force_stop_tasks'):
+                self._force_stop_tasks = set()
+            
+            # 将任务ID添加到强制停止集合中
+            self._force_stop_tasks.add(task_id)
             
             # 更新任务状态为停止中
-            task_info["status"] = TaskStatus.STOPPING
-            await self._update_task_info(task_id, task_info)
-            await self.task_queue.update_task_status(task_id, TaskStatus.STOPPING, task_info)
+            await self._update_task_info(task_id, {'status': TaskStatus.STOPPING})
             
-            return task_info
+            # 使用事件循环的callater方法在短时间后尝试清理资源
+            asyncio.get_event_loop().call_later(3, lambda: asyncio.create_task(self._force_clean_task(task_id)))
+            
+            # 等待任务实际停止
+            max_wait = 10  # 最大等待10秒
+            while max_wait > 0:
+                task_info = await self._get_task_info(task_id)
+                if not task_info or task_info.get('status') in [TaskStatus.STOPPED, TaskStatus.FAILED, TaskStatus.COMPLETED]:
+                    break
+                await asyncio.sleep(1)
+                max_wait -= 1
+            
+            # 如果任务仍在运行，更强硬地停止任务
+            if max_wait == 0:
+                logger.warning(f"任务 {task_id} 停止超时，强制停止")
+                # 更新任务状态为已停止
+                await self._update_task_info(task_id, {
+                    'status': TaskStatus.STOPPED,
+                    'error_message': '任务强制停止',
+                    'end_time': datetime.now().isoformat()
+                })
+            
+            logger.info(f"任务 {task_id} 已停止")
             
         except Exception as e:
-            logger.error(f"停止流分析任务失败: {str(e)}", exc_info=True)
-            raise ProcessingException(f"停止流分析任务失败: {str(e)}")
+            logger.error(f"停止任务 {task_id} 失败: {str(e)}")
+            # 确保任务状态被更新为已停止
+            await self._update_task_info(task_id, {
+                'status': TaskStatus.STOPPED,
+                'error_message': f'停止失败: {str(e)}',
+                'end_time': datetime.now().isoformat()
+            })
+        finally:
+            # 从强制停止集合中移除任务ID
+            if hasattr(self, '_force_stop_tasks') and task_id in self._force_stop_tasks:
+                self._force_stop_tasks.remove(task_id)
+
+    async def _force_clean_task(self, task_id: str):
+        """强制清理任务资源"""
+        try:
+            logger.info(f"强制清理任务 {task_id} 资源")
+            # 这里可以添加关闭视频捕获、关闭网络连接等清理操作
+            # 更新任务状态为已停止
+            await self._update_task_info(task_id, {
+                'status': TaskStatus.STOPPED,
+                'error_message': '任务资源已强制清理',
+                'end_time': datetime.now().isoformat()
+            })
+        except Exception as e:
+            logger.error(f"强制清理任务 {task_id} 资源失败: {str(e)}")
 
     async def _should_stop(self, task_id: str) -> bool:
         """检查任务是否应该停止"""
         try:
+            # 首先检查强制停止列表
+            if hasattr(self, '_force_stop_tasks') and task_id in self._force_stop_tasks:
+                logger.info(f"任务 {task_id} 在强制停止列表中")
+                return True
+            
             # 获取任务信息
             task_info = await self._get_task_info(task_id)
             if not task_info:
@@ -963,7 +1314,7 @@ class YOLODetector:
             
             # 检查任务状态
             status = task_info.get("status")
-            return status in [TaskStatus.STOPPING, TaskStatus.CANCELLED]
+            return status in [TaskStatus.STOPPING, TaskStatus.CANCELLED, TaskStatus.STOPPED]
             
         except Exception as e:
             logger.error(f"检查任务状态失败: {str(e)}", exc_info=True)
@@ -1026,33 +1377,119 @@ class YOLODetector:
             raise
 
     async def _get_task_info(self, task_id: str) -> Optional[Dict]:
-        """从Redis获取任务信息"""
-        return await self.task_queue.get_task(task_id)
+        """从Redis获取任务信息
+        
+        Args:
+            task_id: 任务ID
+            
+        Returns:
+            Optional[Dict]: 任务信息或None
+        """
+        try:
+            # 步骤1: 尝试直接从Redis中获取任务信息
+            task_key = f"task:{task_id}"
+            logger.debug(f"尝试从Redis键 {task_key} 获取任务信息")
+            
+            task_info = await self.redis.get_value(task_key, as_json=True)
+            
+            # 如果找到了，直接返回
+            if task_info:
+                logger.debug(f"在Redis中找到任务信息: {task_id}")
+                return task_info
+                
+            # 步骤2: 如果直接获取失败，尝试从TaskQueue中获取
+            logger.debug(f"在Redis直接键中未找到任务，尝试从TaskQueue中获取: {task_id}")
+            task_info_from_queue = await self.task_queue.get_task(task_id)
+            
+            if task_info_from_queue:
+                logger.debug(f"在TaskQueue中找到任务信息: {task_id}")
+                
+                # 将任务信息同步回Redis直接键，便于将来查询
+                await self._update_task_info(task_id, task_info_from_queue)
+                
+                return task_info_from_queue
+                
+            # 步骤3: 如果都找不到，再尝试其他可能的ID格式（兼容不同命名方式）
+            if not task_id.startswith("task:"):
+                alt_task_id = f"task:{task_id}"
+                logger.debug(f"尝试使用替代任务ID格式: {alt_task_id}")
+                alt_task_info = await self.redis.get_value(alt_task_id, as_json=True)
+                
+                if alt_task_info:
+                    logger.debug(f"使用替代ID格式找到任务: {alt_task_id}")
+                    
+                    # 同步到标准格式
+                    await self._update_task_info(task_id, alt_task_info)
+                    
+                    return alt_task_info
+                    
+            # 任务未找到
+            logger.warning(f"任务 {task_id} 在所有存储位置均未找到")
+            return None
+            
+        except Exception as e:
+            logger.error(f"获取任务信息时出错: {str(e)}", exc_info=True)
+            return None
 
     async def _update_task_info(self, task_id: str, info: Dict[str, Any]):
-        """更新任务信息"""
+        """更新任务信息，同时更新到Redis和TaskQueue
+        
+        Args:
+            task_id: 任务ID
+            info: 要更新的任务信息
+        """
         try:
-            # 获取当前任务信息
+            logger.debug(f"更新任务信息: {task_id}")
+            
+            # 步骤1: 获取当前任务信息
             current_info = await self._get_task_info(task_id)
-            if not current_info:
-                logger.warning(f"任务 {task_id} 不存在，无法更新信息")
-                return
-
-            # 更新任务信息
-            current_info.update(info)
-
-            # 保存更新后的信息
+            
+            if current_info:
+                # 如果任务已存在，更新它
+                logger.debug(f"更新现有任务: {task_id}")
+                current_info.update(info)
+                update_data = current_info
+            else:
+                # 如果任务不存在，使用提供的信息创建它
+                logger.debug(f"创建新任务: {task_id}")
+                update_data = info
+                
+                # 确保基本字段存在
+                if "id" not in update_data and "task_id" not in update_data:
+                    update_data["id"] = task_id
+                    update_data["task_id"] = task_id
+                if "created_at" not in update_data:
+                    update_data["created_at"] = datetime.now().isoformat()
+            
+            # 步骤2: 直接更新Redis键
             task_key = f"task:{task_id}"
-            await self.redis.set_value(task_key, current_info)
-
-            # 如果包含状态更新，同时更新任务状态
+            await self.redis.set_value(task_key, update_data)
+            logger.debug(f"已更新Redis键: {task_key}")
+            
+            # 步骤3: 通过TaskQueue更新
+            # 确保任务有status字段
+            if "status" not in update_data:
+                update_data["status"] = TaskStatus.PROCESSING
+            
+            # 使用add_task更新任务队列中的任务
+            try:
+                await self.task_queue.add_task(update_data, priority=0, task_id=task_id)
+                logger.debug(f"已通过TaskQueue更新任务: {task_id}")
+            except Exception as e:
+                logger.warning(f"通过TaskQueue更新任务失败: {str(e)}")
+            
+            # 步骤4: 如果包含状态更新，调用专门的状态更新方法
             if 'status' in info:
-                await self.task_queue.update_task_status(task_id, info['status'], current_info)
-
-            logger.debug(f"任务 {task_id} 信息已更新: {info}")
+                try:
+                    await self.task_queue.update_task_status(task_id, info['status'], update_data)
+                    logger.debug(f"已更新任务状态: {task_id} -> {info['status']}")
+                except Exception as e:
+                    logger.warning(f"更新任务状态失败: {str(e)}")
+            
+            logger.debug(f"任务 {task_id} 信息已更新")
 
         except Exception as e:
-            logger.error(f"更新任务 {task_id} 信息失败: {str(e)}")
+            logger.error(f"更新任务 {task_id} 信息失败: {str(e)}", exc_info=True)
 
     async def _save_task_result(self, task_id: str, result: Dict):
         """保存任务结果到Redis"""
@@ -1462,38 +1899,6 @@ class YOLODetector:
             logger.error(f"获取任务状态失败: {str(e)}", exc_info=True)
             return None
 
-    async def stop_stream_analysis(self, task_id: str):
-        """停止视频流分析"""
-        try:
-            # 更新任务状态为停止中
-            await self._update_task_info(task_id, {'status': TaskStatus.STOPPING})
-            
-            # 等待任务实际停止
-            max_wait = 30  # 最大等待30秒
-            while max_wait > 0:
-                task_info = await self._get_task_info(task_id)
-                if not task_info or task_info.get('status') in [TaskStatus.STOPPED, TaskStatus.FAILED, TaskStatus.COMPLETED]:
-                    break
-                await asyncio.sleep(1)
-                max_wait -= 1
-            
-            # 如果任务仍在运行，强制更新状态为已停止
-            if max_wait == 0:
-                await self._update_task_info(task_id, {
-                    'status': TaskStatus.STOPPED,
-                    'error': '任务停止超时'
-                })
-            
-            logger.info(f"任务 {task_id} 已停止")
-            
-        except Exception as e:
-            logger.error(f"停止任务 {task_id} 失败: {str(e)}")
-            # 确保任务状态被更新为已停止
-            await self._update_task_info(task_id, {
-                'status': TaskStatus.STOPPED,
-                'error': f'停止失败: {str(e)}'
-            })
-
     async def _process_frame(
         self,
         frame: np.ndarray,
@@ -1572,3 +1977,72 @@ class YOLODetector:
         except Exception as e:
             logger.error(f"处理帧失败: {str(e)}", exc_info=True)
             raise ProcessingException(f"处理帧失败: {str(e)}")
+
+    async def _send_callback(self, callback_urls: str, data: Dict[str, Any]) -> bool:
+        """发送回调数据
+        
+        Args:
+            callback_urls: 回调URL，可以是单个URL或多个URL用逗号分隔
+            data: 回调数据
+            
+        Returns:
+            bool: 是否发送成功
+        """
+        if not callback_urls:
+            return False
+        
+        # 处理单个URL的情况
+        if ',' not in callback_urls:
+            url = callback_urls.strip()
+            if not url:
+                return False
+                
+            try:
+                logger.debug(f"发送回调到 {url}")
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.post(
+                        url,
+                        json=data,
+                        headers={"Content-Type": "application/json"}
+                    )
+                    
+                    if response.status_code == 200:
+                        logger.debug(f"回调成功: {url}")
+                        return True
+                    else:
+                        logger.warning(f"回调失败: {url}, 状态码: {response.status_code}")
+                        return False
+                        
+            except Exception as e:
+                logger.error(f"发送回调时出错: {url}, {str(e)}")
+                return False
+        
+        # 处理多个URL的情况
+        urls = callback_urls.split(',')
+        success_count = 0
+        
+        for url in urls:
+            url = url.strip()
+            if not url:
+                continue
+                
+            try:
+                logger.debug(f"发送回调到 {url}")
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.post(
+                        url,
+                        json=data,
+                        headers={"Content-Type": "application/json"}
+                    )
+                    
+                    if response.status_code == 200:
+                        logger.debug(f"回调成功: {url}")
+                        success_count += 1
+                    else:
+                        logger.warning(f"回调失败: {url}, 状态码: {response.status_code}")
+                        
+            except Exception as e:
+                logger.error(f"发送回调时出错: {url}, {str(e)}")
+                
+        # 如果任一URL回调成功，则认为回调成功
+        return success_count > 0

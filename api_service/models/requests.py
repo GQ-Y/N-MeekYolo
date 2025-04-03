@@ -118,27 +118,47 @@ class CallbackUpdate(BaseModel):
     retry_interval: Optional[int] = Field(None, description="重试间隔(秒)")
 
 # 任务请求模型
-class TaskCreate(BaseModel):
-    """创建任务请求"""
-    name: str = Field(..., description="任务名称")
-    stream_ids: List[int] = Field(..., description="视频源ID列表")
-    model_ids: List[int] = Field(..., description="模型ID列表")
-    callback_ids: Optional[List[int]] = Field(None, description="回调服务ID列表")
-    callback_interval: Optional[int] = Field(1, description="回调间隔(秒)")
-    enable_callback: bool = Field(True, description="启用回调")
-    save_result: bool = Field(False, description="保存结果")
+class TaskModelConfig(BaseModel):
+    """任务中的模型配置"""
+    model_id: int = Field(..., description="模型ID")
     config: Optional[Dict[str, Any]] = Field(
         default_factory=lambda: {
             "confidence": 0.5,
             "iou": 0.45,
-            "classes": None,
-            "roi": None,
+            "classes": [0, 1, 2],
+            "roi_type": 1,
+            "roi": {
+                "x1": 0.1,
+                "y1": 0.1,
+                "x2": 0.9,
+                "y2": 0.9
+            },
             "imgsz": 640,
-            "nested_detection": True
+            "nested_detection": True,
+            "analysis_type": "detection",
+            "callback": {
+                "enabled": True,
+                "url": "http://example.com/callback",
+                "interval": 5
+            }
         },
-        description="任务配置，支持目标检测、实例分割、目标跟踪等"
+        description="模型配置，包含检测阈值、ROI区域、回调等参数"
     )
-    node_id: Optional[int] = Field(None, description="指定节点ID，不指定则自动负载均衡")
+
+class TaskStreamConfig(BaseModel):
+    """任务中的视频流配置"""
+    stream_id: int = Field(..., description="视频流ID，必须是系统中存在的流ID")
+    stream_name: Optional[str] = Field(None, description="视频流自定义名称(用于回调和结果展示)，如不提供将使用系统中的流名称")
+    models: List[TaskModelConfig] = Field(..., description="该视频流使用的模型列表及其配置，一个流可以同时配置多个分析模型")
+
+class TaskCreate(BaseModel):
+    """创建任务请求"""
+    name: str = Field(..., description="任务名称，用于识别和显示任务")
+    save_result: bool = Field(False, description="是否保存分析结果图片和数据到服务器")
+    tasks: List[TaskStreamConfig] = Field(
+        ..., 
+        description="子任务配置列表，每个子任务包含一个视频流和多个分析模型的配置"
+    )
     
     model_config = {"protected_namespaces": ()}
 
@@ -146,30 +166,40 @@ class TaskUpdate(BaseModel):
     """更新任务请求"""
     id: int = Field(..., description="任务ID")
     name: Optional[str] = Field(None, description="任务名称")
-    stream_ids: Optional[List[int]] = Field(None, description="视频源ID列表")
-    model_ids: Optional[List[int]] = Field(None, description="模型ID列表")
-    callback_ids: Optional[List[int]] = Field(None, description="回调服务ID列表")
-    callback_interval: Optional[int] = Field(None, description="回调间隔(秒)")
-    enable_callback: Optional[bool] = Field(None, description="启用回调")
     save_result: Optional[bool] = Field(None, description="保存结果")
-    config: Optional[Dict[str, Any]] = Field(None, description="任务配置")
-    node_id: Optional[int] = Field(None, description="指定节点ID")
     
     model_config = {"protected_namespaces": ()}
 
+# 任务状态枚举
 class TaskStatus(str, Enum):
     """任务状态枚举"""
     CREATED = "created"      # 已创建
-    STARTING = "starting"    # 正在启动
     RUNNING = "running"      # 运行中
-    STOPPING = "stopping"    # 正在停止
     STOPPED = "stopped"      # 已停止
-    ERROR = "error"         # 错误
+    ERROR = "error"          # 错误
+    NO_NODE = "no_node"      # 无可用节点
 
-class TaskStatusUpdate(BaseModel):
-    """任务状态更新请求"""
-    status: TaskStatus
-    error_message: Optional[str] = None
+# 更新子任务状态请求
+class SubTaskStatusUpdate(BaseModel):
+    """子任务状态更新请求"""
+    id: int = Field(..., description="子任务ID")
+    status: str = Field(..., description="状态")
+    error_message: Optional[str] = Field(None, description="错误信息")
+
+# ROI类型枚举
+class RoiType(IntEnum):
+    """ROI类型枚举"""
+    NONE = 0        # 无ROI
+    RECTANGLE = 1   # 矩形
+    POLYGON = 2     # 多边形
+    LINE = 3        # 线段
+
+# 任务分析类型枚举
+class AnalysisType(str, Enum):
+    """分析类型枚举"""
+    DETECTION = "detection"   # 目标检测
+    TRACKING = "tracking"     # 目标跟踪
+    COUNTING = "counting"     # 计数
 
 class CreateStreamRequest(BaseModel):
     """创建流请求"""
@@ -229,27 +259,6 @@ class UpdateCallbackRequest(BaseModel):
     body_template: Optional[dict] = Field(None, description="请求体模板")
     retry_count: Optional[int] = Field(None, description="重试次数")
     retry_interval: Optional[int] = Field(None, description="重试间隔(秒)")
-
-class CreateTaskRequest(BaseModel):
-    """创建任务请求"""
-    name: str
-    stream_ids: List[int]
-    model_ids: List[int]
-    callback_ids: Optional[List[int]] = None
-    callback_interval: Optional[int] = 1
-    
-    model_config = {"protected_namespaces": ()}
-
-class UpdateTaskRequest(BaseModel):
-    """更新任务请求"""
-    name: Optional[str] = None
-    stream_ids: Optional[List[int]] = None
-    model_ids: Optional[List[int]] = None
-    callback_ids: Optional[List[int]] = None
-    callback_interval: Optional[int] = None
-    status: Optional[str] = None
-    
-    model_config = {"protected_namespaces": ()}
 
 class AnalysisCreate(BaseModel):
     """创建分析服务请求"""

@@ -52,7 +52,11 @@ class TaskQueue:
             else:
                 task_id = task_data.get('id')
                 if not task_id:
+                    task_id = task_data.get('task_id')  # 兼容不同字段名
+                if not task_id:
                     raise ValueError("任务ID不能为空")
+            
+            logger.info(f"TaskQueue.add_task - 添加任务: {task_id}")
             
             # 设置任务状态和创建时间
             if 'status' not in task_data:
@@ -62,25 +66,60 @@ class TaskQueue:
             
             # 保存任务数据
             task_key = f"task:{task_id}"
-            await self.redis.set_value(task_key, task_data)
+            logger.info(f"TaskQueue.add_task - 保存任务到Redis: key={task_key}")
+            
+            try:
+                await self.redis.set_value(task_key, task_data)
+                logger.info(f"TaskQueue.add_task - 保存任务成功: {task_id}")
+            except Exception as e:
+                logger.error(f"TaskQueue.add_task - 保存任务数据失败: {str(e)}")
+                raise
             
             # 添加到等待队列
-            await self.redis.zadd_task("task_queue:waiting", task_id, priority)
+            try:
+                await self.redis.zadd_task("task_queue:waiting", task_id, priority)
+                logger.info(f"TaskQueue.add_task - 添加到等待队列成功: {task_id}")
+            except Exception as e:
+                logger.error(f"TaskQueue.add_task - 添加到等待队列失败: {str(e)}")
+                raise
             
-            logger.info(f"任务添加成功: {task_id}")
+            # 验证任务是否正确保存
+            try:
+                saved_task = await self.get_task(task_id)
+                if saved_task:
+                    logger.info(f"TaskQueue.add_task - 验证任务已保存: {task_id}")
+                else:
+                    logger.warning(f"TaskQueue.add_task - 警告: 验证失败，未找到已保存的任务: {task_id}")
+            except Exception as e:
+                logger.error(f"TaskQueue.add_task - 验证任务保存时发生错误: {str(e)}")
+            
+            logger.info(f"TaskQueue.add_task - 任务添加成功: {task_id}")
             return task_id
             
         except Exception as e:
-            logger.error(f"添加任务失败: {str(e)}")
+            logger.error(f"TaskQueue.add_task - 添加任务失败: {str(e)}")
             raise
             
     async def get_task(self, task_id: str) -> Optional[Dict]:
         """获取任务信息"""
         try:
-            task_data = await self.redis.get_value(f"task:{task_id}", as_json=True)
-            return task_data
+            logger.info(f"TaskQueue.get_task - 获取任务: {task_id}")
+            task_key = f"task:{task_id}"
+            
+            try:
+                task_data = await self.redis.get_value(task_key, as_json=True)
+                if task_data:
+                    logger.info(f"TaskQueue.get_task - 找到任务: {task_id}")
+                    return task_data
+                else:
+                    logger.warning(f"TaskQueue.get_task - 任务不存在: {task_id}")
+                    return None
+            except Exception as e:
+                logger.error(f"TaskQueue.get_task - 从Redis获取任务数据时出错: {str(e)}")
+                return None
+                
         except Exception as e:
-            logger.error(f"获取任务信息失败: {str(e)}")
+            logger.error(f"TaskQueue.get_task - 获取任务信息失败: {str(e)}")
             return None
             
     async def update_task_status(

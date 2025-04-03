@@ -171,24 +171,20 @@ class Task(Base):
     
     id = Column(Integer, primary_key=True)
     name = Column(String(50), nullable=False)
-    status = Column(String(20), default='created')  # created, running, paused, error, completed
+    status = Column(String(50), default='created', nullable=False, comment="任务状态: created(已创建), running(运行中), stopped(已停止), error(错误), no_node(无可用节点)")
     error_message = Column(String(200))
-    callback_interval = Column(Integer, default=1)  # 回调间隔(秒)
-    enable_callback = Column(Boolean, default=True)  # 是否启用回调
-    save_result = Column(Boolean, default=False)  # 是否保存结果
-    config = Column(JSON, nullable=True)  # 任务配置
-    node_id = Column(Integer, ForeignKey('nodes.id', ondelete='SET NULL'), nullable=True)  # 指定节点ID
+    save_result = Column(Boolean, default=False, comment="是否保存结果")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     started_at = Column(DateTime)
     completed_at = Column(DateTime)
-    analysis_task_id = Column(String(50))  # 存储 analysis_service 的任务ID
+    active_subtasks = Column(Integer, default=0, nullable=False, comment="运行中的子任务数量")
+    total_subtasks = Column(Integer, default=0, nullable=False, comment="子任务总数量")
     
     # 关联关系
     streams = relationship('Stream', secondary=task_stream_association, back_populates='tasks')
     models = relationship('Model', secondary=task_model_association, back_populates='tasks')
     callbacks = relationship('Callback', secondary=task_callback_association, back_populates='tasks')
-    node = relationship('Node', foreign_keys=[node_id])  # 关联节点
     
     # 添加子任务关联
     sub_tasks = relationship("SubTask", back_populates="task", cascade="all, delete-orphan")
@@ -220,26 +216,34 @@ class SubTask(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     task_id = Column(Integer, ForeignKey('tasks.id', ondelete='CASCADE'))
-    analysis_task_id = Column(String(50))  # Analysis Service的任务ID
+    analysis_task_id = Column(String(50), comment="Analysis Service的任务ID")
     stream_id = Column(Integer, ForeignKey('streams.id'))
     model_id = Column(Integer, ForeignKey('models.id'))
-    status = Column(String(20), default="created")
+    status = Column(String(20), default="created", comment="状态: created, running, error, completed")
     error_message = Column(String(200), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
+    config = Column(JSON, nullable=True, comment="子任务配置信息(置信度、IOU阈值、ROI设置等)")
+    enable_callback = Column(Boolean, default=False, nullable=False, comment="是否启用回调")
+    callback_url = Column(String(255), nullable=True, comment="回调URL")
+    node_id = Column(Integer, ForeignKey('nodes.id', ondelete='SET NULL'), nullable=True, comment="节点ID")
+    roi_type = Column(Integer, default=0, nullable=False, comment="ROI类型: 0-无ROI, 1-矩形, 2-多边形, 3-线段")
+    analysis_type = Column(String(50), default="detection", nullable=False, comment="分析类型: detection, tracking, counting等")
     
     # 关联关系
     task = relationship("Task", back_populates="sub_tasks")
     stream = relationship("Stream")
     model = relationship("Model")
+    node = relationship("Node", back_populates="sub_tasks")
     
     __table_args__ = (
         Index('idx_subtask_task_id', 'task_id'),
         Index('idx_subtask_stream_id', 'stream_id'),
         Index('idx_subtask_model_id', 'model_id'),
         Index('idx_subtask_status', 'status'),
+        Index('idx_subtask_node_id', 'node_id'),
     )
 
 class Node(Base):
@@ -268,8 +272,8 @@ class Node(Base):
     gpu_memory_usage = Column(Float, nullable=False, default=0, comment="GPU显存占用率")
     compute_type = Column(String(50), nullable=False, default="cpu", comment="计算类型：cpu(CPU计算边缘节点)、camera(摄像头边缘节点)、gpu(GPU计算边缘节点)、elastic(弹性集群节点)")
     
-    # 关联任务
-    tasks = relationship('Task', foreign_keys='Task.node_id', back_populates='node')
+    # 关联子任务
+    sub_tasks = relationship('SubTask', back_populates='node')
     
     __table_args__ = (
         Index('idx_node_ip_port', 'ip', 'port'),

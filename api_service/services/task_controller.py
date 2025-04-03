@@ -34,161 +34,138 @@ class TaskController:
                 logger.error(f"未找到任务 {task_id}")
                 return False
             
-            logger.info(f"开始启动任务 {task_id}，包含 {len(task.streams)} 个视频流和 {len(task.models)} 个模型")
+            # 检查任务状态
+            if task.status != "created" and task.status != "stopped":
+                logger.error(f"任务 {task_id} 状态为 {task.status}，无法启动")
+                return False
+                
+            # 检查子任务
+            sub_tasks = db.query(SubTask).filter(SubTask.task_id == task_id).all()
+            if not sub_tasks:
+                logger.error(f"任务 {task_id} 没有子任务，无法启动")
+                return False
             
-            # 删除旧的子任务记录
-            if task.sub_tasks:
-                old_sub_tasks_count = len(task.sub_tasks)
-                logger.info(f"删除任务 {task_id} 的 {old_sub_tasks_count} 个旧子任务记录")
-                for sub_task in task.sub_tasks:
-                    logger.info(f"删除子任务记录: ID={sub_task.id}, 分析任务ID={sub_task.analysis_task_id}")
-                    db.delete(sub_task)
-                db.commit()
-                logger.info(f"旧子任务记录删除完成")
+            logger.info(f"开始启动任务 {task_id}，包含 {len(sub_tasks)} 个子任务")
                 
             # 更新任务状态
-            task.status = "starting"
+            task.status = "running"
             task.started_at = datetime.now()
             task.error_message = None  # 清除错误信息
+            task.active_subtasks = 0
+            task.total_subtasks = len(sub_tasks)
+            db.commit()
             
-            # 构建回调URL列表
-            callback_urls = ",".join([cb.url for cb in task.callbacks]) if task.callbacks else ""
-            logger.debug(f"回调URL列表: {callback_urls}")
+            # 逐个启动子任务
+            successful_tasks = 0
             
-            # 获取任务配置，如果没有则使用默认值
-            config = task.config or {
-                "confidence": 0.1,
-                "iou": 0.45,
-                "nested_detection": True
-            }
-            
-            # 获取节点信息
-            node = task.node
-            
-            # 检查节点状态，如果节点不存在或不在线或未激活，则重新选择可用节点
-            if not node or node.service_status != "online" or not node.is_active:
-                if not node:
-                    logger.warning(f"任务 {task_id} 未指定节点，尝试重新分配节点")
-                else:
-                    logger.warning(f"节点 {node.id} 不在线或未激活，尝试重新分配节点")
-                
-                # 使用负载均衡算法选择新节点
-                available_node = NodeCRUD.get_available_node(db)
-                
-                if not available_node:
-                    logger.error("无可用节点，任务启动失败")
-                    task.status = "failed"
-                    task.error_message = "无可用节点"
-                    db.commit()
-                    return False
-                
-                # 更新任务节点
-                old_node_id = task.node_id
-                task.node_id = available_node.id
-                node = available_node
-                
-                logger.info(f"成功将任务 {task_id} 重新分配到节点 {node.id}")
-                
-                # 如果原节点存在，更新其任务计数
-                if old_node_id:
-                    old_node = db.query(Node).filter(Node.id == old_node_id).first()
-                    if old_node:
-                        stream_count = len(task.streams)
-                        if old_node.stream_task_count >= stream_count:
-                            old_node.stream_task_count -= stream_count
-                        else:
-                            old_node.stream_task_count = 0
-                
-                # 更新新节点的任务计数
-                node.stream_task_count += len(task.streams)
-                db.commit()
-            
-            # 构建节点URL
-            node_url = f"http://{node.ip}:{node.port}"
-            logger.info(f"使用节点 {node.id} URL: {node_url}")
-            
-            # 为每个视频流和模型组合创建分析任务
-            sub_tasks_to_create = []
-            for stream in task.streams:
-                for model in task.models:
-                    try:
-                        # 调用分析服务创建任务
-                        task_name = f"{task.name}-{stream.name}-{model.name}"
-                        
-                        # 使用httpx直接调用节点API
-                        try:
-                            async with httpx.AsyncClient() as client:
-                                response = await client.post(
-                                    f"{node_url}/api/v1/analyze/stream",
-                                    json={
-                                        "model_code": model.code,
-                                        "stream_url": stream.url,
-                                        "task_name": task_name,
-                                        "callback_urls": callback_urls,
-                                        "enable_callback": task.enable_callback and bool(callback_urls),
-                                        "save_result": task.save_result,
-                                        "config": config or {},
-                                        "analysis_type": "detection"
-                                    }
-                                )
-                                response.raise_for_status()
-                                data = response.json()
-                                analysis_task_id = data.get("data", {}).get("task_id")
-                        except Exception as e:
-                            logger.error(f"调用节点API失败: {str(e)}")
-                            raise
-                        
-                        logger.info(f"创建分析任务成功:")
-                        logger.info(f"  - 任务名称: {task_name}")
-                        logger.info(f"  - 分析任务ID: {analysis_task_id}")
-                        logger.info(f"  - 视频流: {stream.url}")
-                        logger.info(f"  - 模型: {model.code}")
-                        logger.info(f"  - 配置: {config}")
-                        
-                        # 创建子任务记录
-                        sub_task = SubTask(
-                            task_id=task.id,
-                            analysis_task_id=analysis_task_id,
-                            stream_id=stream.id,
-                            model_id=model.id,
-                            status="running",
-                            started_at=datetime.now()
-                        )
-                        sub_tasks_to_create.append(sub_task)
-                        
-                    except Exception as e:
-                        logger.error(f"创建分析任务失败: {str(e)}")
+            for sub_task in sub_tasks:
+                try:
+                    # 获取流和模型信息
+                    stream = db.query(Stream).filter(Stream.id == sub_task.stream_id).first()
+                    model = db.query(Model).filter(Model.id == sub_task.model_id).first()
+                    
+                    if not stream or not model:
+                        logger.error(f"子任务 {sub_task.id} 关联的流或模型不存在")
                         continue
+                    
+                    # 为每个子任务分配节点
+                    available_node = NodeCRUD.get_available_node(db)
+                    if not available_node:
+                        logger.error(f"子任务 {sub_task.id} 无可用节点，跳过")
+                        continue
+                    
+                    # 更新子任务节点
+                    sub_task.node_id = available_node.id
+                    sub_task.status = "running"
+                    sub_task.started_at = datetime.now()
+                    sub_task.error_message = None
+                    
+                    # 更新节点任务计数
+                    available_node.stream_task_count += 1
+                    
+                    # 构建节点URL
+                    node_url = f"http://{available_node.ip}:{available_node.port}"
+                    logger.info(f"子任务 {sub_task.id} 使用节点 {available_node.id}, URL: {node_url}")
+                    
+                    # 构建任务名称
+                    task_name = f"{task.name}-{stream.name}-{model.name}"
+                    
+                    # 准备回调配置
+                    callback_enabled = sub_task.enable_callback
+                    callback_url = sub_task.callback_url if callback_enabled else None
+                    
+                    # 从子任务配置中提取分析配置
+                    config = sub_task.config or {
+                        "confidence": 0.5,
+                        "iou": 0.45,
+                        "classes": None,
+                        "roi_type": 0,
+                        "roi": None,
+                        "nested_detection": True
+                    }
+                    
+                    analysis_type = sub_task.analysis_type or "detection"
+                    
+                    # 使用httpx直接调用节点API
+                    try:
+                        async with httpx.AsyncClient() as client:
+                            response = await client.post(
+                                f"{node_url}/api/v1/analyze/stream",
+                                json={
+                                    "model_code": model.code,
+                                    "stream_url": stream.url,
+                                    "task_name": task_name,
+                                    "callback_url": callback_url,
+                                    "enable_callback": callback_enabled,
+                                    "save_result": task.save_result,
+                                    "config": config,
+                                    "analysis_type": analysis_type
+                                }
+                            )
+                            response.raise_for_status()
+                            data = response.json()
+                            sub_task.analysis_task_id = data.get("data", {}).get("task_id")
+                            
+                            logger.info(f"创建分析任务成功:")
+                            logger.info(f"  - 子任务ID: {sub_task.id}")
+                            logger.info(f"  - 任务名称: {task_name}")
+                            logger.info(f"  - 分析任务ID: {sub_task.analysis_task_id}")
+                            logger.info(f"  - 视频流: {stream.url}")
+                            logger.info(f"  - 模型: {model.code}")
+                            
+                            # 标记子任务成功
+                            successful_tasks += 1
+                            
+                    except Exception as e:
+                        logger.error(f"调用节点API失败: {str(e)}")
+                        # 回滚子任务状态
+                        sub_task.status = "error"
+                        sub_task.error_message = f"启动失败: {str(e)}"
+                        # 回滚节点任务计数
+                        available_node.stream_task_count -= 1
+                except Exception as e:
+                    logger.error(f"处理子任务 {sub_task.id} 失败: {str(e)}")
+                    continue
             
-            if not sub_tasks_to_create:
-                logger.error("没有成功创建的子任务")
-                task.status = "failed"
-                db.commit()
-                return False
+            # 更新任务统计信息
+            task.active_subtasks = successful_tasks
             
-            try:
-                # 批量添加子任务
-                db.bulk_save_objects(sub_tasks_to_create)
-                
-                # 更新流状态
-                for stream in task.streams:
-                    stream.status = 1  # 在线状态，使用整数1而不是字符串
-                
-                # 更新任务状态
-                task.status = "running"
-                
-                # 提交所有更改
-                db.commit()
-                logger.info(f"任务 {task_id} 启动成功，创建了 {len(sub_tasks_to_create)} 个子任务")
-                return True
-                
-            except Exception as e:
-                db.rollback()
-                logger.error(f"保存任务状态失败: {str(e)}")
-                return False
+            if successful_tasks == 0:
+                # 如果没有子任务启动成功，标记任务为错误状态
+                task.status = "error"
+                task.error_message = "所有子任务启动失败"
+            elif successful_tasks < len(sub_tasks):
+                # 如果部分子任务启动成功
+                task.error_message = f"部分子任务启动成功 ({successful_tasks}/{len(sub_tasks)})"
+            
+            db.commit()
+            
+            logger.info(f"任务 {task_id} 启动完成，{successful_tasks}/{len(sub_tasks)} 个子任务启动成功")
+            return successful_tasks > 0
             
         except Exception as e:
             logger.error(f"启动任务失败: {str(e)}")
+            db.rollback()
             return False
             
     async def stop_task(self, db: Session, task_id: int) -> bool:
@@ -199,158 +176,91 @@ class TaskController:
                 logger.error(f"未找到任务 {task_id}")
                 return False
             
-            logger.info(f"正在停止任务 {task_id}，包含 {len(task.sub_tasks)} 个子任务")
+            # 获取所有运行中的子任务
+            sub_tasks = db.query(SubTask).filter(
+                SubTask.task_id == task_id,
+                SubTask.status == "running"
+            ).all()
+            
+            if not sub_tasks:
+                logger.warning(f"任务 {task_id} 没有运行中的子任务")
+                # 如果任务仍处于运行状态，但没有运行中的子任务，更新主任务状态
+                if task.status == "running":
+                    task.status = "stopped"
+                    task.active_subtasks = 0
+                    db.commit()
+                return True
+            
+            logger.info(f"正在停止任务 {task_id}，包含 {len(sub_tasks)} 个运行中的子任务")
             
             # 更新任务状态
             task.status = "stopping"
             db.commit()
             
-            # 启动后台任务
-            asyncio.create_task(self._stop_task_background(task_id))
+            # 停止所有子任务
+            stopped_count = 0
+            for sub_task in sub_tasks:
+                try:
+                    # 获取节点信息
+                    node = db.query(Node).filter(Node.id == sub_task.node_id).first()
+                    if not node:
+                        logger.warning(f"子任务 {sub_task.id} 没有关联节点，标记为已停止")
+                        sub_task.status = "stopped"
+                        sub_task.completed_at = datetime.now()
+                        stopped_count += 1
+                        continue
+                    
+                    # 构建节点URL
+                    node_url = f"http://{node.ip}:{node.port}"
+                    
+                    # 调用节点API停止任务
+                    try:
+                        async with httpx.AsyncClient(timeout=10.0) as client:
+                            stop_url = f"{node_url}/api/v1/analyze/stream/{sub_task.analysis_task_id}/stop"
+                            logger.info(f"发送停止请求到节点 {node.id}: {stop_url}")
+                            
+                            response = await client.post(
+                                stop_url,
+                                headers={"accept": "application/json"}
+                            )
+                            response.raise_for_status()
+                            result = response.json()
+                            logger.info(f"停止子任务响应: {result}")
+                    except Exception as e:
+                        logger.warning(f"调用节点API停止子任务 {sub_task.id} 失败: {str(e)}")
+                        # 即使API调用失败，也标记为已停止
+                    
+                    # 更新子任务状态
+                    sub_task.status = "stopped"
+                    sub_task.completed_at = datetime.now()
+                    
+                    # 更新节点任务计数
+                    if node.stream_task_count > 0:
+                        node.stream_task_count -= 1
+                    
+                    stopped_count += 1
+                    
+                except Exception as e:
+                    logger.error(f"停止子任务 {sub_task.id} 失败: {str(e)}")
+                    continue
             
+            # 更新任务状态
+            task.status = "stopped"
+            task.active_subtasks = 0
+            task.completed_at = datetime.now() if stopped_count == len(sub_tasks) else None
+            
+            db.commit()
+            
+            logger.info(f"任务 {task_id} 停止完成，{stopped_count}/{len(sub_tasks)} 个子任务成功停止")
             return True
             
         except Exception as e:
-            db.rollback()
-            logger.error(f"停止任务 {task_id} 失败: {str(e)}", exc_info=True)
+            logger.error(f"停止任务失败: {str(e)}")
             return False
-
-    async def _stop_task_background(self, task_id: int):
-        """后台执行停止任务"""
-        # 创建新的数据库会话
-        db = next(get_db())
-        try:
-            task = db.query(Task).filter(Task.id == task_id).first()
-            if not task:
-                logger.error(f"未找到任务 {task_id}")
-                return
-            
-            # 停止所有子任务
-            stopped_sub_tasks = []  # 记录已停止的子任务
-            for sub_task in task.sub_tasks:
-                try:
-                    if sub_task.status == "running":
-                        logger.info(f"正在停止子任务:")
-                        logger.info(f"  - 子任务ID: {sub_task.id}")
-                        logger.info(f"  - 分析任务ID: {sub_task.analysis_task_id}")
-                        
-                        # 调用Analysis Service停止任务
-                        try:
-                            async with httpx.AsyncClient(timeout=10.0) as client:
-                                stop_url = f"{self._get_api_url('/analyze/stream')}/{sub_task.analysis_task_id}/stop"
-                                logger.info(f"发送停止请求到: {stop_url}")
-                                
-                                for retry in range(3):
-                                    try:
-                                        response = await client.post(
-                                            stop_url,
-                                            headers={"accept": "application/json"}
-                                        )
-                                        response.raise_for_status()
-                                        result = response.json()
-                                        logger.info(f"停止子任务响应: {result}")
-                                        break
-                                    except httpx.TimeoutException:
-                                        if retry == 2:
-                                            logger.warning(f"停止子任务请求超时，任务可能已停止: {sub_task.analysis_task_id}")
-                                        else:
-                                            logger.warning(f"停止子任务请求超时，正在重试: {retry + 1}/3")
-                                            await asyncio.sleep(1)
-                                    except httpx.HTTPError as e:
-                                        if e.response.status_code == 404:
-                                            logger.warning(f"子任务不存在或已停止: {sub_task.analysis_task_id}")
-                                            break
-                                        raise
-                                
-                            # 无论停止请求是否成功，都更新本地状态
-                            sub_task.status = "stopped"
-                            sub_task.completed_at = datetime.now()
-                            logger.info(f"子任务 {sub_task.id} 已标记为停止")
-                            
-                            # 更新流状态
-                            if sub_task.stream:
-                                sub_task.stream.status = "inactive"
-                                logger.info(f"已更新视频流 {sub_task.stream.id} 状态为非活动")
-                            
-                            # 添加到已停止列表
-                            stopped_sub_tasks.append(sub_task)
-                                
-                        except Exception as e:
-                            logger.error(f"调用分析服务停止子任务失败: {str(e)}", exc_info=True)
-                            # 如果停止失败，回退状态
-                            sub_task.status = "running"
-                            sub_task.completed_at = None
-                            if sub_task.stream:
-                                sub_task.stream.status = "active"
-                            db.commit()
-                            continue
-                    
-                except Exception as e:
-                    logger.error(f"停止子任务 {sub_task.id} 失败: {str(e)}", exc_info=True)
-                    continue
-                
-            try:
-                if stopped_sub_tasks:
-                    # 删除已停止的子任务
-                    for sub_task in stopped_sub_tasks:
-                        logger.info(f"删除子任务: {sub_task.id}")
-                        db.delete(sub_task)
-                    
-                    # 更新任务状态
-                    task.status = "stopped"
-                    task.completed_at = datetime.now()
-                    
-                    # 提交所有更改
-                    db.commit()
-                    
-                    # 验证删除结果
-                    remaining_sub_tasks = db.query(SubTask).filter(
-                        SubTask.id.in_([st.id for st in stopped_sub_tasks])
-                    ).all()
-                    
-                    if remaining_sub_tasks:
-                        logger.warning(f"仍有 {len(remaining_sub_tasks)} 个子任务未被删除:")
-                        for st in remaining_sub_tasks:
-                            logger.warning(f"  - 子任务ID: {st.id}")
-                    else:
-                        logger.info("所有已停止的子任务已成功删除")
-                else:
-                    # 如果没有成功停止任何子任务，回退主任务状态
-                    task.status = "running"
-                    db.commit()
-                    logger.warning(f"任务 {task_id} 停止失败，已回退状态")
-                
-                logger.info(f"任务 {task_id} 停止处理完成")
-                
-            except Exception as e:
-                db.rollback()
-                # 回退所有状态
-                task.status = "running"
-                for sub_task in stopped_sub_tasks:
-                    sub_task.status = "running"
-                    sub_task.completed_at = None
-                    if sub_task.stream:
-                        sub_task.stream.status = "active"
-                db.commit()
-                logger.error(f"提交任务停止更改失败，已回退状态: {str(e)}", exc_info=True)
-                
-        except Exception as e:
-            db.rollback()
-            logger.error(f"后台停止任务 {task_id} 失败: {str(e)}", exc_info=True)
-            # 回退主任务状态
-            try:
-                task = db.query(Task).filter(Task.id == task_id).first()
-                if task and task.status == "stopping":
-                    task.status = "running"
-                    db.commit()
-            except Exception as e2:
-                logger.error(f"回退任务状态失败: {str(e2)}", exc_info=True)
-        finally:
-            db.close()
 
     async def check_and_migrate_task(self, db: Session, task_id: int, target_node_id: int = None) -> bool:
         """
-        检查任务并迁移到其他节点
+        检查任务并迁移故障子任务到其他节点
         
         参数:
         - db: 数据库会话
@@ -368,78 +278,226 @@ class TaskController:
                 return False
                 
             # 如果任务不在运行状态，不需要迁移
-            if task.status not in ["running", "starting"]:
+            if task.status != "running":
                 logger.info(f"任务 {task_id} 不在运行状态，无需迁移")
                 return False
                 
-            # 获取当前节点信息
-            old_node = task.node
-            if not old_node:
-                logger.warning(f"任务 {task_id} 没有关联节点，无法迁移")
+            # 获取所有运行中的子任务及其节点信息
+            sub_tasks_with_nodes = db.query(SubTask, Node)\
+                .join(Node, SubTask.node_id == Node.id)\
+                .filter(
+                    SubTask.task_id == task_id,
+                    SubTask.status == "running"
+                ).all()
+                
+            if not sub_tasks_with_nodes:
+                logger.info(f"任务 {task_id} 没有运行中的子任务，无需迁移")
                 return False
                 
-            # 如果当前节点在线，不需要迁移
-            if old_node.service_status == "online" and old_node.is_active:
-                logger.info(f"任务 {task_id} 当前节点 {old_node.id} 在线，无需迁移")
+            # 检查每个子任务的节点状态
+            need_migration = []
+            for sub_task, node in sub_tasks_with_nodes:
+                if node.service_status != "online" or not node.is_active:
+                    logger.info(f"子任务 {sub_task.id} 的节点 {node.id} 不在线或不活跃，需要迁移")
+                    need_migration.append(sub_task)
+                    
+            if not need_migration:
+                logger.info(f"任务 {task_id} 的所有子任务节点均正常，无需迁移")
                 return False
                 
-            # 记录旧节点ID
-            old_node_id = old_node.id
-                
-            # 查找目标节点
-            target_node = None
+            logger.info(f"任务 {task_id} 有 {len(need_migration)} 个子任务需要迁移")
+            
+            # 查找可用节点
+            available_node = None
             if target_node_id:
                 # 使用指定的节点
-                target_node = db.query(Node).filter(
+                available_node = db.query(Node).filter(
                     Node.id == target_node_id,
                     Node.service_status == "online",
                     Node.is_active == True
                 ).first()
                 
-                if not target_node:
+                if not available_node:
                     logger.error(f"指定的目标节点 {target_node_id} 不存在或不在线")
             
-            if not target_node:
-                # 使用负载均衡算法选择节点
-                target_node = NodeCRUD.get_available_node(db)
+            # 逐个迁移子任务
+            migrated_count = 0
+            for sub_task in need_migration:
+                # 为每个子任务单独获取节点
+                if not available_node:
+                    available_node = NodeCRUD.get_available_node(db)
+                    
+                if not available_node:
+                    logger.error(f"无可用节点，无法迁移子任务 {sub_task.id}")
+                    continue
+                    
+                try:
+                    # 获取流和模型信息
+                    stream = db.query(Stream).filter(Stream.id == sub_task.stream_id).first()
+                    model = db.query(Model).filter(Model.id == sub_task.model_id).first()
+                    
+                    if not stream or not model:
+                        logger.error(f"子任务 {sub_task.id} 关联的流或模型不存在")
+                        continue
+                    
+                    # 获取旧节点信息
+                    old_node = db.query(Node).filter(Node.id == sub_task.node_id).first()
+                    old_node_id = old_node.id if old_node else None
+                    
+                    # 更新子任务节点
+                    sub_task.node_id = available_node.id
+                    
+                    # 更新节点任务计数
+                    if old_node and old_node.stream_task_count > 0:
+                        old_node.stream_task_count -= 1
+                    available_node.stream_task_count += 1
+                    
+                    # 停止原有子任务
+                    if old_node_id:
+                        logger.info(f"停止子任务 {sub_task.id} 在原节点 {old_node_id} 上的任务")
+                        try:
+                            # 尝试停止原有任务，但忽略失败
+                            if old_node.service_status == "online" and sub_task.analysis_task_id:
+                                old_node_url = f"http://{old_node.ip}:{old_node.port}"
+                                try:
+                                    async with httpx.AsyncClient(timeout=5.0) as client:
+                                        stop_url = f"{old_node_url}/api/v1/analyze/stream/{sub_task.analysis_task_id}/stop"
+                                        await client.post(stop_url, headers={"accept": "application/json"})
+                                except:
+                                    # 忽略停止失败
+                                    pass
+                        except:
+                            # 忽略任何错误
+                            pass
+                    
+                    # 构建节点URL和任务名称
+                    node_url = f"http://{available_node.ip}:{available_node.port}"
+                    task_name = f"{task.name}-{stream.name}-{model.name}"
+                    
+                    # 从子任务配置中提取所需配置
+                    config = sub_task.config or {
+                        "confidence": 0.5,
+                        "iou": 0.45,
+                        "classes": None,
+                        "roi_type": 0,
+                        "roi": None,
+                        "nested_detection": True
+                    }
+                    
+                    callback_enabled = sub_task.enable_callback
+                    callback_url = sub_task.callback_url if callback_enabled else None
+                    analysis_type = sub_task.analysis_type or "detection"
+                    
+                    # 创建新的分析任务
+                    async with httpx.AsyncClient() as client:
+                        response = await client.post(
+                            f"{node_url}/api/v1/analyze/stream",
+                            json={
+                                "model_code": model.code,
+                                "stream_url": stream.url,
+                                "task_name": task_name,
+                                "callback_url": callback_url,
+                                "enable_callback": callback_enabled,
+                                "save_result": task.save_result,
+                                "config": config,
+                                "analysis_type": analysis_type
+                            }
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+                        sub_task.analysis_task_id = data.get("data", {}).get("task_id")
+                    
+                    logger.info(f"迁移子任务 {sub_task.id} 成功，从节点 {old_node_id} 迁移到节点 {available_node.id}")
+                    migrated_count += 1
+                    
+                except Exception as e:
+                    logger.error(f"迁移子任务 {sub_task.id} 失败: {str(e)}")
+                    # 标记子任务为错误状态
+                    sub_task.status = "error"
+                    sub_task.error_message = f"迁移失败: {str(e)}"
+                    
+                    # 更新节点任务计数
+                    if available_node:
+                        available_node.stream_task_count -= 1
+                    
+                    db.commit()
+                    continue
                 
-            if not target_node:
-                logger.error(f"无可用节点，任务 {task_id} 迁移失败")
-                return False
-                
-            logger.info(f"开始将任务 {task_id} 从节点 {old_node_id} 迁移到节点 {target_node.id}")
+                # 清除available_node以便为下一个子任务重新选择
+                available_node = None
             
-            # 停止当前任务的子任务
-            await self.stop_task(db, task_id)
-            
-            # 更新任务节点
-            task.node_id = target_node.id
-            
-            # 更新节点任务计数
-            stream_count = len(task.streams)
-            
-            # 减少旧节点的任务计数
-            if old_node.stream_task_count >= stream_count:
-                old_node.stream_task_count -= stream_count
-            else:
-                old_node.stream_task_count = 0
-                
-            # 增加新节点的任务计数
-            target_node.stream_task_count += stream_count
-            
-            # 提交更改
+            # 提交所有更改
             db.commit()
             
-            # 重新启动任务
-            result = await self.start_task(db, task_id)
+            # 更新任务状态
+            if migrated_count == 0 and len(need_migration) > 0:
+                # 所有迁移都失败，更新任务状态
+                updated = await self._update_task_status_from_subtasks(db, task_id)
+                if updated:
+                    logger.info(f"所有子任务迁移失败，已更新任务 {task_id} 状态")
             
-            if result:
-                logger.info(f"任务 {task_id} 已成功迁移到节点 {target_node.id}")
-                return True
-            else:
-                logger.error(f"任务 {task_id} 迁移失败：无法在新节点上启动")
-                return False
+            return migrated_count > 0
                 
         except Exception as e:
-            logger.error(f"迁移任务 {task_id} 失败: {str(e)}")
+            logger.error(f"检查和迁移任务 {task_id} 失败: {str(e)}")
+            return False
+            
+    async def _update_task_status_from_subtasks(self, db: Session, task_id: int) -> bool:
+        """
+        根据子任务状态更新任务状态
+        
+        参数:
+        - db: 数据库会话
+        - task_id: 任务ID
+        
+        返回:
+        - 是否成功更新
+        """
+        try:
+            task = db.query(Task).filter(Task.id == task_id).first()
+            if not task:
+                return False
+                
+            # 获取子任务统计
+            running_count = db.query(SubTask).filter(
+                SubTask.task_id == task_id,
+                SubTask.status == "running"
+            ).count()
+            
+            error_count = db.query(SubTask).filter(
+                SubTask.task_id == task_id,
+                SubTask.status == "error"
+            ).count()
+            
+            total_count = db.query(SubTask).filter(
+                SubTask.task_id == task_id
+            ).count()
+            
+            # 更新任务统计
+            task.active_subtasks = running_count
+            task.total_subtasks = total_count
+            
+            # 根据子任务状态更新任务状态
+            if running_count == 0:
+                if error_count == total_count:
+                    # 所有子任务都出错
+                    task.status = "error"
+                    task.error_message = "所有子任务执行失败"
+                elif error_count > 0:
+                    # 部分子任务出错
+                    task.status = "error"
+                    task.error_message = f"部分子任务执行失败 ({error_count}/{total_count})"
+                else:
+                    # 所有子任务完成
+                    task.status = "completed"
+                    task.completed_at = datetime.now()
+            elif error_count > 0:
+                # 部分子任务出错，但仍有子任务运行
+                task.error_message = f"部分子任务执行失败 ({error_count}/{total_count})"
+            
+            db.commit()
+            return True
+            
+        except Exception as e:
+            logger.error(f"更新任务状态失败: {str(e)}")
             return False

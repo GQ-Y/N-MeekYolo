@@ -39,6 +39,14 @@ class AnalysisType(str, Enum):
     SEGMENTATION = "segmentation"  # 实例分割
     TRACKING = "tracking"  # 目标跟踪
     CROSS_CAMERA = "cross_camera"  # 跨摄像头跟踪
+    COUNTING = "counting"  # 计数分析
+
+class RoiType(int, Enum):
+    """ROI类型"""
+    NONE = 0  # 无ROI
+    RECTANGLE = 1  # 矩形ROI
+    POLYGON = 2  # 多边形ROI
+    LINE = 3  # 线段ROI
 
 class AnalysisStatus(str, Enum):
     """分析状态"""

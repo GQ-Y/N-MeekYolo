@@ -8,69 +8,132 @@
 - 删除任务：移除不需要的任务
 - 任务控制：启动、停止和监控任务执行
 """
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Body, Request, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from models.requests import TaskCreate, TaskUpdate, TaskStatusUpdate
-from models.responses import BaseResponse, TaskResponse
-from crud import task
+from models.responses import BaseResponse, TaskDetailResponse, SubTaskResponse
+from models.requests import TaskCreate, TaskUpdate
 from services.database import get_db
+from crud import task as task_crud
 from shared.utils.logger import setup_logger
-from services.task_controller import TaskController
-from models.database import Task, SubTask, Node
 
 logger = setup_logger(__name__)
-router = APIRouter(prefix="/api/v1/tasks", tags=["任务"])
-task_controller = TaskController()
+router = APIRouter(prefix="/api/v1/tasks", tags=["任务管理"])
 
-@router.post("/create", response_model=BaseResponse)
+@router.post("/create", response_model=BaseResponse, summary="创建任务")
 async def create_task(
     request: Request,
     task_data: TaskCreate,
     db: Session = Depends(get_db)
 ):
-    """创建任务"""
+    """
+    创建任务
+    
+    参数:
+    - name: 任务名称
+    - save_result: 是否保存结果
+    - tasks: 子任务配置列表，每个子任务包含流ID和模型配置列表
+    
+    请求示例:
+    ```json
+    {
+        "name": "多摄像头行人检测",
+        "save_result": true,
+        "tasks": [
+            {
+                "stream_id": 1,
+                "stream_name": "前门摄像头",
+                "models": [
+                    {
+                        "model_id": 2,
+                        "config": {
+                            "confidence": 0.5,
+                            "iou": 0.45,
+                            "classes": [0, 1, 2],
+                            "roi_type": 1,
+                            "roi": {
+                                "x1": 0.1,
+                                "y1": 0.1,
+                                "x2": 0.9,
+                                "y2": 0.9
+                            },
+                            "imgsz": 640,
+                            "nested_detection": true,
+                            "analysis_type": "detection",
+                            "callback": {
+                                "enabled": true,
+                                "url": "http://example.com/callback",
+                                "interval": 5
+                            }
+                        }
+                    }
+                ]
+            },
+            {
+                "stream_id": 2,
+                "stream_name": "后门摄像头",
+                "models": [
+                    {
+                        "model_id": 2,
+                        "config": {
+                            "confidence": 0.4,
+                            "iou": 0.4,
+                            "classes": [0, 1, 2], 
+                            "roi_type": 2,
+                            "roi": {
+                                "points": [
+                                    [0.1, 0.1],
+                                    [0.9, 0.1],
+                                    [0.9, 0.9],
+                                    [0.1, 0.9]
+                                ]
+                            },
+                            "analysis_type": "tracking",
+                            "callback": {
+                                "enabled": true
+                            }
+                        }
+                    },
+                    {
+                        "model_id": 3,
+                        "config": {
+                            "confidence": 0.6,
+                            "analysis_type": "counting",
+                            "roi_type": 3,
+                            "roi": {
+                                "points": [
+                                    [0.2, 0.5],
+                                    [0.8, 0.5]
+                                ]
+                            }
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    ```
+    
+    返回:
+    - 创建的任务ID和基本信息
+    """
     try:
-        result = task.create_task(
-            db,
-            task_data.name,
-            task_data.stream_ids,
-            task_data.model_ids,
-            task_data.callback_ids,
-            task_data.callback_interval,
-            task_data.enable_callback,
-            task_data.save_result,
-            task_data.config,
-            task_data.node_id
-        )
-        
-        # 构造响应数据
-        response_data = {
-            "id": result.id,
-            "name": result.name,
-            "status": result.status,
-            "error_message": result.error_message,
-            "callback_interval": result.callback_interval,
-            "created_at": result.created_at,
-            "updated_at": result.updated_at,
-            "started_at": result.started_at,
-            "completed_at": result.completed_at,
-            "stream_ids": [stream.id for stream in result.streams],
-            "model_ids": [model.id for model in result.models],
-            "callback_ids": [callback.id for callback in result.callbacks],
-            "enable_callback": result.enable_callback if hasattr(result, 'enable_callback') else True,
-            "save_result": result.save_result if hasattr(result, 'save_result') else False,
-            "config": result.config if hasattr(result, 'config') else {},
-            "node_id": result.node_id if hasattr(result, 'node_id') else None
-        }
+        new_task = task_crud.create_task(db, task_data)
         
         return BaseResponse(
             path=str(request.url),
             message="创建成功",
-            data=response_data
+            data={
+                "id": new_task.id,
+                "name": new_task.name,
+                "status": new_task.status,
+                "save_result": new_task.save_result,
+                "total_subtasks": new_task.total_subtasks,
+                "created_at": new_task.created_at
+            }
         )
     except Exception as e:
-        logger.error(f"Create task failed: {str(e)}")
+        logger.error(f"创建任务失败: {str(e)}")
         return BaseResponse(
             path=str(request.url),
             success=False,
@@ -78,42 +141,56 @@ async def create_task(
             message=str(e)
         )
 
-@router.post("/list", response_model=BaseResponse)
+@router.post("/list", response_model=BaseResponse, summary="获取任务列表")
 async def get_tasks(
     request: Request,
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 10,
     status: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    """获取任务列表"""
+    """
+    获取任务列表
+    
+    参数:
+    - skip: 跳过的记录数
+    - limit: 返回的最大记录数
+    - status: 任务状态过滤
+    
+    返回:
+    - 任务列表和总数
+    """
     try:
-        tasks = task.get_tasks(db, skip, limit, status)
+        tasks = task_crud.get_tasks(db, skip, limit, status, include_subtasks=False)
+        total = db.query(task_crud.Task).count()
+        
+        # 转换为响应格式
+        task_list = []
+        for t in tasks:
+            task_list.append({
+                "id": t.id,
+                "name": t.name,
+                "status": t.status,
+                "save_result": t.save_result,
+                "active_subtasks": t.active_subtasks,
+                "total_subtasks": t.total_subtasks,
+                "created_at": t.created_at,
+                "updated_at": t.updated_at,
+                "started_at": t.started_at,
+                "completed_at": t.completed_at,
+                "error_message": t.error_message
+            })
+        
         return BaseResponse(
             path=str(request.url),
             message="获取成功",
             data={
-                "total": len(tasks),
-                "items": [
-                    {
-                        "id": t.id,
-                        "name": t.name,
-                        "status": t.status,
-                        "error_message": t.error_message,
-                        "callback_interval": t.callback_interval,
-                        "created_at": t.created_at,
-                        "updated_at": t.updated_at,
-                        "started_at": t.started_at,
-                        "completed_at": t.completed_at,
-                        "stream_ids": [s.id for s in t.streams],
-                        "model_ids": [m.id for m in t.models],
-                        "callback_ids": [c.id for c in t.callbacks]
-                    } for t in tasks
-                ]
+                "total": total,
+                "items": task_list
             }
         )
     except Exception as e:
-        logger.error(f"Get tasks failed: {str(e)}")
+        logger.error(f"获取任务列表失败: {str(e)}")
         return BaseResponse(
             path=str(request.url),
             success=False,
@@ -121,89 +198,94 @@ async def get_tasks(
             message=str(e)
         )
 
-@router.post("/detail", response_model=BaseResponse)
+@router.post("/detail", response_model=BaseResponse, summary="获取任务详情")
 async def get_task(
     request: Request,
     task_id: int,
     db: Session = Depends(get_db)
 ):
-    """获取任务详情"""
+    """
+    获取任务详情
+    
+    参数:
+    - task_id: 任务ID
+    
+    返回:
+    - 任务详细信息，包括子任务列表
+    """
     try:
-        result = task.get_task(db, task_id)
-        if not result:
+        task_obj = task_crud.get_task(db, task_id, include_subtasks=True)
+        if not task_obj:
             return BaseResponse(
                 path=str(request.url),
                 success=False,
                 code=404,
-                message="Task not found"
+                message="任务不存在"
             )
-            
-        # 构造基本响应数据
-        response_data = {
-            "id": result.id,
-            "name": result.name,
-            "status": result.status,
-            "error_message": result.error_message,
-            "callback_interval": result.callback_interval,
-            "created_at": result.created_at,
-            "updated_at": result.updated_at,
-            "started_at": result.started_at,
-            "completed_at": result.completed_at,
-            "stream_ids": [stream.id for stream in result.streams],
-            "model_ids": [model.id for model in result.models],
-            "callback_ids": [callback.id for callback in result.callbacks]
-        }
         
-        # 若任务为运行状态，添加子任务详情
-        if result.status == "running":
-            # 获取子任务列表
-            sub_tasks = db.query(SubTask).filter(SubTask.task_id == task_id).all()
+        # 准备子任务响应
+        subtasks = []
+        for st in task_obj.sub_tasks:
+            # 获取流和模型信息
+            stream_name = st.stream.name if st.stream else None
+            model_name = st.model.name if st.model else None
             
-            # 构造子任务数据
-            sub_tasks_data = []
-            for sub_task in sub_tasks:
-                # 获取节点信息
-                node = None
-                if result.node_id:
-                    node = db.query(Node).filter(Node.id == result.node_id).first()
-                
-                sub_task_data = {
-                    "id": sub_task.id,
-                    "analysis_task_id": sub_task.analysis_task_id,
-                    "status": sub_task.status,
-                    "stream_id": sub_task.stream_id,
-                    "model_id": sub_task.model_id,
-                    "started_at": sub_task.started_at,
-                    "completed_at": sub_task.completed_at,
-                    "node_id": result.node_id,
-                    "node_info": {
-                        "id": node.id,
-                        "ip": node.ip,
-                        "port": node.port,
-                        "status": node.service_status
-                    } if node else None
+            node_info = None
+            if st.node:
+                node_info = {
+                    "id": st.node.id,
+                    "ip": st.node.ip,
+                    "port": st.node.port,
+                    "service_name": st.node.service_name,
+                    "service_status": st.node.service_status
                 }
-                sub_tasks_data.append(sub_task_data)
             
-            # 添加子任务数据到响应
-            response_data["sub_tasks"] = sub_tasks_data
-            
-            # 添加节点信息
-            if result.node_id and result.node:
-                response_data["node"] = {
-                    "id": result.node.id,
-                    "ip": result.node.ip,
-                    "port": result.node.port,
-                    "status": result.node.service_status
-                }
+            subtasks.append({
+                "id": st.id,
+                "task_id": st.task_id,
+                "stream_id": st.stream_id,
+                "model_id": st.model_id,
+                "status": st.status,
+                "error_message": st.error_message,
+                "created_at": st.created_at,
+                "updated_at": st.updated_at,
+                "started_at": st.started_at,
+                "completed_at": st.completed_at,
+                "config": st.config,
+                "enable_callback": st.enable_callback,
+                "callback_url": st.callback_url,
+                "roi_type": st.roi_type,
+                "analysis_type": st.analysis_type,
+                "node_id": st.node_id,
+                "analysis_task_id": st.analysis_task_id,
+                "stream_name": stream_name,
+                "model_name": model_name,
+                "node_info": node_info
+            })
+        
+        # 组装任务详情响应
+        task_detail = {
+            "id": task_obj.id,
+            "name": task_obj.name,
+            "status": task_obj.status,
+            "error_message": task_obj.error_message,
+            "save_result": task_obj.save_result,
+            "created_at": task_obj.created_at,
+            "updated_at": task_obj.updated_at,
+            "started_at": task_obj.started_at,
+            "completed_at": task_obj.completed_at,
+            "active_subtasks": task_obj.active_subtasks,
+            "total_subtasks": task_obj.total_subtasks,
+            "sub_tasks": subtasks
+        }
         
         return BaseResponse(
             path=str(request.url),
             message="获取成功",
-            data=response_data
+            data=task_detail
         )
     except Exception as e:
-        logger.error(f"Get task failed: {str(e)}")
+        logger.error(f"获取任务详情失败: {str(e)}")
         return BaseResponse(
             path=str(request.url),
             success=False,
@@ -211,62 +293,48 @@ async def get_task(
             message=str(e)
         )
 
-@router.post("/update", response_model=BaseResponse)
+@router.post("/update", response_model=BaseResponse, summary="更新任务")
 async def update_task(
     request: Request,
     task_data: TaskUpdate,
     db: Session = Depends(get_db)
 ):
-    """更新任务"""
+    """
+    更新任务基本信息
+    
+    参数:
+    - id: 任务ID
+    - name: 任务名称 (可选)
+    - save_result: 是否保存结果 (可选)
+    
+    返回:
+    - 更新后的任务基本信息
+    """
     try:
-        result = task.update_task(
-            db,
-            task_data.id,
-            name=task_data.name,
-            stream_ids=task_data.stream_ids,
-            model_ids=task_data.model_ids,
-            callback_ids=task_data.callback_ids,
-            callback_interval=task_data.callback_interval,
-            enable_callback=task_data.enable_callback,
-            save_result=task_data.save_result,
-            config=task_data.config,
-            node_id=task_data.node_id
-        )
-        if not result:
+        updated_task = task_crud.update_task(db, task_data.id, task_data)
+        if not updated_task:
             return BaseResponse(
                 path=str(request.url),
                 success=False,
                 code=404,
-                message="Task not found"
+                message="任务不存在"
             )
-            
-        # 构造响应数据
-        response_data = {
-            "id": result.id,
-            "name": result.name,
-            "status": result.status,
-            "error_message": result.error_message,
-            "callback_interval": result.callback_interval,
-            "created_at": result.created_at,
-            "updated_at": result.updated_at,
-            "started_at": result.started_at,
-            "completed_at": result.completed_at,
-            "stream_ids": [stream.id for stream in result.streams],
-            "model_ids": [model.id for model in result.models],
-            "callback_ids": [callback.id for callback in result.callbacks],
-            "enable_callback": result.enable_callback if hasattr(result, 'enable_callback') else True,
-            "save_result": result.save_result if hasattr(result, 'save_result') else False,
-            "config": result.config if hasattr(result, 'config') else {},
-            "node_id": result.node_id if hasattr(result, 'node_id') else None
-        }
         
         return BaseResponse(
             path=str(request.url),
             message="更新成功",
-            data=response_data
+            data={
+                "id": updated_task.id,
+                "name": updated_task.name,
+                "status": updated_task.status,
+                "save_result": updated_task.save_result,
+                "active_subtasks": updated_task.active_subtasks,
+                "total_subtasks": updated_task.total_subtasks,
+                "updated_at": updated_task.updated_at
+            }
         )
     except Exception as e:
-        logger.error(f"Update task failed: {str(e)}")
+        logger.error(f"更新任务失败: {str(e)}")
         return BaseResponse(
             path=str(request.url),
             success=False,
@@ -274,80 +342,37 @@ async def update_task(
             message=str(e)
         )
 
-@router.post("/status/update", response_model=BaseResponse)
-async def update_task_status(
-    request: Request,
-    status_data: TaskStatusUpdate,
-    db: Session = Depends(get_db)
-):
-    """更新任务状态"""
-    try:
-        result = task.update_task_status(
-            db,
-            status_data.task_id,
-            status=status_data.status,
-            error_message=status_data.error_message
-        )
-        if not result:
-            return BaseResponse(
-                path=str(request.url),
-                success=False,
-                code=404,
-                message="Task not found"
-            )
-            
-        # 构造响应数据
-        response_data = {
-            "id": result.id,
-            "name": result.name,
-            "status": result.status,
-            "error_message": result.error_message,
-            "callback_interval": result.callback_interval,
-            "created_at": result.created_at,
-            "updated_at": result.updated_at,
-            "started_at": result.started_at,
-            "completed_at": result.completed_at,
-            "stream_ids": [stream.id for stream in result.streams],
-            "model_ids": [model.id for model in result.models],
-            "callback_ids": [callback.id for callback in result.callbacks]
-        }
-        
-        return BaseResponse(
-            path=str(request.url),
-            message="状态更新成功",
-            data=response_data
-        )
-    except Exception as e:
-        logger.error(f"Update task status failed: {str(e)}")
-        return BaseResponse(
-            path=str(request.url),
-            success=False,
-            code=500,
-            message=str(e)
-        )
-
-@router.post("/delete", response_model=BaseResponse)
+@router.post("/delete", response_model=BaseResponse, summary="删除任务")
 async def delete_task(
     request: Request,
     task_id: int,
     db: Session = Depends(get_db)
 ):
-    """删除任务"""
+    """
+    删除任务
+    
+    参数:
+    - task_id: 任务ID
+    
+    返回:
+    - 删除操作结果
+    """
     try:
-        success = task.delete_task(db, task_id)
-        if not success:
+        result = task_crud.delete_task(db, task_id)
+        if not result:
             return BaseResponse(
                 path=str(request.url),
                 success=False,
                 code=404,
-                message="Task not found"
+                message="任务不存在或无法删除运行中的任务"
             )
+        
         return BaseResponse(
             path=str(request.url),
             message="删除成功"
         )
     except Exception as e:
-        logger.error(f"Delete task failed: {str(e)}")
+        logger.error(f"删除任务失败: {str(e)}")
         return BaseResponse(
             path=str(request.url),
             success=False,
@@ -355,50 +380,31 @@ async def delete_task(
             message=str(e)
         )
 
-@router.post("/start", response_model=BaseResponse)
+@router.post("/start", response_model=BaseResponse, summary="启动任务")
 async def start_task(
     request: Request,
     task_id: int,
     db: Session = Depends(get_db)
 ):
-    """启动任务"""
+    """
+    启动任务
+    
+    参数:
+    - task_id: 任务ID
+    
+    返回:
+    - 启动操作结果
+    """
     try:
-        success = await task_controller.start_task(db, task_id)
-        if not success:
-            return BaseResponse(
-                path=str(request.url),
-                success=False,
-                code=400,
-                message="Failed to start task"
-            )
-            
-        # 获取更新后的任务信息
-        task_info = db.query(Task).filter(Task.id == task_id).first()
-        if not task_info:
-            return BaseResponse(
-                path=str(request.url),
-                success=False,
-                code=404,
-                message="Task not found"
-            )
-            
+        success, message = await task_crud.start_task(db, task_id)
+        
         return BaseResponse(
             path=str(request.url),
-            message="任务启动成功",
-            data={
-                "task_id": task_id,
-                "status": task_info.status,
-                "started_at": task_info.started_at,
-                "streams": [
-                    {
-                        "id": stream.id,
-                        "status": stream.status
-                    } for stream in task_info.streams
-                ]
-            }
+            success=success,
+            message=message
         )
     except Exception as e:
-        logger.error(f"Start task failed: {str(e)}")
+        logger.error(f"启动任务失败: {str(e)}")
         return BaseResponse(
             path=str(request.url),
             success=False,
@@ -406,30 +412,31 @@ async def start_task(
             message=str(e)
         )
 
-@router.post("/stop", response_model=BaseResponse)
+@router.post("/stop", response_model=BaseResponse, summary="停止任务")
 async def stop_task(
     request: Request,
     task_id: int,
     db: Session = Depends(get_db)
 ):
-    """停止任务"""
+    """
+    停止任务
+    
+    参数:
+    - task_id: 任务ID
+    
+    返回:
+    - 停止操作结果
+    """
     try:
-        success = await task_controller.stop_task(db, task_id)
-        if not success:
-            return BaseResponse(
-                path=str(request.url),
-                success=False,
-                code=400,
-                message="Failed to stop task"
-            )
-            
+        success, message = await task_crud.stop_task(db, task_id)
+        
         return BaseResponse(
             path=str(request.url),
-            message="任务停止成功",
-            data={"task_id": task_id}
+            success=success,
+            message=message
         )
     except Exception as e:
-        logger.error(f"Stop task failed: {str(e)}")
+        logger.error(f"停止任务失败: {str(e)}")
         return BaseResponse(
             path=str(request.url),
             success=False,

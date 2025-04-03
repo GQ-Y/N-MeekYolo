@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Any
 from pydantic import BaseModel, Field
 
 class DetectionConfig(BaseModel):
@@ -22,9 +22,19 @@ class DetectionConfig(BaseModel):
         description="需要检测的类别ID列表",
         example=[0, 2]
     )
-    roi: Optional[Dict[str, float]] = Field(
+    roi_type: Optional[int] = Field(
+        0,
+        description="ROI类型: 0-无ROI, 1-矩形, 2-多边形, 3-线段",
+        ge=0,
+        le=3,
+        example=1
+    )
+    roi: Optional[Dict[str, Any]] = Field(
         None,
-        description="感兴趣区域，格式为{x1, y1, x2, y2}，值为0-1的归一化坐标",
+        description="感兴趣区域，根据roi_type类型不同有不同定义。"
+                    "矩形(type=1): {x1, y1, x2, y2}，值为0-1的归一化坐标; "
+                    "多边形(type=2): {points: [[x1,y1], [x2,y2], ...]}，值为0-1的归一化坐标; "
+                    "线段(type=3): {points: [[x1,y1], [x2,y2]]}, 值为0-1的归一化坐标",
         example={"x1": 0.1, "y1": 0.1, "x2": 0.9, "y2": 0.9}
     )
     imgsz: Optional[int] = Field(

@@ -69,9 +69,11 @@ class AnalysisService:
         stream_url: str,
         task_name: Optional[str] = None,
         callback_urls: Optional[str] = None,
+        callback_url: Optional[str] = None,
         enable_callback: bool = True,
         save_result: bool = False,
         config: Optional[Dict[str, Any]] = None,
+        analysis_task_id: Optional[str] = None,
         analysis_type: str = "detection"
     ) -> str:
         """流分析
@@ -81,31 +83,76 @@ class AnalysisService:
             stream_url: 流URL
             task_name: 任务名称
             callback_urls: 回调地址，多个用逗号分隔
-            enable_callback: 是否启用回调
+            callback_url: 单独的回调URL，优先级高于callback_urls
+            enable_callback: 是否启用用户回调
             save_result: 是否保存结果
             config: 分析配置
-            analysis_type: 分析类型，可选值：detection, segmentation, tracking, cross_camera
+            analysis_task_id: 分析任务ID，如果不提供将自动生成
+            analysis_type: 分析类型，可选值：detection, segmentation, tracking, counting
             
         Returns:
             task_id: 任务ID
         """
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                self._get_api_url("/analyze/stream"),
-                json={
-                    "model_code": model_code,
-                    "stream_url": stream_url,
-                    "task_name": task_name,
-                    "callback_urls": callback_urls,
-                    "enable_callback": enable_callback,
-                    "save_result": save_result,
-                    "config": config or {},
-                    "analysis_type": analysis_type
-                }
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data.get("data", {}).get("task_id")
+        # 构建系统回调URL
+        system_callback_url = callback_url
+        if not system_callback_url:
+            # 使用配置中的API服务URL创建系统回调
+            api_host = settings.SERVICE.host
+            api_port = settings.SERVICE.port
+            system_callback_url = f"http://{api_host}:{api_port}/api/v1/callback"
+            logger.info(f"使用系统回调URL: {system_callback_url}")
+            
+        # 如果有单独的回调URL，添加到回调列表
+        combined_callback_urls = callback_urls or ""
+        if callback_url and callback_url not in combined_callback_urls:
+            if combined_callback_urls:
+                combined_callback_urls = f"{combined_callback_urls},{callback_url}"
+            else:
+                combined_callback_urls = callback_url
+        
+        # 构建请求参数
+        request_data = {
+            "model_code": model_code,
+            "stream_url": stream_url,
+            "task_name": task_name,
+            "callback_urls": combined_callback_urls,
+            "callback_url": system_callback_url,  # 传递系统回调URL
+            "enable_callback": enable_callback,
+            "save_result": save_result,
+            "config": config or {},
+            "analysis_type": analysis_type,
+            "task_id": analysis_task_id  # 传递任务ID
+        }
+        
+        logger.info(f"准备向分析服务发送请求: URL={self._get_api_url('/analyze/stream')}")
+        logger.info(f"请求参数: task_id={analysis_task_id}, model_code={model_code}, stream_url={stream_url}")
+        logger.info(f"回调配置: system_callback={system_callback_url}, user_callbacks={combined_callback_urls}, enable_callback={enable_callback}")
+                
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    self._get_api_url("/analyze/stream"),
+                    json=request_data
+                )
+                
+                status_code = response.status_code
+                logger.info(f"分析服务响应状态码: {status_code}")
+                
+                if status_code != 200:
+                    logger.error(f"分析服务响应错误: {response.text}")
+                    response.raise_for_status()
+                
+                data = response.json()
+                logger.info(f"分析服务响应数据: {data}")
+                
+                task_id = data.get("data", {}).get("task_id")
+                logger.info(f"获取到分析任务ID: {task_id}")
+                
+                return task_id
+                
+        except Exception as e:
+            logger.error(f"向分析服务发送请求失败: {str(e)}", exc_info=True)
+            raise
     
     async def stop_task(self, task_id: str):
         """停止分析任务"""
