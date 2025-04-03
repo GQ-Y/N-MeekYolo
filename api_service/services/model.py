@@ -7,6 +7,7 @@ from typing import List, Optional, Dict, Any
 from core.config import settings
 from models.database import Model
 from shared.utils.logger import setup_logger
+from sqlalchemy.sql import text
 
 logger = setup_logger(__name__)
 
@@ -41,25 +42,76 @@ class ModelService:
                 response.raise_for_status()
                 data = response.json()
                 
-                # 更新本地数据库
-                models = []
+                # 获取模型服务返回的模型代码列表
+                remote_model_codes = [item["code"] for item in data.get("data", {}).get("items", [])]
+                
+                # 获取本地数据库中的所有模型
+                local_models = db.query(Model).all()
+                local_model_codes = {model.code: model for model in local_models}
+                
+                # 处理需要更新或添加的模型
+                updated_models = []
                 for item in data.get("data", {}).get("items", []):
-                    model = Model(
-                        code=item["code"],
-                        name=item["name"],
-                        path=item.get("path", ""),  # 可能不存在
-                        description=item.get("description", ""),
-                        nc=item.get("nc", 0),  # 新增：类别数量
-                        names=item.get("names", {})  # 新增：类别名称映射
-                    )
-                    models.append(model)
+                    code = item["code"]
                     
-                # 保存到数据库
-                db.query(Model).delete()
-                db.add_all(models)
+                    if code in local_model_codes:
+                        # 更新已有模型
+                        model = local_model_codes[code]
+                        model.name = item["name"]
+                        model.path = item.get("path", "")
+                        model.description = item.get("description", "")
+                        model.nc = item.get("nc", 0)
+                        model.names = item.get("names", {})
+                        model.version = item.get("version", "1.0.0")
+                        model.author = item.get("author", "")
+                        updated_models.append(model)
+                        logger.info(f"更新模型: {code}")
+                    else:
+                        # 添加新模型
+                        model = Model(
+                            code=code,
+                            name=item["name"],
+                            path=item.get("path", ""),
+                            description=item.get("description", ""),
+                            nc=item.get("nc", 0),
+                            names=item.get("names", {}),
+                            version=item.get("version", "1.0.0"),
+                            author=item.get("author", "")
+                        )
+                        db.add(model)
+                        updated_models.append(model)
+                        logger.info(f"添加新模型: {code}")
+                
+                # 删除不再存在的模型
+                # 找出不再远程存在但本地存在的模型代码
+                deleted_codes = set(local_model_codes.keys()) - set(remote_model_codes)
+                
+                # 检查这些模型是否有被任务引用
+                for code in deleted_codes:
+                    model = local_model_codes[code]
+                    
+                    # 检查是否有任务引用了这个模型
+                    # 使用 SQL 查询检查是否存在引用
+                    has_references = db.execute(text("""
+                        SELECT 1 FROM task_model_association WHERE model_id = :model_id
+                        UNION ALL
+                        SELECT 1 FROM sub_tasks WHERE model_id = :model_id
+                        LIMIT 1
+                    """), {"model_id": model.id}).scalar() is not None
+                    
+                    if not has_references:
+                        # 如果没有引用，可以安全删除
+                        db.delete(model)
+                        logger.info(f"删除模型: {code}")
+                    else:
+                        # 如果有引用，将模型保留在列表中
+                        logger.warning(f"模型 {code} 被任务引用，无法删除")
+                        updated_models.append(model)
+                
+                # 提交更改
                 db.commit()
                 
-                return models
+                return updated_models
                 
         except Exception as e:
             logger.error(f"Sync models failed: {str(e)}")
@@ -97,8 +149,10 @@ class ModelService:
                     name=data["name"],
                     path=data.get("path", ""),
                     description=data.get("description", ""),
-                    nc=data.get("nc", 0),  # 新增：类别数量
-                    names=data.get("names", {})  # 新增：类别名称映射
+                    nc=data.get("nc", 0),
+                    names=data.get("names", {}),
+                    version=data.get("version", "1.0.0"),
+                    author=data.get("author", "")
                 )
                 
                 # 保存到数据库

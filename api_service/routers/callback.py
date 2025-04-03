@@ -36,6 +36,8 @@ async def create_callback(
     - headers: 请求头配置(可选)
     - method: 请求方法(GET/POST)
     - body_template: 请求体模板(可选)
+    - retry_count: 重试次数(可选，默认3)
+    - retry_interval: 重试间隔(秒)(可选，默认1)
     
     返回:
     - 创建的回调配置信息
@@ -45,9 +47,12 @@ async def create_callback(
             db,
             callback_data.name,
             callback_data.url,
+            callback_data.description,
             callback_data.headers,
             callback_data.method,
-            callback_data.body_template
+            callback_data.body_template,
+            callback_data.retry_count,
+            callback_data.retry_interval
         )
         
         return BaseResponse(
@@ -60,6 +65,8 @@ async def create_callback(
                 "headers": result.headers,
                 "method": result.method,
                 "body_template": result.body_template,
+                "retry_count": result.retry_count,
+                "retry_interval": result.retry_interval,
                 "created_at": result.created_at,
                 "updated_at": result.updated_at
             }
@@ -89,7 +96,7 @@ async def get_callbacks(
     
     返回:
     - total: 总记录数
-    - items: 回调配置列表
+    - items: 回调配置列表，包含重试次数和重试间隔设置
     """
     try:
         callbacks = callback.get_callbacks(db, skip, limit)
@@ -106,6 +113,8 @@ async def get_callbacks(
                         "headers": cb.headers,
                         "method": cb.method,
                         "body_template": cb.body_template,
+                        "retry_count": cb.retry_count,
+                        "retry_interval": cb.retry_interval,
                         "created_at": cb.created_at,
                         "updated_at": cb.updated_at
                     } for cb in callbacks
@@ -134,7 +143,7 @@ async def get_callback(
     - callback_id: 回调配置ID
     
     返回:
-    - 回调配置的详细信息
+    - 回调配置的详细信息，包含重试次数和重试间隔设置
     """
     try:
         result = callback.get_callback(db, callback_id)
@@ -156,6 +165,8 @@ async def get_callback(
                 "headers": result.headers,
                 "method": result.method,
                 "body_template": result.body_template,
+                "retry_count": result.retry_count,
+                "retry_interval": result.retry_interval,
                 "created_at": result.created_at,
                 "updated_at": result.updated_at
             }

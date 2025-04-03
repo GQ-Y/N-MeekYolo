@@ -29,15 +29,15 @@ async def get_models(
     db: Session = Depends(get_db)
 ):
     """
-    获取所有可用的目标检测模型列表，支持分页查询
+    获取模型列表
     
     参数:
     - skip: 跳过的记录数
     - limit: 返回的最大记录数
     
     返回:
+    - models: 模型列表，包含所有模型信息（id、code、name、description、path、nc、names、version、author）
     - total: 总记录数
-    - items: 模型列表，包含每个模型的基本信息
     
     说明:
     - 优先从远程模型服务同步最新数据
@@ -57,19 +57,27 @@ async def get_models(
             # 服务不可用时使用本地数据
             logger.warning("模型服务不可用，使用本地数据")
             models = db.query(Model).offset(skip).limit(limit).all()
-            
+        
+        total = db.query(Model).count()    
+        
         return BaseResponse(
             path=str(request.url),
             message="获取成功",
             data={
-                "total": len(models),
-                "items": [
+                "total": total,
+                "models": [
                     {
                         "id": model.id,
                         "code": model.code,
                         "name": model.name,
                         "description": model.description,
-                        "path": model.path
+                        "path": model.path,
+                        "nc": model.nc,
+                        "names": model.names,
+                        "version": model.version,
+                        "author": model.author,
+                        "created_at": model.created_at,
+                        "updated_at": model.updated_at
                     } for model in models
                 ]
             }
@@ -96,7 +104,7 @@ async def get_model_by_code(
     - code: 模型代码，唯一标识一个模型
     
     返回:
-    - 模型的详细信息，包括ID、代码、名称、描述和路径
+    - 模型的详细信息，包括ID、代码、名称、描述、路径、检测类别数量、类别名称映射、版本和作者
     """
     try:
         model = await model_service.get_model_by_code(db, code)
@@ -116,7 +124,13 @@ async def get_model_by_code(
                 "code": model.code,
                 "name": model.name,
                 "description": model.description,
-                "path": model.path
+                "path": model.path,
+                "nc": model.nc,
+                "names": model.names,
+                "version": model.version,
+                "author": model.author,
+                "created_at": model.created_at,
+                "updated_at": model.updated_at
             }
         )
     except Exception as e:
@@ -141,7 +155,7 @@ async def get_model(
     - model_id: 模型ID
     
     返回:
-    - 模型的详细信息，包括ID、代码、名称、描述和路径
+    - 模型的详细信息，包括ID、代码、名称、描述、路径、检测类别数量、类别名称映射、版本和作者
     """
     try:
         model = await model_service.get_model(db, model_id)
@@ -161,7 +175,13 @@ async def get_model(
                 "code": model.code,
                 "name": model.name,
                 "description": model.description,
-                "path": model.path
+                "path": model.path,
+                "nc": model.nc,
+                "names": model.names,
+                "version": model.version,
+                "author": model.author,
+                "created_at": model.created_at,
+                "updated_at": model.updated_at
             }
         )
     except Exception as e:
