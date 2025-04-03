@@ -14,18 +14,30 @@ from fastapi.middleware.gzip import GZipMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field
 from shared.utils.logger import setup_logger
-from gateway.discovery.service_registry import service_registry
-from gateway.router.api_router import router
-from gateway.routers.admin import router as admin_router
-from gateway.routers.auth import router as auth_router
-from gateway.core.models import StandardResponse
-from gateway.core.exceptions import GatewayException
+from discovery.service_registry import service_registry
+from router.api_router import router
+from routers.admin import router as admin_router
+from routers.auth import router as auth_router
+from core.models import StandardResponse
+from core.exceptions import GatewayException
 import time
 import uuid
-from .routers import auth, system, user
+from routers import auth, system, user
 
 # 配置日志
 logger = setup_logger(__name__)
+
+def show_service_banner(service_name: str):
+    """显示服务启动标识"""
+    banner = f"""
+███╗   ███╗███████╗███████╗██╗  ██╗██╗   ██╗ ██████╗ ██╗      ██████╗     @{service_name}
+████╗ ████║██╔════╝██╔════╝██║ ██╔╝╚██╗ ██╔╝██╔═══██╗██║     ██╔═══██╗
+██╔████╔██║█████╗  █████╗  █████╔╝  ╚████╔╝ ██║   ██║██║     ██║   ██║
+██║╚██╔╝██║██╔══╝  ██╔══╝  ██╔═██╗   ╚██╔╝  ██║   ██║██║     ██║   ██║
+██║ ╚═╝ ██║███████╗███████╗██║  ██╗   ██║   ╚██████╔╝███████╗╚██████╔╝
+╚═╝     ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚══════╝ ╚═════╝ 
+    """
+    print(banner)
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """请求日志中间件"""
@@ -180,6 +192,7 @@ async def custom_swagger_ui_html():
 @app.on_event("startup")
 async def startup_event():
     """应用启动时的初始化"""
+    show_service_banner("gateway")
     logger.info("Starting API Gateway...")
     
     # 启动服务健康检查

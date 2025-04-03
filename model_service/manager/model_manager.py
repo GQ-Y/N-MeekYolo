@@ -7,7 +7,7 @@ import yaml
 import zipfile
 from typing import List, Dict, Any
 from fastapi import UploadFile, HTTPException
-from model_service.models.models import ModelInfo, ModelList
+from models.models import ModelInfo, ModelList
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

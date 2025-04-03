@@ -6,8 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 import asyncio
 from datetime import datetime
-from api_service.core.config import settings
-from api_service.routers import (
+from core.config import settings
+from routers import (
     stream_router,
     stream_group_router,
     model_router,
@@ -16,8 +16,8 @@ from api_service.routers import (
     analysis_router,
     node_router
 )
-from api_service.services.monitor import StreamMonitor
-from api_service.services.node_health_check import start_health_checker, stop_health_checker
+from services.monitor import StreamMonitor
+from services.node_health_check import start_health_checker, stop_health_checker
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -52,13 +52,27 @@ app.include_router(node_router)
 # 创建视频源监控器
 stream_monitor = StreamMonitor()
 
+def show_service_banner(service_name: str):
+    """显示服务启动标识"""
+    banner = f"""
+███╗   ███╗███████╗███████╗██╗  ██╗██╗   ██╗ ██████╗ ██╗      ██████╗     @{service_name}
+████╗ ████║██╔════╝██╔════╝██║ ██╔╝╚██╗ ██╔╝██╔═══██╗██║     ██╔═══██╗
+██╔████╔██║█████╗  █████╗  █████╔╝  ╚████╔╝ ██║   ██║██║     ██║   ██║
+██║╚██╔╝██║██╔══╝  ██╔══╝  ██╔═██╗   ╚██╔╝  ██║   ██║██║     ██║   ██║
+██║ ╚═╝ ██║███████╗███████╗██║  ██╗   ██║   ╚██████╔╝███████╗╚██████╔╝
+╚═╝     ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚══════╝ ╚═════╝ 
+    """
+    print(banner)
+
 @app.on_event("startup")
 async def startup_event():
-    """启动事件"""
+    """应用启动时的初始化"""
+    show_service_banner("api_service")
+    logger.info("Starting API Service...")
     try:
         # 先初始化数据库
         logger.info("正在初始化数据库...")
-        from api_service.services.database import init_db
+        from services.database import init_db
         init_db()
         
         logger.info("正在启动API服务...")
@@ -75,7 +89,7 @@ async def startup_event():
             logger.info("节点健康检查服务启动成功")
             
             # 启动后立即手动执行一次节点健康检查
-            from api_service.services.node_health_check import health_checker
+            from services.node_health_check import health_checker
             logger.info("执行首次节点健康检查...")
             try:
                 await health_checker.check_nodes_health()

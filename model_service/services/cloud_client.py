@@ -4,8 +4,8 @@
 import aiohttp
 from typing import Dict, Any, Optional, Tuple
 from sqlalchemy.orm import Session
-from model_service.core.config import settings
-from model_service.services.base import get_api_key, invalidate_key
+from core.config import settings
+from services.base import get_api_key, invalidate_key
 from shared.utils.logger import setup_logger
 import os
 

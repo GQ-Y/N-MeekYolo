@@ -4,8 +4,8 @@
 import httpx
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
-from api_service.core.config import settings
-from api_service.models.database import Model
+from core.config import settings
+from models.database import Model
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

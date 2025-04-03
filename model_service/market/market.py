@@ -7,7 +7,7 @@ import asyncio
 from typing import Dict, Any, List
 from datetime import datetime
 from shared.utils.logger import setup_logger
-from model_service.core.config import settings
+from core.config import settings
 
 logger = setup_logger(__name__)
 

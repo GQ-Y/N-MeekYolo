@@ -7,13 +7,13 @@ from fastapi.responses import FileResponse
 from typing import List, Dict, Any
 from sqlalchemy.orm import Session
 from shared.utils.logger import setup_logger
-from model_service.models.models import ModelInfo
-from model_service.models.schemas import StandardResponse, ModelResponse, ModelListResponse
-from model_service.manager.model_manager import ModelManager
-from model_service.services.model import ModelService
-from model_service.services.database import get_db
+from models.models import ModelInfo
+from models.schemas import StandardResponse, ModelResponse, ModelListResponse
+from manager.model_manager import ModelManager
+from services.model import ModelService
+from services.database import get_db
 import os
-from model_service.core.config import settings
+from core.config import settings
 
 # 设置文件大小限制 (100MB)
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB in bytes

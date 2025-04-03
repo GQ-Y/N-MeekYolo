@@ -7,9 +7,9 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from datetime import datetime
 
-from ..core.database import get_db
-from ..core.models import SystemConfig, NetworkConfig, CloudConfig
-from ..core.auth import JWTBearer
+from core.database import get_db
+from core.models import SystemConfig, NetworkConfig, CloudConfig
+from core.auth import JWTBearer
 
 router = APIRouter(prefix="/api/v1/system", tags=["system"])
 

@@ -4,7 +4,7 @@
 from typing import Dict, Optional, List, Any, TypeVar, Generic
 from pydantic import BaseModel, Field
 from datetime import datetime
-from api_service.models.requests import StreamStatus
+from models.requests import StreamStatus
 import uuid
 import time
 

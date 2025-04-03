@@ -3,14 +3,14 @@ API密钥路由
 """
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
-from cloud_service.models.schemas import (
+from models.schemas import (
     StandardResponse,
     ApiKeyCreate,
     ApiKeyUpdate,
     ApiKeyResponse
 )
-from cloud_service.services.key import KeyService
-from cloud_service.services.database import get_db
+from services.key import KeyService
+from services.database import get_db
 from shared.utils.logger import setup_logger
 from uuid import uuid4
 

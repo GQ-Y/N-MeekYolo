@@ -3,7 +3,7 @@
 """
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict
-from api_service.models.database import Callback
+from models.database import Callback
 
 def create_callback(
     db: Session,

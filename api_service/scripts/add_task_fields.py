@@ -2,7 +2,7 @@
 为Task表添加缺少的字段
 """
 from sqlalchemy import create_engine, text
-from api_service.core.config import settings
+from core.config import settings
 from shared.utils.logger import setup_logger
 import pymysql
 

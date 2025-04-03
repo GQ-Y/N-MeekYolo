@@ -11,13 +11,13 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from api_service.models.requests import TaskCreate, TaskUpdate, TaskStatusUpdate
-from api_service.models.responses import BaseResponse, TaskResponse
-from api_service.crud import task
-from api_service.services.database import get_db
+from models.requests import TaskCreate, TaskUpdate, TaskStatusUpdate
+from models.responses import BaseResponse, TaskResponse
+from crud import task
+from services.database import get_db
 from shared.utils.logger import setup_logger
-from api_service.services.task_controller import TaskController
-from api_service.models.database import Task, SubTask, Node
+from services.task_controller import TaskController
+from models.database import Task, SubTask, Node
 
 logger = setup_logger(__name__)
 router = APIRouter(prefix="/api/v1/tasks", tags=["任务"])

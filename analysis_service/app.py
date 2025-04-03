@@ -160,9 +160,23 @@ async def health_check():
         }
     )
 
+def show_service_banner(service_name: str):
+    """显示服务启动标识"""
+    banner = f"""
+███╗   ███╗███████╗███████╗██╗  ██╗██╗   ██╗ ██████╗ ██╗      ██████╗     @{service_name}
+████╗ ████║██╔════╝██╔════╝██║ ██╔╝╚██╗ ██╔╝██╔═══██╗██║     ██╔═══██╗
+██╔████╔██║█████╗  █████╗  █████╔╝  ╚████╔╝ ██║   ██║██║     ██║   ██║
+██║╚██╔╝██║██╔══╝  ██╔══╝  ██╔═██╗   ╚██╔╝  ██║   ██║██║     ██║   ██║
+██║ ╚═╝ ██║███████╗███████╗██║  ██╗   ██║   ╚██████╔╝███████╗╚██████╔╝
+╚═╝     ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚══════╝ ╚═════╝ 
+    """
+    print(banner)
+
 @app.on_event("startup")
 async def startup_event():
-    """启动事件"""
+    """应用启动时的初始化"""
+    show_service_banner("analysis_service")
+    logger.info("Starting Analysis Service...")
     if settings.DEBUG:
         logger.info("分析服务启动...")
         logger.info(f"环境: {settings.ENVIRONMENT}")

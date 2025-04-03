@@ -11,10 +11,10 @@
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 from typing import Optional
-from api_service.models.requests import StreamGroupCreate, StreamGroupUpdate
-from api_service.models.responses import BaseResponse
-from api_service.services.stream_group import StreamGroupService
-from api_service.services.database import get_db
+from models.requests import StreamGroupCreate, StreamGroupUpdate
+from models.responses import BaseResponse
+from services.stream_group import StreamGroupService
+from services.database import get_db
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

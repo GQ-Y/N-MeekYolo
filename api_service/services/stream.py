@@ -1,13 +1,13 @@
 from typing import List, Optional
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
-from api_service.models.database import Stream, StreamGroup
-from api_service.models.requests import (
+from models.database import Stream, StreamGroup
+from models.requests import (
     CreateStreamRequest,
     UpdateStreamRequest
 )
 from shared.utils.logger import setup_logger
-from api_service.core.config import settings
+from core.config import settings
 
 logger = setup_logger(__name__)
 

@@ -4,15 +4,15 @@
 import httpx
 from typing import Dict, Any, List
 from sqlalchemy.orm import Session
-from api_service.models.database import Task, Stream, Model, SubTask, Node
-from api_service.core.config import settings
+from models.database import Task, Stream, Model, SubTask, Node
+from core.config import settings
 from shared.utils.logger import setup_logger
-from api_service.models.requests import StreamStatus
+from models.requests import StreamStatus
 from datetime import datetime
-from api_service.services.analysis import AnalysisService
-from api_service.services.database import get_db
+from services.analysis import AnalysisService
+from services.database import get_db
 import asyncio
-from api_service.crud.node import NodeCRUD
+from crud.node import NodeCRUD
 
 logger = setup_logger(__name__)
 

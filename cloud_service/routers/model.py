@@ -18,17 +18,17 @@ from sqlalchemy.orm import Session
 import yaml
 import os
 from typing import List, Optional
-from cloud_service.models.schemas import (
+from models.schemas import (
     StandardResponse,
     CloudModelCreate,
     CloudModelUpdate,
     CloudModelResponse
 )
-from cloud_service.models.database import CloudModel
-from cloud_service.services.model import ModelService
-from cloud_service.services.key import KeyService
-from cloud_service.services.database import get_db
-from cloud_service.core.config import settings
+from models.database import CloudModel
+from services.model import ModelService
+from services.key import KeyService
+from services.database import get_db
+from core.config import settings
 from datetime import datetime
 from shared.utils.logger import setup_logger
 from uuid import uuid4

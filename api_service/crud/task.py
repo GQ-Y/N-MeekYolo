@@ -5,8 +5,8 @@ from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import logging
-from api_service.models.database import Task, Stream, Model, Callback, Node
-from api_service.crud.node import NodeCRUD
+from models.database import Task, Stream, Model, Callback, Node
+from crud.node import NodeCRUD
 
 logger = logging.getLogger(__name__)
 

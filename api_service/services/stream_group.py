@@ -4,8 +4,8 @@
 from typing import List, Optional
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
-from api_service.models.database import StreamGroup, Stream
-from api_service.models.requests import StreamGroupCreate, StreamGroupUpdate
+from models.database import StreamGroup, Stream
+from models.requests import StreamGroupCreate, StreamGroupUpdate
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

@@ -3,10 +3,10 @@
 """
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-from ..core.database import get_db
-from ..core.auth import Auth
-from ..core.models import LoginRequest, RegisterRequest, TokenResponse, StandardResponse
-from ..core.exceptions import InvalidCredentialsException, UserExistsException
+from core.database import get_db
+from core.auth import Auth
+from core.models import LoginRequest, RegisterRequest, TokenResponse, StandardResponse
+from core.exceptions import InvalidCredentialsException, UserExistsException
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 

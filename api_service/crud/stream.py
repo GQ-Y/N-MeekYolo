@@ -3,7 +3,7 @@
 """
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from api_service.models.database import Stream, StreamGroup
+from models.database import Stream, StreamGroup
 
 def create_stream(
     db: Session, 

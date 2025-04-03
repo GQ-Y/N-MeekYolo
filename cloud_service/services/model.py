@@ -9,9 +9,9 @@ from typing import List, Optional
 from fastapi import UploadFile, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime
-from cloud_service.models.database import CloudModel
-from cloud_service.models.schemas import CloudModelCreate, CloudModelUpdate
-from cloud_service.core.config import settings
+from models.database import CloudModel
+from models.schemas import CloudModelCreate, CloudModelUpdate
+from core.config import settings
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

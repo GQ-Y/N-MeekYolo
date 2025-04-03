@@ -9,10 +9,10 @@ import asyncio
 from sqlalchemy import and_
 from sqlalchemy.orm import Session, joinedload
 
-from api_service.models.node import Node
-from api_service.models.responses import NodeCreate, NodeUpdate
+from models.node import Node
+from models.responses import NodeCreate, NodeUpdate
 from shared.utils.logger import setup_logger
-from api_service.models.database import Task, SubTask
+from models.database import Task, SubTask
 
 logger = setup_logger(__name__)
 

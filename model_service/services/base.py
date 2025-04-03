@@ -3,7 +3,7 @@
 """
 from typing import Optional, Tuple
 from sqlalchemy.orm import Session
-from model_service.models.database import MarketKey
+from models.database import MarketKey
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

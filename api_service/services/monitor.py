@@ -6,9 +6,9 @@ import cv2
 from datetime import datetime
 from sqlalchemy.orm import Session
 from concurrent.futures import ThreadPoolExecutor
-from api_service.models.database import Stream
-from api_service.models.requests import StreamStatus
-from api_service.services.database import SessionLocal
+from models.database import Stream
+from models.requests import StreamStatus
+from services.database import SessionLocal
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

@@ -3,7 +3,7 @@
 """
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, JSON, Text
 from sqlalchemy.sql import func
-from cloud_service.models.base import Base
+from models.base import Base
 
 class CloudModel(Base):
     """云模型"""

@@ -11,10 +11,10 @@
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 from typing import List
-from api_service.models.responses import BaseResponse, ModelResponse
-from api_service.services.model import ModelService
-from api_service.services.database import get_db
-from api_service.models.database import Model
+from models.responses import BaseResponse, ModelResponse
+from services.model import ModelService
+from services.database import get_db
+from models.database import Model
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

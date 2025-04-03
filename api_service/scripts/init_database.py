@@ -2,9 +2,9 @@
 综合的数据库初始化脚本，用于创建所有表结构和基础数据
 """
 from sqlalchemy import create_engine, text
-from api_service.core.config import settings
-from api_service.models.database import Base, Stream, StreamGroup, Model, Callback, Task, Node, SubTask
-from api_service.services.database import init_db, get_db
+from core.config import settings
+from models.database import Base, Stream, StreamGroup, Model, Callback, Task, Node, SubTask
+from services.database import init_db, get_db
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

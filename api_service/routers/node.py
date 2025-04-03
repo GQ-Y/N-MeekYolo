@@ -15,9 +15,9 @@ from typing import List, Optional
 from datetime import datetime
 from pydantic import BaseModel, Field
 
-from api_service.core.database import get_db
-from api_service.crud.node import NodeCRUD
-from api_service.models.responses import (
+from core.database import get_db
+from crud.node import NodeCRUD
+from models.responses import (
     BaseResponse,
     NodeCreate,
     NodeUpdate,

@@ -7,11 +7,11 @@ import zipfile
 import shutil
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
-from model_service.core.config import settings
-from model_service.services.key import KeyService
+from core.config import settings
+from services.key import KeyService
 from shared.utils.logger import setup_logger
 import json
-from model_service.manager.model_manager import ModelManager
+from manager.model_manager import ModelManager
 
 logger = setup_logger(__name__)
 

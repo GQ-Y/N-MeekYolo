@@ -5,8 +5,8 @@ import secrets
 from typing import List, Optional
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
-from cloud_service.models.database import ApiKey
-from cloud_service.models.schemas import ApiKeyCreate, ApiKeyUpdate
+from models.database import ApiKey
+from models.schemas import ApiKeyCreate, ApiKeyUpdate
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

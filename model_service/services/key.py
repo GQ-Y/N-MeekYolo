@@ -4,10 +4,10 @@
 from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
-from model_service.models.database import MarketKey
-from model_service.models.schemas import KeyCreate, KeyUpdate
-from model_service.services.cloud_client import CloudClient
-from model_service.services.base import get_key
+from models.database import MarketKey
+from models.schemas import KeyCreate, KeyUpdate
+from services.cloud_client import CloudClient
+from services.base import get_key
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

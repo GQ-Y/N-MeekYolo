@@ -4,7 +4,7 @@
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-from api_service.core.config import settings
+from core.config import settings
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -28,10 +28,10 @@ def init_db():
     """初始化数据库"""
     try:
         # 导入所有模型
-        from api_service.models.database import Base as DBBase
-        from api_service.models.database import StreamGroup, Stream
-        from api_service.models.requests import StreamStatus
-        from api_service.models.node import Node  # 导入节点模型
+        from models.database import Base as DBBase
+        from models.database import StreamGroup, Stream
+        from models.requests import StreamStatus
+        from models.node import Node  # 导入节点模型
         
         # 创建所有表
         DBBase.metadata.create_all(bind=engine)

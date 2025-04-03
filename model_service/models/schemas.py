@@ -4,7 +4,7 @@
 from typing import Optional, Any, Dict, List
 from pydantic import BaseModel, EmailStr, Field, constr
 from datetime import datetime
-from model_service.models.models import ModelInfo, ModelList
+from models.models import ModelInfo, ModelList
 import uuid
 
 class StandardResponse(BaseModel):

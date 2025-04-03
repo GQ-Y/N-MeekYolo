@@ -5,8 +5,8 @@ import os
 import yaml
 from typing import List, Optional
 from sqlalchemy.orm import Session
-from api_service.models.database import Model
-from api_service.core.config import settings
+from models.database import Model
+from core.config import settings
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

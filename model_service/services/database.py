@@ -4,7 +4,7 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-from model_service.core.config import settings
+from core.config import settings
 from shared.utils.logger import setup_logger
 import os
 
@@ -36,7 +36,7 @@ Base = declarative_base()
 def init_db():
     """初始化数据库"""
     try:
-        from model_service.models.database import Base
+        from models.database import Base
         Base.metadata.create_all(bind=engine)
         logger.info(f"Database initialized at: {DB_PATH}")
     except Exception as e:

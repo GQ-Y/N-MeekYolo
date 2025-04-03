@@ -3,9 +3,9 @@
 """
 from fastapi import APIRouter, Depends, HTTPException, Request, Query, Body
 from sqlalchemy.orm import Session
-from model_service.models.schemas import StandardResponse
-from model_service.services.market import MarketService
-from model_service.services.database import get_db
+from models.schemas import StandardResponse
+from services.market import MarketService
+from services.database import get_db
 from shared.utils.logger import setup_logger
 from typing import Optional
 from pydantic import BaseModel

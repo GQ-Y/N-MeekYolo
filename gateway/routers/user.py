@@ -5,10 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
-from ..core.database import get_db
-from ..core.models import User, ProfileUpdate, PasswordUpdate, TokenUpdate, StandardResponse
-from ..core.auth import Auth, JWTBearer
-from ..core.exceptions import InvalidCredentialsException
+from core.database import get_db
+from core.models import User, ProfileUpdate, PasswordUpdate, TokenUpdate, StandardResponse
+from core.auth import Auth, JWTBearer
+from core.exceptions import InvalidCredentialsException
 import uuid
 
 router = APIRouter(

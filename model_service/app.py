@@ -10,12 +10,12 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
-from model_service.core.config import settings
-from model_service.routers.models import router as models_router
-from model_service.routers.market import router as market_router
-from model_service.routers.key import router as key_router
-from model_service.services.database import init_db
-from model_service.manager.model_manager import ModelManager
+from core.config import settings
+from routers.models import router as models_router
+from routers.market import router as market_router
+from routers.key import router as key_router
+from services.database import init_db
+from manager.model_manager import ModelManager
 
 # 配置日志
 logging.basicConfig(
@@ -101,6 +101,24 @@ app.include_router(
 async def health_check(request: Request):
     """健康检查"""
     return {"status": "ok"}
+
+def show_service_banner(service_name: str):
+    """显示服务启动标识"""
+    banner = f"""
+███╗   ███╗███████╗███████╗██╗  ██╗██╗   ██╗ ██████╗ ██╗      ██████╗     @{service_name}
+████╗ ████║██╔════╝██╔════╝██║ ██╔╝╚██╗ ██╔╝██╔═══██╗██║     ██╔═══██╗
+██╔████╔██║█████╗  █████╗  █████╔╝  ╚████╔╝ ██║   ██║██║     ██║   ██║
+██║╚██╔╝██║██╔══╝  ██╔══╝  ██╔═██╗   ╚██╔╝  ██║   ██║██║     ██║   ██║
+██║ ╚═╝ ██║███████╗███████╗██║  ██╗   ██║   ╚██████╔╝███████╗╚██████╔╝
+╚═╝     ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚══════╝ ╚═════╝ 
+    """
+    print(banner)
+
+@app.on_event("startup")
+async def startup_event():
+    """应用启动时的初始化"""
+    show_service_banner("model_service")
+    logger.info("Starting Model Service...")
 
 if __name__ == "__main__":
     import uvicorn

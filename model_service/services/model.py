@@ -7,11 +7,11 @@ import httpx
 import zipfile
 from typing import Optional, Tuple, Dict
 from sqlalchemy.orm import Session
-from model_service.core.config import settings
-from model_service.services.cloud_client import CloudClient
-from model_service.services.base import get_api_key
+from core.config import settings
+from services.cloud_client import CloudClient
+from services.base import get_api_key
 from shared.utils.logger import setup_logger
-from model_service.models.models import ModelInfo
+from models.models import ModelInfo
 
 logger = setup_logger(__name__)
 

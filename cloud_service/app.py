@@ -11,10 +11,10 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
-from cloud_service.core.config import settings
-from cloud_service.services.database import init_db
-from cloud_service.routers import model, key
-from cloud_service.utils.logger import setup_logger
+from core.config import settings
+from services.database import init_db
+from routers import model, key
+from utils.logger import setup_logger
 
 # 配置日志
 logging.basicConfig(level=settings.LOGGING.level)

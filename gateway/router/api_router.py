@@ -6,10 +6,10 @@ from fastapi import APIRouter, Request, Depends
 from fastapi.responses import JSONResponse
 from typing import Optional, Any, Dict
 from shared.utils.logger import setup_logger
-from gateway.discovery.service_registry import service_registry
-from gateway.core.models import StandardResponse, RouteRequest
-from gateway.core.auth import JWTBearer
-from gateway.core.exceptions import (
+from discovery.service_registry import service_registry
+from core.models import StandardResponse, RouteRequest
+from core.auth import JWTBearer
+from core.exceptions import (
     GatewayException,
     ServiceNotFoundException,
     ServiceUnhealthyException,

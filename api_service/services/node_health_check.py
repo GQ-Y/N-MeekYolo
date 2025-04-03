@@ -5,12 +5,12 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import text
-from api_service.crud.node import NodeCRUD
-from api_service.models.node import Node
-from api_service.core.database import SessionLocal
+from crud.node import NodeCRUD
+from models.node import Node
+from core.database import SessionLocal
 from shared.utils.logger import setup_logger
 import httpx
-from api_service.models.database import Task, SubTask
+from models.database import Task, SubTask
 from sqlalchemy import and_
 from sqlalchemy.orm import joinedload
 from typing import List

@@ -9,9 +9,9 @@
 """
 from fastapi import APIRouter, Request
 from typing import List, Dict, Any
-from api_service.models.requests import ImageAnalysisRequest, VideoAnalysisRequest, StreamAnalysisRequest
-from api_service.models.responses import BaseResponse
-from api_service.services.analysis import AnalysisService
+from models.requests import ImageAnalysisRequest, VideoAnalysisRequest, StreamAnalysisRequest
+from models.responses import BaseResponse
+from services.analysis import AnalysisService
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

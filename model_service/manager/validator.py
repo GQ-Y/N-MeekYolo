@@ -6,7 +6,7 @@ import os
 import yaml
 from typing import Dict, Any, List, Tuple
 from shared.utils.logger import setup_logger
-from model_service.core.config import settings
+from core.config import settings
 
 logger = setup_logger(__name__)
 

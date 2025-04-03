@@ -1,7 +1,7 @@
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from api_service.core.config import settings
+from core.config import settings
 
 # 创建数据库引擎
 SQLALCHEMY_DATABASE_URL = settings.DATABASE.url

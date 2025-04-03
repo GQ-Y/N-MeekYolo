@@ -3,9 +3,9 @@
 """
 from fastapi import APIRouter, HTTPException, Depends, Request, Body
 from sqlalchemy.orm import Session
-from model_service.models.schemas import StandardResponse, KeyCreate, KeyResponse, KeyUpdate
-from model_service.services.key import KeyService
-from model_service.services.database import get_db
+from models.schemas import StandardResponse, KeyCreate, KeyResponse, KeyUpdate
+from services.key import KeyService
+from services.database import get_db
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

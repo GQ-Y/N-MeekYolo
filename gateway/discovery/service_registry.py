@@ -6,7 +6,7 @@ import asyncio
 import aiohttp
 from datetime import datetime
 from shared.models.base import ServiceInfo
-from gateway.core.config import settings
+from core.config import settings
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

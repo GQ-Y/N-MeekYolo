@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Path, Body
 from typing import List, Dict, Optional, Any
 from pydantic import BaseModel, Field
 from shared.models.base import ServiceInfo
-from gateway.discovery.service_registry import service_registry
+from discovery.service_registry import service_registry
 import time
 import uuid
 
