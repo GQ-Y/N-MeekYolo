@@ -16,6 +16,8 @@ import time
 import uuid
 import logging
 import uvicorn
+import psutil
+import GPUtil
 
 # 设置日志
 logger = setup_logger(__name__)
@@ -147,6 +149,20 @@ async def global_exception_handler(request: Request, exc: Exception):
 @app.get("/health")
 async def health_check():
     """健康检查接口"""
+    # 获取CPU使用率
+    cpu_percent = psutil.cpu_percent(interval=1)
+    
+    # 获取内存使用情况
+    memory = psutil.virtual_memory()
+    memory_percent = memory.percent
+    
+    # 获取GPU使用情况
+    try:
+        gpus = GPUtil.getGPUs()
+        gpu_usage = f"{gpus[0].load * 100:.1f}%" if gpus else "N/A"
+    except:
+        gpu_usage = "N/A"
+    
     return StandardResponse(
         requestId=str(uuid.uuid4()),
         path="/health",
@@ -156,7 +172,10 @@ async def health_check():
         data={
             "status": "healthy",
             "name": "analysis",
-            "version": settings.VERSION
+            "version": settings.VERSION,
+            "cpu": f"{cpu_percent:.1f}%",
+            "gpu": gpu_usage,
+            "memory": f"{memory_percent:.1f}%"
         }
     )
 

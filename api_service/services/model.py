@@ -5,7 +5,7 @@ import httpx
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
 from core.config import settings
-from models.database import Model
+from models.database import Model, Node
 from shared.utils.logger import setup_logger
 from sqlalchemy.sql import text
 
@@ -15,30 +15,75 @@ class ModelService:
     """模型服务"""
     
     def __init__(self):
-        # 使用新的配置结构
-        self.base_url = settings.MODEL_SERVICE.url
+        # 不再直接从配置中获取URL，而是动态从节点获取
         self.api_prefix = settings.MODEL_SERVICE.api_prefix
     
-    def _get_api_url(self, path: str) -> str:
+    def _get_api_url(self, path: str, base_url: str = None) -> str:
         """获取完整的API URL"""
-        return f"{self.base_url}{self.api_prefix}{path}"
+        if not base_url:
+            # 如果没有提供基础URL，尝试从节点获取
+            base_url = self._get_model_service_url()
+            if not base_url:
+                logger.error("无法获取模型服务URL，服务不可用")
+                raise ValueError("模型服务不可用，无法获取服务URL")
+        return f"{base_url}{self.api_prefix}{path}"
+    
+    def _get_model_service_url(self) -> Optional[str]:
+        """从节点表中获取模型服务URL"""
+        from core.database import SessionLocal
+        
+        db = SessionLocal()
+        try:
+            # 查询类型为模型服务(2)的在线节点
+            node = db.query(Node).filter(
+                Node.service_type == 2,  # 模型服务
+                Node.service_status == "online",
+                Node.is_active == True
+            ).first()
+            
+            if node:
+                return f"http://{node.ip}:{node.port}"
+            else:
+                logger.warning("未找到可用的模型服务节点")
+                return None
+        except Exception as e:
+            logger.error(f"查询模型服务节点失败: {str(e)}")
+            return None
+        finally:
+            db.close()
     
     async def check_model_service(self) -> bool:
         """检查模型服务是否可用"""
         try:
+            # 获取模型服务URL
+            base_url = self._get_model_service_url()
+            if not base_url:
+                logger.error("未找到模型服务节点，服务不可用")
+                return False
+                
             async with httpx.AsyncClient() as client:
-                response = await client.get(f"{self.base_url}/health")
+                response = await client.get(f"{base_url}/health")
                 return response.status_code == 200
         except Exception as e:
-            logger.error(f"Check model service failed: {str(e)}")
+            logger.error(f"检查模型服务失败: {str(e)}")
             return False
     
     async def sync_models(self, db: Session) -> List[Model]:
         """同步模型列表"""
         try:
+            # 检查模型服务是否可用
+            if not await self.check_model_service():
+                logger.warning("模型服务不可用，使用本地数据")
+                return db.query(Model).all()
+                
+            base_url = self._get_model_service_url()
+            if not base_url:
+                logger.warning("模型服务不可用，使用本地数据")
+                return db.query(Model).all()
+                
             async with httpx.AsyncClient() as client:
                 # 使用新的 list 接口，注意这里改为 GET 请求
-                response = await client.get(self._get_api_url("/models/list"))
+                response = await client.get(self._get_api_url("/models/list", base_url))
                 response.raise_for_status()
                 data = response.json()
                 
@@ -62,6 +107,7 @@ class ModelService:
                         model.description = item.get("description", "")
                         model.nc = item.get("nc", 0)
                         model.names = item.get("names", {})
+                        # 版本和作者是可选字段，更新时直接设置
                         model.version = item.get("version", "1.0.0")
                         model.author = item.get("author", "")
                         updated_models.append(model)
@@ -114,9 +160,10 @@ class ModelService:
                 return updated_models
                 
         except Exception as e:
-            logger.error(f"Sync models failed: {str(e)}")
+            logger.error(f"同步模型失败: {str(e)}")
             db.rollback()
-            raise
+            # 返回现有模型列表而不抛出异常，确保任务状态保持不变
+            return db.query(Model).all()
     
     async def get_model(self, db: Session, model_id: int) -> Optional[Model]:
         """获取模型"""
@@ -130,11 +177,21 @@ class ModelService:
             if model:
                 return model
             
+            # 检查模型服务是否可用
+            if not await self.check_model_service():
+                logger.warning("模型服务不可用，无法获取模型信息")
+                return None
+                
+            base_url = self._get_model_service_url()
+            if not base_url:
+                logger.warning("模型服务不可用，无法获取模型信息")
+                return None
+            
             # 如果本地没有，从模型服务获取
             async with httpx.AsyncClient() as client:
                 # 使用新的 detail 接口
                 response = await client.get(
-                    self._get_api_url("/models/detail"),
+                    self._get_api_url("/models/detail", base_url),
                     params={"code": code}
                 )
                 if response.status_code == 404:
@@ -163,6 +220,6 @@ class ModelService:
                 return model
                 
         except Exception as e:
-            logger.error(f"Get model by code failed: {str(e)}")
+            logger.error(f"通过代码获取模型失败: {str(e)}")
             db.rollback()
             return None

@@ -268,7 +268,9 @@ class Node(Base):
     # 新增字段
     node_type = Column(String(50), nullable=False, default="edge", comment="节点类型：edge(边缘节点)、cluster(集群节点)")
     service_type = Column(Integer, nullable=False, default=1, comment="服务类型：1-分析服务、2-模型服务、3-云服务")
+    cpu_usage = Column(Float, nullable=False, default=0, comment="CPU占用率")
     memory_usage = Column(Float, nullable=False, default=0, comment="内存占用率")
+    gpu_usage = Column(Float, nullable=False, default=0, comment="GPU占用率")
     gpu_memory_usage = Column(Float, nullable=False, default=0, comment="GPU显存占用率")
     compute_type = Column(String(50), nullable=False, default="cpu", comment="计算类型：cpu(CPU计算边缘节点)、camera(摄像头边缘节点)、gpu(GPU计算边缘节点)、elastic(弹性集群节点)")
     

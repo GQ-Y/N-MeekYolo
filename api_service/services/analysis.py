@@ -237,7 +237,8 @@ class AnalysisService:
         logger.info(f"请求参数: 任务={task_name}, 模型={model_code}, 流={stream_url}")
                 
         try:
-            async with httpx.AsyncClient() as client:
+            # 使用较短的超时时间（10秒），避免长时间等待不响应的节点
+            async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(
                     request_url,
                     json=request_data
@@ -269,10 +270,28 @@ class AnalysisService:
                 
                 return task_id, node_id
                 
+        except httpx.ReadTimeout as e:
+            # 专门处理连接超时异常
+            logger.error(f"节点 {node_id} ({node_ip}:{node_port}) 连接超时: {str(e)}")
+            # 修改节点状态为离线
+            try:
+                db = SessionLocal()
+                node = db.query(Node).filter(Node.id == node_id).first()
+                if node:
+                    node.service_status = "offline"
+                    db.commit()
+                    logger.warning(f"已将节点 {node_id} 标记为离线状态")
+            except Exception as ex:
+                logger.error(f"更新节点状态失败: {str(ex)}")
+            finally:
+                db.close()
+            # 返回None表示任务启动失败，子任务状态将保持为0（未启动）
+            return None, None
         except Exception as e:
             logger.error(f"向分析服务发送请求失败: {str(e)}", exc_info=True)
             # 请求失败，不修改节点任务计数
-            raise
+            # 返回None表示任务启动失败，子任务状态将保持为0（未启动）
+            return None, None
             
     def _decrease_node_task_count(self, node_id: int):
         """减少节点任务计数"""

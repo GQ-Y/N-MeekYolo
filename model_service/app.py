@@ -16,6 +16,10 @@ from routers.market import router as market_router
 from routers.key import router as key_router
 from services.database import init_db
 from manager.model_manager import ModelManager
+import psutil
+import uuid
+from datetime import datetime
+import GPUtil
 
 # 配置日志
 logging.basicConfig(
@@ -100,7 +104,36 @@ app.include_router(
 @limiter.limit("5/minute")
 async def health_check(request: Request):
     """健康检查"""
-    return {"status": "ok"}
+    # 获取CPU使用率
+    cpu_percent = psutil.cpu_percent(interval=1)
+    
+    # 获取内存使用情况
+    memory = psutil.virtual_memory()
+    memory_percent = memory.percent
+    
+    # 获取GPU使用情况
+    try:
+        gpus = GPUtil.getGPUs()
+        gpu_usage = f"{gpus[0].load * 100:.1f}%" if gpus else "N/A"
+    except:
+        gpu_usage = "N/A"
+    
+    return {
+        "requestId": str(uuid.uuid4()),
+        "path": "/health",
+        "success": True,
+        "message": "服务正常运行",
+        "code": 200,
+        "data": {
+            "status": "healthy",
+            "name": "model",
+            "version": settings.VERSION,
+            "cpu": f"{cpu_percent:.1f}%",
+            "gpu": gpu_usage,
+            "memory": f"{memory_percent:.1f}%"
+        },
+        "timestamp": int(datetime.now().timestamp() * 1000)
+    }
 
 def show_service_banner(service_name: str):
     """显示服务启动标识"""

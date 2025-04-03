@@ -199,7 +199,7 @@ async def start_task(
     # 检查任务状态
     # 如果任务已经处于运行中状态(1)，直接进入子任务处理
     # 如果任务是未启动状态(0)，改为运行中状态(1)
-    # 如果任务是已停止状态(2)并且不是用户手动停止的，改为运行中状态(1)
+    # 如果任务是已停止状态(2)，不管原因，都允许启动任务
     if task.status == 1:
         logger.info(f"任务 {task_id} 已经处于运行中状态")
     elif task.status == 0:
@@ -207,14 +207,10 @@ async def start_task(
         task.status = 1  # 运行中状态
         task.error_message = None
     elif task.status == 2:
-        # 判断是否是用户手动停止的任务
-        if task.error_message == "任务由用户手动停止":
-            logger.error(f"任务 {task_id} 是用户手动停止的，无法启动")
-            return False, "用户手动停止的任务，需要先手动取消停止状态"
-        else:
-            logger.info(f"任务 {task_id} 从已停止状态改为运行中状态")
-            task.status = 1  # 运行中状态
-            task.error_message = None
+        # 允许启动所有已停止的任务，包括用户手动停止的任务
+        logger.info(f"任务 {task_id} 从已停止状态改为运行中状态")
+        task.status = 1  # 运行中状态
+        task.error_message = None
     else:
         logger.error(f"任务 {task_id} 状态为 {task.status}，无法启动")
         return False, f"任务状态无效，无法启动"
@@ -224,6 +220,19 @@ async def start_task(
     if not subtasks:
         logger.error(f"任务 {task_id} 没有子任务，无法启动")
         return False, "任务没有子任务，无法启动"
+    
+    # 检查模型服务状态
+    from services.model import ModelService
+    model_service = ModelService()
+    model_service_available = await model_service.check_model_service()
+    
+    if not model_service_available:
+        logger.error(f"任务 {task_id} 无法启动：模型服务不可用")
+        # 如果模型服务不可用，将任务状态重置为未启动状态(0)
+        task.status = 0  # 未启动状态(0)
+        task.error_message = "模型服务不可用，任务无法启动"
+        db.commit()
+        return False, "模型服务不可用，任务无法启动"
     
     # 如果是重新启动任务，更新启动时间和计数
     if task.started_at:
@@ -342,11 +351,12 @@ async def start_task(
     db.commit()
 
     if success_count == 0 and len(not_started_subtasks) > 0:
-        # 如果有子任务需要启动但全部启动失败
-        task.error_message = "没有子任务启动成功"
+        # 如果有子任务需要启动但全部启动失败，保持主任务仍处于运行中状态(1)
+        # 这样系统可以后续继续尝试启动这些子任务
+        task.error_message = "没有子任务启动成功，但任务保持运行中，等待后续尝试"
         db.commit()
-        logger.error(f"任务 {task_id} 启动失败: 没有子任务启动成功")
-        return False, "没有子任务启动成功"
+        logger.warn(f"任务 {task_id} 暂时未能启动子任务: 所有子任务启动暂未成功，但任务保持运行中状态")
+        return True, "任务保持运行中状态，等待后续尝试启动子任务"
     
     if success_count < len(not_started_subtasks) and len(not_started_subtasks) > 0:
         # 如果只有部分子任务启动成功
@@ -487,11 +497,6 @@ def update_task_status_from_subtasks(
     # 更新任务统计信息
     task.active_subtasks = running
     task.total_subtasks = total
-    
-    # 用户手动停止的任务保持已停止状态
-    if task.status == 2 and task.error_message == "任务由用户手动停止":
-        db.commit()
-        return True, "用户手动停止的任务，保持已停止状态"
     
     # 根据子任务状态更新任务状态 - 三态模型
     if running > 0:
