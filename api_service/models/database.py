@@ -124,21 +124,21 @@ class Model(Base):
     """模型表"""
     __tablename__ = "models"
 
-    id = Column(Integer, primary_key=True, index=True)
-    code = Column(String(100), unique=True, index=True)
-    name = Column(String(100))
-    path = Column(String(500))
-    description = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    code = Column(String(50), unique=True, index=True, nullable=False, comment="模型代码")
+    name = Column(String(100), nullable=False, comment="模型名称")
+    path = Column(String(255), nullable=True, comment="模型路径")
+    description = Column(String(500), nullable=True, comment="模型描述")
+    nc = Column(Integer, nullable=False, default=0, comment="模型支持的检测类别数量")
+    names = Column(JSON, nullable=True, comment="模型支持的检测类别名称映射")
+    created_at = Column(DateTime, default=datetime.now, comment="创建时间")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment="更新时间")
+
     # 关联任务
-    tasks = relationship('Task', secondary=task_model_association, back_populates='models')
-    
-    __table_args__ = (
-        Index('idx_model_code', 'code'),
-        Index('idx_model_name', 'name'),
-    )
+    tasks = relationship("Task", secondary="task_model_association", back_populates="models")
+
+    def __repr__(self):
+        return f"<Model {self.code}>"
 
 class Callback(Base):
     """回调服务"""

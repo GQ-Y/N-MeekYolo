@@ -206,21 +206,49 @@ stop_services() {
     
     for service_info in "${SERVICES[@]}"; do
         local name=$(get_service_name "$service_info")
+        local port=$(get_service_port "$service_info")
         echo -e "\n${CYAN}正在停止 $name...${NC}"
-        local pid_file="$PROJECT_ROOT/$name/logs/service.pid"
         
-        if [ -f "$pid_file" ]; then
-            local pid=$(cat "$pid_file")
-            if kill -0 $pid 2>/dev/null; then
-                kill $pid
-                rm "$pid_file"
-                echo -e "${GREEN}$name 已停止${NC}"
-            else
-                echo -e "${RED}$name 未在运行${NC}"
+        # 查找对应端口的Python进程
+        local pids=$(pgrep -f "python.*uvicorn.*--port $port")
+        
+        if [ -n "$pids" ]; then
+            echo -e "${YELLOW}找到服务进程: $pids${NC}"
+            # 终止进程
+            echo "$pids" | while read pid; do
+                if kill -0 $pid 2>/dev/null; then
+                    kill $pid
+                    echo -e "${GREEN}已停止进程: $pid${NC}"
+                fi
+            done
+            
+            # 等待进程完全终止
+            sleep 1
+            
+            # 检查是否还有残留进程
+            pids=$(pgrep -f "python.*uvicorn.*--port $port")
+            if [ -n "$pids" ]; then
+                echo -e "${RED}进程未能正常终止，强制终止...${NC}"
+                echo "$pids" | while read pid; do
+                    pkill -9 -P $pid 2>/dev/null  # 终止子进程
+                    kill -9 $pid 2>/dev/null      # 强制终止主进程
+                done
+            fi
+            
+            # 清理PID文件
+            local pid_file="$PROJECT_ROOT/$name/logs/service.pid"
+            if [ -f "$pid_file" ]; then
                 rm "$pid_file"
             fi
+            
+            echo -e "${GREEN}$name 已停止${NC}"
         else
-            echo -e "${RED}未找到 $name 的 PID 文件${NC}"
+            echo -e "${YELLOW}未发现 $name 的运行进程${NC}"
+            # 清理可能存在的过期PID文件
+            local pid_file="$PROJECT_ROOT/$name/logs/service.pid"
+            if [ -f "$pid_file" ]; then
+                rm "$pid_file"
+            fi
         fi
     done
 }

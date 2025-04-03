@@ -367,7 +367,7 @@ class NodeHealthChecker:
             logger.info(f"找到 {len(pending_tasks)} 个待处理任务")
             
             # 导入TaskController
-            from api_service.services.task_controller import TaskController
+            from services.task_controller import TaskController
             task_controller = TaskController()
             
             started_count = 0
@@ -453,7 +453,7 @@ class NodeHealthChecker:
             available_nodes.sort(key=lambda x: x["free_slots"], reverse=True)
             
             # 导入TaskController
-            from api_service.services.task_controller import TaskController
+            from services.task_controller import TaskController
             task_controller = TaskController()
             
             # 重新分配任务

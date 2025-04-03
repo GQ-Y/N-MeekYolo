@@ -13,7 +13,7 @@ DATABASE:
 
 # 存储配置
 STORAGE:
-  base_dir: "models"
+  base_dir: "store"
   max_size: 1073741824  # 1GB
   allowed_formats: [".pt", ".pth", ".onnx", ".yaml"]
 

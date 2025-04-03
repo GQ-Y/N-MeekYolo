@@ -31,7 +31,7 @@ class ModelServiceConfig(BaseSettings):
     
     # 存储配置
     class StorageConfig(BaseModel):
-        base_dir: str = "models"
+        base_dir: str = "store"
         max_size: int = 1024 * 1024 * 1024  # 1GB
         allowed_formats: List[str] = [".pt", ".pth", ".onnx", ".yaml"]
     

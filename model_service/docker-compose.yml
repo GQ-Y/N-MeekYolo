@@ -11,7 +11,7 @@ services:
     ports:
       - "8003:8003"
     volumes:
-      - model_data:/app/data/models
+      - ./store:/app/store
       - ./logs:/app/logs
       - ../config:/app/config
     environment:

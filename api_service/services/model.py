@@ -36,7 +36,8 @@ class ModelService:
         """同步模型列表"""
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(self._get_api_url("/models"))
+                # 使用新的 list 接口，注意这里改为 GET 请求
+                response = await client.get(self._get_api_url("/models/list"))
                 response.raise_for_status()
                 data = response.json()
                 
@@ -46,8 +47,10 @@ class ModelService:
                     model = Model(
                         code=item["code"],
                         name=item["name"],
-                        path=item["path"],
-                        description=item.get("description")
+                        path=item.get("path", ""),  # 可能不存在
+                        description=item.get("description", ""),
+                        nc=item.get("nc", 0),  # 新增：类别数量
+                        names=item.get("names", {})  # 新增：类别名称映射
                     )
                     models.append(model)
                     
@@ -77,7 +80,11 @@ class ModelService:
             
             # 如果本地没有，从模型服务获取
             async with httpx.AsyncClient() as client:
-                response = await client.get(self._get_api_url(f"/models/code/{code}"))
+                # 使用新的 detail 接口
+                response = await client.get(
+                    self._get_api_url("/models/detail"),
+                    params={"code": code}
+                )
                 if response.status_code == 404:
                     return None
                     
@@ -88,8 +95,10 @@ class ModelService:
                 model = Model(
                     code=data["code"],
                     name=data["name"],
-                    path=data["path"],
-                    description=data.get("description")
+                    path=data.get("path", ""),
+                    description=data.get("description", ""),
+                    nc=data.get("nc", 0),  # 新增：类别数量
+                    names=data.get("names", {})  # 新增：类别名称映射
                 )
                 
                 # 保存到数据库

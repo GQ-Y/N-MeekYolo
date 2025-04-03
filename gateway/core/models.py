@@ -1,7 +1,7 @@
 """
 网关服务数据模型定义
 """
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Union, List
 from pydantic import BaseModel, Field, validator, constr
 from enum import Enum
 import time
@@ -24,7 +24,7 @@ class StandardResponse(BaseModel):
     success: bool = Field(..., description="是否成功")
     message: str = Field(..., description="响应消息")
     code: int = Field(..., description="响应代码")
-    data: Optional[Dict[str, Any]] = Field(None, description="响应数据")
+    data: Optional[Union[Dict[str, Any], List[Any]]] = Field(None, description="响应数据")
     timestamp: int = Field(default_factory=lambda: int(time.time() * 1000), description="时间戳")
 
     class Config:
