@@ -12,7 +12,8 @@ from sqlalchemy import (
     Boolean,
     JSON,
     Text,
-    Index
+    Index,
+    Float
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
@@ -246,19 +247,26 @@ class Node(Base):
     __tablename__ = "nodes"
     
     id = Column(Integer, primary_key=True, index=True)
-    ip = Column(String(50), nullable=False)
-    port = Column(String(10), nullable=False)
-    service_name = Column(String(100), nullable=False)
-    service_status = Column(String(20), default="offline")  # online, offline
-    image_task_count = Column(Integer, default=0)
-    video_task_count = Column(Integer, default=0)
-    stream_task_count = Column(Integer, default=0)
-    weight = Column(Integer, default=1)  # 负载均衡权重，默认为1
-    max_tasks = Column(Integer, default=10)  # 最大任务数量
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    last_heartbeat = Column(DateTime, nullable=True)
+    ip = Column(String(50), nullable=False, comment="节点IP地址")
+    port = Column(String(10), nullable=False, comment="节点端口")
+    service_name = Column(String(100), nullable=False, comment="服务名称")
+    service_status = Column(String(20), default="offline", comment="服务状态")  # online, offline
+    image_task_count = Column(Integer, default=0, comment="图像任务数量")
+    video_task_count = Column(Integer, default=0, comment="视频任务数量")
+    stream_task_count = Column(Integer, default=0, comment="流任务数量")
+    weight = Column(Integer, default=1, comment="负载均衡权重")
+    max_tasks = Column(Integer, default=10, comment="最大任务数量")
+    is_active = Column(Boolean, default=True, comment="是否激活")
+    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
+    last_heartbeat = Column(DateTime, nullable=True, comment="最后心跳时间")
+    
+    # 新增字段
+    node_type = Column(String(50), nullable=False, default="edge", comment="节点类型：edge(边缘节点)、cluster(集群节点)")
+    service_type = Column(Integer, nullable=False, default=1, comment="服务类型：1-分析服务、2-模型服务、3-云服务")
+    memory_usage = Column(Float, nullable=False, default=0, comment="内存占用率")
+    gpu_memory_usage = Column(Float, nullable=False, default=0, comment="GPU显存占用率")
+    compute_type = Column(String(50), nullable=False, default="cpu", comment="计算类型：cpu(CPU计算边缘节点)、camera(摄像头边缘节点)、gpu(GPU计算边缘节点)、elastic(弹性集群节点)")
     
     # 关联任务
     tasks = relationship('Task', foreign_keys='Task.node_id', back_populates='node')
@@ -267,4 +275,9 @@ class Node(Base):
         Index('idx_node_ip_port', 'ip', 'port'),
         Index('idx_node_service_name', 'service_name'),
         Index('idx_node_service_status', 'service_status'),
+        Index('idx_node_service_type', 'service_type'),
     )
+    
+    def __repr__(self):
+        """返回节点的字符串表示"""
+        return f"<Node(id={self.id}, ip={self.ip}, port={self.port}, service_name={self.service_name}, status={self.service_status})>"

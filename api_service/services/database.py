@@ -31,7 +31,7 @@ def init_db():
         from models.database import Base as DBBase
         from models.database import StreamGroup, Stream
         from models.requests import StreamStatus
-        from models.node import Node  # 导入节点模型
+        from models.database import Node  # 导入节点模型
         
         # 创建所有表
         DBBase.metadata.create_all(bind=engine)

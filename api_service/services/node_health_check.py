@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import text
 from crud.node import NodeCRUD
-from models.node import Node
+from models.database import Node
 from core.database import SessionLocal
 from shared.utils.logger import setup_logger
 import httpx
@@ -434,7 +434,10 @@ class NodeHealthChecker:
             # 对恢复的节点按负载进行排序
             available_nodes = []
             for node in recovered_nodes:
-                if node.service_status == "online" and node.is_active:
+                # 只选择分析服务节点
+                if (node.service_status == "online" and 
+                    node.is_active and 
+                    node.service_type == 1):  # 1 表示分析服务
                     # 计算当前负载
                     total_tasks = node.image_task_count + node.video_task_count + node.stream_task_count
                     if total_tasks < node.max_tasks:
@@ -444,10 +447,10 @@ class NodeHealthChecker:
                         })
             
             if not available_nodes:
-                logger.warning("没有可用的恢复节点，无法重新分配任务")
+                logger.warning("没有可用的分析服务节点，无法重新分配任务")
                 return
             
-            logger.info(f"有 {len(available_nodes)} 个可用节点用于任务重新分配")
+            logger.info(f"有 {len(available_nodes)} 个可用的分析服务节点用于任务重新分配")
                 
             # 按空闲槽位排序
             available_nodes.sort(key=lambda x: x["free_slots"], reverse=True)
@@ -463,7 +466,7 @@ class NodeHealthChecker:
                     # 选择负载最低的节点
                     best_node = available_nodes[0]["node"]
                     
-                    logger.info(f"准备将任务 {task.id} 重新分配到恢复节点 {best_node.id}")
+                    logger.info(f"准备将任务 {task.id} 重新分配到分析服务节点 {best_node.id}")
                     
                     # 更新任务状态
                     old_node_id = task.node_id
@@ -511,7 +514,7 @@ class NodeHealthChecker:
                     # 提交更改
                     db.commit()
                     
-                    logger.info(f"任务 {task.id} 成功重新分配到节点 {best_node.id}")
+                    logger.info(f"任务 {task.id} 成功重新分配到分析服务节点 {best_node.id}")
                     reassigned_count += 1
                     
                 except Exception as e:

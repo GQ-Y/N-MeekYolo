@@ -1,7 +1,7 @@
 """
 响应数据模型
 """
-from typing import Dict, Optional, List, Any, TypeVar, Generic
+from typing import Dict, Optional, List, Any, TypeVar, Generic, Union
 from pydantic import BaseModel, Field
 from datetime import datetime
 from models.requests import StreamStatus
@@ -15,7 +15,7 @@ class BaseResponse(BaseModel, Generic[T]):
     requestId: str = Field(default_factory=lambda: str(uuid.uuid4()), description="请求ID")
     path: str = Field("", description="请求路径")
     success: bool = Field(True, description="是否成功")
-    message: str = Field("Success", description="响应消息")
+    message: str = Field("操作成功", description="响应消息")
     code: int = Field(200, description="状态码")
     data: Optional[T] = Field(None, description="响应数据")
     timestamp: int = Field(default_factory=lambda: int(time.time() * 1000), description="时间戳")
@@ -26,7 +26,7 @@ class BaseResponse(BaseModel, Generic[T]):
                 "requestId": "550e8400-e29b-41d4-a716-446655440000",
                 "path": "/api/v1/stream/list",
                 "success": True,
-                "message": "Success",
+                "message": "操作成功",
                 "code": 200,
                 "data": {
                     "total": 1,
@@ -51,34 +51,51 @@ class NodeBase(BaseModel):
     weight: int = Field(1, description="负载均衡权重")
     max_tasks: int = Field(10, description="最大任务数量")
 
-class NodeCreate(NodeBase):
-    """节点创建模型"""
-    pass
+class NodeCreate(BaseModel):
+    """节点创建请求模型"""
+    ip: str = Field(..., description="节点IP地址")
+    port: str = Field(..., description="节点端口")
+    service_name: str = Field(..., description="服务名称")
+    weight: int = Field(1, description="负载均衡权重")
+    max_tasks: int = Field(10, description="最大任务数量")
+    node_type: str = Field("edge", description="节点类型：edge(边缘节点)、cluster(集群节点)")
+    service_type: int = Field(1, description="服务类型：1-分析服务、2-模型服务、3-云服务")
+    compute_type: str = Field("cpu", description="计算类型：cpu(CPU计算边缘节点)、camera(摄像头边缘节点)、gpu(GPU计算边缘节点)、elastic(弹性集群节点)")
 
-class NodeUpdate(NodeBase):
-    """节点更新模型"""
+class NodeUpdate(BaseModel):
+    """节点更新请求模型"""
     ip: Optional[str] = Field(None, description="节点IP地址")
     port: Optional[str] = Field(None, description="节点端口")
     service_name: Optional[str] = Field(None, description="服务名称")
     service_status: Optional[str] = Field(None, description="服务状态")
     weight: Optional[int] = Field(None, description="负载均衡权重")
     max_tasks: Optional[int] = Field(None, description="最大任务数量")
+    node_type: Optional[str] = Field(None, description="节点类型：edge(边缘节点)、cluster(集群节点)")
+    service_type: Optional[int] = Field(None, description="服务类型：1-分析服务、2-模型服务、3-云服务")
+    compute_type: Optional[str] = Field(None, description="计算类型：cpu(CPU计算边缘节点)、camera(摄像头边缘节点)、gpu(GPU计算边缘节点)、elastic(弹性集群节点)")
+    memory_usage: Optional[float] = Field(None, description="内存占用率")
+    gpu_memory_usage: Optional[float] = Field(None, description="GPU显存占用率")
 
 class NodeStatusUpdate(BaseModel):
-    """节点状态更新模型"""
+    """节点状态更新请求模型"""
     node_id: int = Field(..., description="节点ID")
     service_status: str = Field(..., description="服务状态")
+    memory_usage: Optional[float] = Field(None, description="内存占用率")
+    gpu_memory_usage: Optional[float] = Field(None, description="GPU显存占用率")
 
 class NodeTaskCountsUpdate(BaseModel):
-    """节点任务数量更新模型"""
+    """节点任务数量更新请求模型"""
     node_id: int = Field(..., description="节点ID")
     image_task_count: int = Field(0, description="图像任务数量")
     video_task_count: int = Field(0, description="视频任务数量")
     stream_task_count: int = Field(0, description="流任务数量")
 
-class NodeResponse(NodeBase):
+class NodeResponse(BaseModel):
     """节点响应模型"""
     id: int = Field(..., description="节点ID")
+    ip: str = Field(..., description="节点IP地址")
+    port: str = Field(..., description="节点端口")
+    service_name: str = Field(..., description="服务名称")
     service_status: str = Field(..., description="服务状态")
     image_task_count: int = Field(0, description="图像任务数量")
     video_task_count: int = Field(0, description="视频任务数量")
@@ -89,6 +106,12 @@ class NodeResponse(NodeBase):
     created_at: datetime = Field(..., description="创建时间")
     updated_at: datetime = Field(..., description="更新时间")
     last_heartbeat: Optional[datetime] = Field(None, description="最后心跳时间")
+    node_type: str = Field("edge", description="节点类型：edge(边缘节点)、cluster(集群节点)")
+    service_type: int = Field(1, description="服务类型：1-分析服务、2-模型服务、3-云服务")
+    compute_type: str = Field("cpu", description="计算类型：cpu(CPU计算边缘节点)、camera(摄像头边缘节点)、gpu(GPU计算边缘节点)、elastic(弹性集群节点)")
+    memory_usage: float = Field(0, description="内存占用率")
+    gpu_memory_usage: float = Field(0, description="GPU显存占用率")
+    total_tasks: int = Field(0, description="总任务数量")
 
     model_config = {
         "from_attributes": True

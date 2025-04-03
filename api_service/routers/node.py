@@ -41,6 +41,9 @@ def create_node(
     service_name: str = Body(..., description="服务名称"),
     weight: int = Body(1, description="负载均衡权重"),
     max_tasks: int = Body(10, description="最大任务数量"),
+    node_type: str = Body("edge", description="节点类型：edge(边缘节点)、cluster(集群节点)"),
+    service_type: int = Body(1, description="服务类型：1-分析服务、2-模型服务、3-云服务"),
+    compute_type: str = Body("cpu", description="计算类型：cpu(CPU计算边缘节点)、camera(摄像头边缘节点)、gpu(GPU计算边缘节点)、elastic(弹性集群节点)"),
     db: Session = Depends(get_db)
 ):
     """
@@ -52,17 +55,61 @@ def create_node(
     - service_name: 服务名称
     - weight: 负载均衡权重(默认1)
     - max_tasks: 最大任务数量(默认10)
+    - node_type: 节点类型(默认edge)
+    - service_type: 服务类型(默认1)
+    - compute_type: 计算类型(默认cpu)
     
     返回:
     - 创建成功的节点信息
     """
     try:
+        # 验证service_type
+        if service_type not in [1, 2, 3]:
+            return BaseResponse(
+                path=str(request.url),
+                success=False,
+                code=400,
+                message="无效的服务类型，必须是1(分析服务)、2(模型服务)或3(云服务)"
+            )
+        
+        # 验证node_type
+        if node_type not in ["edge", "cluster"]:
+            return BaseResponse(
+                path=str(request.url),
+                success=False,
+                code=400,
+                message="无效的节点类型，必须是edge(边缘节点)或cluster(集群节点)"
+            )
+        
+        # 验证compute_type
+        if compute_type not in ["cpu", "camera", "gpu", "elastic"]:
+            return BaseResponse(
+                path=str(request.url),
+                success=False,
+                code=400,
+                message="无效的计算类型，必须是cpu、camera、gpu或elastic"
+            )
+        
+        # 如果是模型服务或云服务，检查是否已存在
+        if service_type in [2, 3]:
+            existing_node = node_crud.get_node_by_service_type(db, service_type)
+            if existing_node:
+                return BaseResponse(
+                    path=str(request.url),
+                    success=False,
+                    code=400,
+                    message=f"已存在{'模型' if service_type == 2 else '云'}服务节点"
+                )
+        
         node = NodeCreate(
             ip=ip,
             port=port,
             service_name=service_name,
             weight=weight,
-            max_tasks=max_tasks
+            max_tasks=max_tasks,
+            node_type=node_type,
+            service_type=service_type,
+            compute_type=compute_type
         )
         db_node = node_crud.create_node(db, node)
         
@@ -76,12 +123,17 @@ def create_node(
             "image_task_count": db_node.image_task_count,
             "video_task_count": db_node.video_task_count,
             "stream_task_count": db_node.stream_task_count,
-            "weight": db_node.weight if hasattr(db_node, 'weight') else weight,
-            "max_tasks": db_node.max_tasks if hasattr(db_node, 'max_tasks') else max_tasks,
+            "weight": db_node.weight,
+            "max_tasks": db_node.max_tasks,
             "is_active": db_node.is_active,
             "created_at": db_node.created_at,
             "updated_at": db_node.updated_at,
             "last_heartbeat": db_node.last_heartbeat,
+            "node_type": db_node.node_type,
+            "service_type": db_node.service_type,
+            "compute_type": db_node.compute_type,
+            "memory_usage": db_node.memory_usage,
+            "gpu_memory_usage": db_node.gpu_memory_usage,
             "total_tasks": 0
         }
         
@@ -119,7 +171,7 @@ def get_nodes(
         db_nodes = node_crud.get_nodes(db, skip=skip, limit=limit)
         nodes = []
         
-        # 手动构建响应数据，避免依赖NodeListResponse
+        # 手动构建响应数据
         for node in db_nodes:
             node_data = {
                 "id": node.id,
@@ -130,12 +182,17 @@ def get_nodes(
                 "image_task_count": node.image_task_count,
                 "video_task_count": node.video_task_count,
                 "stream_task_count": node.stream_task_count,
-                "weight": node.weight if hasattr(node, 'weight') else 1,
-                "max_tasks": node.max_tasks if hasattr(node, 'max_tasks') else 10,
+                "weight": node.weight,
+                "max_tasks": node.max_tasks,
                 "is_active": node.is_active,
                 "created_at": node.created_at,
                 "updated_at": node.updated_at,
                 "last_heartbeat": node.last_heartbeat,
+                "node_type": node.node_type,
+                "service_type": node.service_type,
+                "compute_type": node.compute_type,
+                "memory_usage": node.memory_usage,
+                "gpu_memory_usage": node.gpu_memory_usage,
                 "total_tasks": (node.image_task_count or 0) + (node.video_task_count or 0) + (node.stream_task_count or 0)
             }
             nodes.append(node_data)
@@ -163,6 +220,11 @@ def update_node(
     service_status: Optional[str] = Body(None, description="服务状态"),
     weight: Optional[int] = Body(None, description="负载均衡权重"),
     max_tasks: Optional[int] = Body(None, description="最大任务数量"),
+    node_type: Optional[str] = Body(None, description="节点类型"),
+    service_type: Optional[int] = Body(None, description="服务类型"),
+    compute_type: Optional[str] = Body(None, description="计算类型"),
+    memory_usage: Optional[float] = Body(None, description="内存占用率"),
+    gpu_memory_usage: Optional[float] = Body(None, description="GPU显存占用率"),
     db: Session = Depends(get_db)
 ):
     """
@@ -176,18 +238,66 @@ def update_node(
     - service_status: 服务状态(可选)
     - weight: 负载均衡权重(可选)
     - max_tasks: 最大任务数量(可选)
+    - node_type: 节点类型(可选)
+    - service_type: 服务类型(可选)
+    - compute_type: 计算类型(可选)
+    - memory_usage: 内存占用率(可选)
+    - gpu_memory_usage: GPU显存占用率(可选)
     
     返回:
     - 更新后的节点信息
     """
     try:
+        # 验证service_type
+        if service_type is not None and service_type not in [1, 2, 3]:
+            return BaseResponse(
+                path=str(request.url),
+                success=False,
+                code=400,
+                message="无效的服务类型，必须是1(分析服务)、2(模型服务)或3(云服务)"
+            )
+        
+        # 验证node_type
+        if node_type is not None and node_type not in ["edge", "cluster"]:
+            return BaseResponse(
+                path=str(request.url),
+                success=False,
+                code=400,
+                message="无效的节点类型，必须是edge(边缘节点)或cluster(集群节点)"
+            )
+        
+        # 验证compute_type
+        if compute_type is not None and compute_type not in ["cpu", "camera", "gpu", "elastic"]:
+            return BaseResponse(
+                path=str(request.url),
+                success=False,
+                code=400,
+                message="无效的计算类型，必须是cpu、camera、gpu或elastic"
+            )
+        
+        # 如果要更新为模型服务或云服务，检查是否已存在
+        if service_type in [2, 3]:
+            existing_node = node_crud.get_node_by_service_type(db, service_type)
+            if existing_node and existing_node.id != node_id:
+                return BaseResponse(
+                    path=str(request.url),
+                    success=False,
+                    code=400,
+                    message=f"已存在{'模型' if service_type == 2 else '云'}服务节点"
+                )
+        
         node_update = NodeUpdate(
             ip=ip,
             port=port,
             service_name=service_name,
             service_status=service_status,
             weight=weight,
-            max_tasks=max_tasks
+            max_tasks=max_tasks,
+            node_type=node_type,
+            service_type=service_type,
+            compute_type=compute_type,
+            memory_usage=memory_usage,
+            gpu_memory_usage=gpu_memory_usage
         )
         db_node = node_crud.update_node(db, node_id, node_update)
         if not db_node:
@@ -198,7 +308,7 @@ def update_node(
                 message="节点不存在"
             )
             
-        # 手动构建响应数据，与列表接口保持一致
+        # 手动构建响应数据
         node_data = {
             "id": db_node.id,
             "ip": db_node.ip,
@@ -208,12 +318,17 @@ def update_node(
             "image_task_count": db_node.image_task_count,
             "video_task_count": db_node.video_task_count,
             "stream_task_count": db_node.stream_task_count,
-            "weight": db_node.weight if hasattr(db_node, 'weight') else 1,
-            "max_tasks": db_node.max_tasks if hasattr(db_node, 'max_tasks') else 10,
+            "weight": db_node.weight,
+            "max_tasks": db_node.max_tasks,
             "is_active": db_node.is_active,
             "created_at": db_node.created_at,
             "updated_at": db_node.updated_at,
             "last_heartbeat": db_node.last_heartbeat,
+            "node_type": db_node.node_type,
+            "service_type": db_node.service_type,
+            "compute_type": db_node.compute_type,
+            "memory_usage": db_node.memory_usage,
+            "gpu_memory_usage": db_node.gpu_memory_usage,
             "total_tasks": (db_node.image_task_count or 0) + (db_node.video_task_count or 0) + (db_node.stream_task_count or 0)
         }
         
@@ -271,6 +386,8 @@ def update_node_status(
     request: Request,
     node_id: int = Body(..., description="节点ID"),
     service_status: str = Body(..., description="服务状态"),
+    memory_usage: Optional[float] = Body(None, description="内存占用率"),
+    gpu_memory_usage: Optional[float] = Body(None, description="GPU显存占用率"),
     db: Session = Depends(get_db)
 ):
     """
@@ -279,12 +396,18 @@ def update_node_status(
     参数:
     - node_id: 节点ID
     - service_status: 服务状态
+    - memory_usage: 内存占用率(可选)
+    - gpu_memory_usage: GPU显存占用率(可选)
     
     返回:
     - 更新后的节点信息
     """
     try:
-        node_update = NodeUpdate(service_status=service_status)
+        node_update = NodeUpdate(
+            service_status=service_status,
+            memory_usage=memory_usage,
+            gpu_memory_usage=gpu_memory_usage
+        )
         db_node = node_crud.update_node(db, node_id, node_update)
         if not db_node:
             return BaseResponse(
@@ -304,12 +427,17 @@ def update_node_status(
             "image_task_count": db_node.image_task_count,
             "video_task_count": db_node.video_task_count,
             "stream_task_count": db_node.stream_task_count,
-            "weight": db_node.weight if hasattr(db_node, 'weight') else 1,
-            "max_tasks": db_node.max_tasks if hasattr(db_node, 'max_tasks') else 10,
+            "weight": db_node.weight,
+            "max_tasks": db_node.max_tasks,
             "is_active": db_node.is_active,
             "created_at": db_node.created_at,
             "updated_at": db_node.updated_at,
             "last_heartbeat": db_node.last_heartbeat,
+            "node_type": db_node.node_type,
+            "service_type": db_node.service_type,
+            "compute_type": db_node.compute_type,
+            "memory_usage": db_node.memory_usage,
+            "gpu_memory_usage": db_node.gpu_memory_usage,
             "total_tasks": (db_node.image_task_count or 0) + (db_node.video_task_count or 0) + (db_node.stream_task_count or 0)
         }
         
@@ -376,12 +504,17 @@ def update_task_counts(
             "image_task_count": db_node.image_task_count,
             "video_task_count": db_node.video_task_count,
             "stream_task_count": db_node.stream_task_count,
-            "weight": db_node.weight if hasattr(db_node, 'weight') else 1,
-            "max_tasks": db_node.max_tasks if hasattr(db_node, 'max_tasks') else 10,
+            "weight": db_node.weight,
+            "max_tasks": db_node.max_tasks,
             "is_active": db_node.is_active,
             "created_at": db_node.created_at,
             "updated_at": db_node.updated_at,
             "last_heartbeat": db_node.last_heartbeat,
+            "node_type": db_node.node_type,
+            "service_type": db_node.service_type,
+            "compute_type": db_node.compute_type,
+            "memory_usage": db_node.memory_usage,
+            "gpu_memory_usage": db_node.gpu_memory_usage,
             "total_tasks": (db_node.image_task_count or 0) + (db_node.video_task_count or 0) + (db_node.stream_task_count or 0)
         }
         

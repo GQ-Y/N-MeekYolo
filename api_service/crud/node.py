@@ -9,10 +9,9 @@ import asyncio
 from sqlalchemy import and_
 from sqlalchemy.orm import Session, joinedload
 
-from models.node import Node
+from models.database import Node, Task, SubTask
 from models.responses import NodeCreate, NodeUpdate
 from shared.utils.logger import setup_logger
-from models.database import Task, SubTask
 
 logger = setup_logger(__name__)
 
@@ -41,7 +40,12 @@ class NodeCRUD:
             video_task_count=0,
             stream_task_count=0,
             weight=node.weight,
-            max_tasks=node.max_tasks
+            max_tasks=node.max_tasks,
+            node_type=node.node_type,
+            service_type=node.service_type,
+            compute_type=node.compute_type,
+            memory_usage=0,
+            gpu_memory_usage=0
         )
         db.add(db_node)
         db.commit()
@@ -89,6 +93,11 @@ class NodeCRUD:
         ).first()
 
     @staticmethod
+    def get_node_by_service_type(db: Session, service_type: int) -> Optional[Node]:
+        """通过服务类型获取节点"""
+        return db.query(Node).filter(Node.service_type == service_type).first()
+
+    @staticmethod
     def update_node(
         db: Session,
         node_id: int,
@@ -123,6 +132,16 @@ class NodeCRUD:
             db_node.weight = node_update.weight
         if node_update.max_tasks is not None:
             db_node.max_tasks = node_update.max_tasks
+        if node_update.node_type is not None:
+            db_node.node_type = node_update.node_type
+        if node_update.service_type is not None:
+            db_node.service_type = node_update.service_type
+        if node_update.compute_type is not None:
+            db_node.compute_type = node_update.compute_type
+        if node_update.memory_usage is not None:
+            db_node.memory_usage = node_update.memory_usage
+        if node_update.gpu_memory_usage is not None:
+            db_node.gpu_memory_usage = node_update.gpu_memory_usage
             
         db.commit()
         db.refresh(db_node)
@@ -210,6 +229,11 @@ class NodeCRUD:
                         data = response.json()
                         logger.info(f"节点 {node.id} 健康检查响应: {data}")
                         if data.get("success") and data.get("data", {}).get("status") == "healthy":
+                            # 更新资源使用情况
+                            if "memory_usage" in data.get("data", {}):
+                                node.memory_usage = data["data"]["memory_usage"]
+                            if "gpu_memory_usage" in data.get("data", {}):
+                                node.gpu_memory_usage = data["data"]["gpu_memory_usage"]
                             logger.info(f"节点 {node.id} 健康检查成功，节点状态正常")
                             return True
                         else:
@@ -343,30 +367,25 @@ class NodeCRUD:
                     # 增加新节点的任务计数
                     available_node.stream_task_count += stream_count
                     
-                    # 更新任务状态
-                    task.status = "pending"
-                    
-                    # 提交更改
-                    db.commit()
-                    
-                    # 尝试启动新的任务
-                    success = await NodeCRUD._restart_task(available_node, task)
-                    
-                    if success:
-                        logger.info(f"任务 {task.id} 已成功迁移到节点 {available_node.id}")
+                    # 重启任务
+                    if await NodeCRUD._restart_task(available_node, task):
                         migrated_count += 1
+                        logger.info(f"任务 {task.id} 迁移成功")
                     else:
-                        logger.error(f"任务 {task.id} 迁移后启动失败")
-                    
+                        logger.error(f"任务 {task.id} 迁移失败")
+                        
                 except Exception as e:
                     logger.error(f"迁移任务 {task.id} 失败: {str(e)}")
-                    db.rollback()
-        
+                    continue
+            
+            # 提交更改
+            db.commit()
+            
         if task_count > 0:
-            logger.info(f"总任务迁移情况：{migrated_count}/{task_count} 成功")
+            logger.info(f"共发现 {task_count} 个需要迁移的任务，成功迁移 {migrated_count} 个")
         else:
-            logger.info("没有发现需要迁移的任务")
-    
+            logger.info("没有需要迁移的任务")
+
     @staticmethod
     async def _stop_analysis_task(node: Node, analysis_task_id: str) -> bool:
         """停止分析任务"""
@@ -389,32 +408,23 @@ class NodeCRUD:
         except Exception as e:
             logger.error(f"停止分析任务 {analysis_task_id} 出错: {str(e)}")
             return False
-    
+
     @staticmethod
     async def _restart_task(node: Node, task: Task) -> bool:
         """在新节点上重启任务"""
         try:
-            logger.info(f"在节点 {node.id} 上重启任务 {task.id}")
-            
-            # 检查节点是否在线
-            if node.service_status != "online" or not node.is_active:
-                logger.error(f"节点 {node.id} 不在线或未激活，无法启动任务")
-                return False
-            
-            # 构建节点URL
             node_url = f"http://{node.ip}:{node.port}"
+            logger.info(f"在节点 {node.id} ({node.ip}:{node.port}) 上重启任务 {task.id}")
             
-            # 获取配置
-            config = task.config or {
-                "confidence": 0.1,
-                "iou": 0.45,
-                "nested_detection": True
-            }
+            # 获取回调URL列表
+            callback_urls = []
+            if task.enable_callback and task.callbacks:
+                callback_urls = [callback.url for callback in task.callbacks]
             
-            # 构建回调URL列表
-            callback_urls = ",".join([cb.url for cb in task.callbacks]) if task.callbacks else ""
+            # 获取任务配置
+            config = task.config or {}
             
-            # 为每个流和模型组合创建子任务
+            # 创建新的子任务列表
             new_sub_tasks = []
             
             for stream in task.streams:
@@ -480,39 +490,12 @@ class NodeCRUD:
             return False
 
     @staticmethod
-    async def recreate_analysis_task(stream_url, model_code, task_name, config, node_url):
-        """在新节点上重新创建分析任务"""
-        try:
-            logger.info(f"在节点 {node_url} 上重新创建分析任务...")
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{node_url}/api/v1/analyze/stream",
-                    json={
-                        "model_code": model_code,
-                        "stream_url": stream_url,
-                        "task_name": task_name,
-                        "enable_callback": False,
-                        "save_result": True,
-                        "config": config or {},
-                        "analysis_type": "detection"
-                    }
-                )
-                response.raise_for_status()
-                result = response.json()
-                logger.info(f"分析任务创建成功: {result}")
-                # 返回新的分析任务ID
-                return result.get("data", {}).get("task_id")
-        except Exception as e:
-            logger.error(f"创建分析任务失败: {str(e)}")
-            return None
-
-    @staticmethod
     def get_available_node(db: Session) -> Optional[Node]:
         """
         获取可用节点（用于负载均衡）
         
         算法：
-        1. 过滤出在线节点
+        1. 过滤出在线的分析服务节点
         2. 计算每个节点的负载百分比（当前任务数/最大任务数）
         3. 按权重和负载百分比排序，返回负载最低且权重最高的节点
         
@@ -522,11 +505,12 @@ class NodeCRUD:
         返回:
         - 最佳可用节点，如无可用节点则返回None
         """
-        # 获取所有在线节点
+        # 获取所有在线的分析服务节点
         nodes = (
             db.query(Node)
             .filter(Node.service_status == "online")
             .filter(Node.is_active == True)
+            .filter(Node.service_type == 1)  # 只选择分析服务节点
             .all()
         )
         
