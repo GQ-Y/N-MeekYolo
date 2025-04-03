@@ -16,6 +16,8 @@ from routers import (
     analysis_router,
     node_router
 )
+# 导入新的分析回调路由
+from routers.analysis_callback import router as analysis_callback_router
 from services.monitor import StreamMonitor
 from services.node_health_check import start_health_checker, stop_health_checker
 from shared.utils.logger import setup_logger
@@ -48,6 +50,8 @@ app.include_router(callback_router)
 app.include_router(task_router)
 app.include_router(analysis_router)
 app.include_router(node_router)
+# 注册分析回调路由
+app.include_router(analysis_callback_router)
 
 # 创建视频源监控器
 stream_monitor = StreamMonitor()

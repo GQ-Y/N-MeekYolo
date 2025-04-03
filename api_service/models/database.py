@@ -171,7 +171,7 @@ class Task(Base):
     
     id = Column(Integer, primary_key=True)
     name = Column(String(50), nullable=False)
-    status = Column(String(50), default='created', nullable=False, comment="任务状态: created(已创建), running(运行中), stopped(已停止), error(错误), no_node(无可用节点)")
+    status = Column(Integer, default=0, nullable=False, comment="任务状态: 0(未启动), 1(运行中), 2(已停止)")
     error_message = Column(String(200))
     save_result = Column(Boolean, default=False, comment="是否保存结果")
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -219,7 +219,7 @@ class SubTask(Base):
     analysis_task_id = Column(String(50), comment="Analysis Service的任务ID")
     stream_id = Column(Integer, ForeignKey('streams.id'))
     model_id = Column(Integer, ForeignKey('models.id'))
-    status = Column(String(20), default="created", comment="状态: created, running, error, completed")
+    status = Column(Integer, default=0, comment="状态: 0(未启动), 1(运行中), 2(已停止)")
     error_message = Column(String(200), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

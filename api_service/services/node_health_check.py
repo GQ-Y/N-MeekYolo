@@ -11,7 +11,7 @@ from core.database import SessionLocal
 from shared.utils.logger import setup_logger
 import httpx
 from models.database import Task, SubTask
-from sqlalchemy import and_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import joinedload
 from typing import List
 
@@ -147,18 +147,15 @@ class NodeHealthChecker:
             for offline_node in offline_nodes:
                 try:
                     logger.info(f"处理离线节点 {offline_node.id} 上的任务")
-                    # 查找该节点上的运行中子任务
+                    # 查找该节点上的所有子任务
                     subtasks = db.query(SubTask).options(
                         joinedload(SubTask.task)
                     ).filter(
-                        and_(
-                            SubTask.node_id == offline_node.id,
-                            SubTask.status.in_(["running", "starting"])
-                        )
+                        SubTask.node_id == offline_node.id
                     ).all()
                     
                     if not subtasks:
-                        logger.info(f"节点 {offline_node.id} 没有运行中的子任务需要迁移")
+                        logger.info(f"节点 {offline_node.id} 没有子任务需要迁移")
                         continue
                         
                     # 获取涉及的主任务ID列表
@@ -174,97 +171,34 @@ class NodeHealthChecker:
                     task_count = len(tasks)
                     logger.warning(f"节点 {offline_node.id} ({offline_node.ip}:{offline_node.port}) 离线，发现 {task_count} 个任务的 {len(subtasks)} 个子任务需要迁移")
                     
-                    # 查找在线的节点
-                    available_nodes = db.query(Node).filter(
-                        Node.service_status == "online",
-                        Node.is_active == True
-                    ).all()
-                    
-                    if not available_nodes:
-                        logger.error("没有可用节点，无法迁移任务")
-                        continue
-                    
-                    logger.info(f"找到 {len(available_nodes)} 个可用节点")
-                    
-                    # 计算负载最低的节点
-                    best_node = None
-                    min_load = float('inf')
-                    
-                    for node in available_nodes:
-                        total_tasks = node.image_task_count + node.video_task_count + node.stream_task_count
-                        if total_tasks < node.max_tasks and total_tasks < min_load:
-                            min_load = total_tasks
-                            best_node = node
-                    
-                    if not best_node:
-                        logger.error("没有负载合适的可用节点，无法迁移任务")
-                        continue
+                    # 更新所有子任务为未启动状态，但不处理用户手动停止的任务的子任务
+                    for subtask in subtasks:
+                        # 检查主任务状态，跳过用户手动停止的任务的子任务
+                        task = db.query(Task).filter(Task.id == subtask.task_id).first()
+                        if task and task.status == 2 and task.error_message == "任务由用户手动停止":
+                            logger.info(f"子任务 {subtask.id} 属于用户手动停止的任务 {task.id}，不进行处理")
+                            continue
                         
-                    logger.info(f"找到可用节点 {best_node.id} ({best_node.ip}:{best_node.port})，开始迁移任务")
+                        # 检查子任务是否是运行中状态(1)
+                        if subtask.status == 1:
+                            # 记录原始信息
+                            old_analysis_task_id = subtask.analysis_task_id
+                            old_status = subtask.status
+                            
+                            # 更新子任务状态 - 改为未启动(0)
+                            subtask.status = 0  # 设为未启动状态(0)
+                            subtask.error_message = f"节点 {offline_node.id} 离线，任务需要重新分配"
+                            subtask.analysis_task_id = None  # 清除原始分析任务ID
+                            
+                            logger.info(f"子任务 {subtask.id} 状态从 {old_status} 改为未启动，待重新分配")
                     
-                    for task in tasks:
-                        try:
-                            logger.info(f"开始迁移任务 {task.id}")
-                            
-                            # 找出该任务下需要迁移的子任务（在离线节点上的子任务）
-                            affected_subtasks = [
-                                subtask for subtask in task.sub_tasks 
-                                if subtask.node_id == offline_node.id and 
-                                subtask.status in ["running", "starting"]
-                            ]
-                            
-                            if not affected_subtasks:
-                                logger.info(f"任务 {task.id} 没有需要在节点 {offline_node.id} 上迁移的子任务")
-                                continue
-                            
-                            # 记录子任务数量
-                            subtask_count = len(affected_subtasks)
-                            logger.info(f"任务 {task.id} 有 {subtask_count} 个子任务需要迁移")
-                            
-                            # 更新子任务的节点信息
-                            for subtask in affected_subtasks:
-                                # 记录原始信息
-                                old_analysis_task_id = subtask.analysis_task_id
-                                
-                                # 更新子任务节点和状态
-                                subtask.node_id = best_node.id
-                                subtask.status = "created"  # 重置为待启动状态
-                                subtask.error_message = f"从节点 {offline_node.id} 迁移到节点 {best_node.id}"
-                                subtask.analysis_task_id = None  # 清除原始分析任务ID
-                                
-                                logger.info(f"子任务 {subtask.id} 已更新节点: {offline_node.id} -> {best_node.id}")
-                            
-                            # 减少旧节点任务数
-                            if offline_node.stream_task_count >= subtask_count:
-                                offline_node.stream_task_count -= subtask_count
-                            else:
-                                offline_node.stream_task_count = 0
-                                
-                            # 增加新节点任务数
-                            best_node.stream_task_count += subtask_count
-                            
-                            # 检查主任务状态 - 如果所有子任务都需要迁移，则设置任务为待处理状态
-                            if subtask_count == len(task.sub_tasks):
-                                task.status = "pending"
-                                task.error_message = "所有子任务需要迁移，任务设为待启动状态"
-                                logger.info(f"任务 {task.id} 的所有子任务都需要迁移，设置任务状态为pending")
-                            else:
-                                # 部分子任务迁移，设置为运行中
-                                task.status = "running"
-                                task.error_message = f"{subtask_count}个子任务迁移到节点{best_node.id}"
-                                logger.info(f"任务 {task.id} 部分子任务迁移，保持running状态")
-                            
-                            # 提交更改
-                            db.commit()
-                            
-                            logger.info(f"任务 {task.id} 的 {subtask_count} 个子任务已成功迁移到节点 {best_node.id}")
-                            migrated_count += 1
-                        
-                        except Exception as e:
-                            logger.error(f"迁移任务 {task.id} 失败: {str(e)}")
-                            import traceback
-                            logger.error(traceback.format_exc())
-                            db.rollback()
+                    # 减少离线节点任务计数
+                    if offline_node.stream_task_count > 0:
+                        offline_node.stream_task_count = 0
+                    
+                    # 提交更改
+                    db.commit()
+                    
                 except Exception as e:
                     logger.error(f"处理离线节点 {offline_node.id} 上的任务时出错: {str(e)}")
                     import traceback
@@ -279,22 +213,14 @@ class NodeHealthChecker:
                 Node.is_active == True
             ).all()
             
-            # 处理节点恢复在线的情况，重新分配所有运行中的任务
-            if online_nodes:  # 只要有在线节点，就尝试分配任务
-                # 检查是否有任务需要分配
-                running_tasks = db.query(Task).filter(
-                    Task.status.in_(["running", "starting"])
-                ).count()
-                
-                if running_tasks > 0:
-                    logger.info(f"系统中有 {running_tasks} 个运行中任务和 {len(online_nodes)} 个在线节点，尝试重新分配任务")
-                    await self._handle_node_recovery(db, online_nodes)
-                else:
-                    logger.info("没有运行中任务需要分配")
+            # 处理任务分配
+            if online_nodes:  # 只要有在线节点，就尝试分配所有未启动的子任务
+                logger.info(f"系统中有 {len(online_nodes)} 个在线节点，尝试分配所有未启动状态的子任务")
+                await self._handle_node_recovery(db, online_nodes)
             else:
                 logger.warning("没有在线节点，无法分配任务")
             
-            # 无论是否有任务迁移，都检查并启动待处理的任务
+            # 如果有待处理的任务，尝试启动
             await self._start_pending_tasks(db)
             
             after_check = datetime.now()
@@ -373,23 +299,37 @@ class NodeHealthChecker:
             return False
 
     async def _start_pending_tasks(self, db: Session):
-        """启动处于pending状态的任务"""
+        """启动处于未启动状态的任务"""
         try:
             logger.info("开始处理待启动的任务...")
-            # 查找待处理的任务
-            pending_tasks = db.query(Task).options(
+            
+            # 先查询所有任务状态，用于诊断
+            task_status_counts = db.execute(text("""
+                SELECT status, COUNT(*) as count 
+                FROM tasks 
+                GROUP BY status
+            """)).fetchall()
+            
+            logger.info(f"当前任务状态分布: {', '.join([f'{status}: {count}' for status, count in task_status_counts])}")
+            
+            # 查找运行中(状态1)的主任务中有未启动(状态0)的子任务
+            running_tasks_with_not_started_subtasks = db.query(Task).join(
+                SubTask, Task.id == SubTask.task_id
+            ).filter(
+                Task.status == 1,  # 主任务状态为运行中(1)
+                SubTask.status == 0,  # 子任务状态为未启动(0)
+                Task.error_message != "任务由用户手动停止"  # 明确排除用户手动停止的任务
+            ).options(
                 joinedload(Task.streams),
                 joinedload(Task.models),
                 joinedload(Task.sub_tasks)
-            ).filter(
-                Task.status == "pending"
-            ).all()
+            ).distinct().all()
             
-            if not pending_tasks:
-                logger.info("没有待处理的任务需要启动")
+            if not running_tasks_with_not_started_subtasks:
+                logger.info("没有待启动的任务")
                 return
-                
-            logger.info(f"找到 {len(pending_tasks)} 个待处理任务")
+            
+            logger.info(f"找到 {len(running_tasks_with_not_started_subtasks)} 个运行中但有未启动子任务的任务，任务ID: {[task.id for task in running_tasks_with_not_started_subtasks]}")
             
             # 获取可用节点
             available_nodes = db.query(Node).filter(
@@ -400,31 +340,46 @@ class NodeHealthChecker:
             
             if not available_nodes:
                 logger.warning("没有可用的分析服务节点，无法启动任务")
-                for task in pending_tasks:
-                    task.status = "no_node"
-                    task.error_message = "没有可用的分析节点"
-                db.commit()
                 return
+            
+            logger.info(f"可用节点: {[f'{node.id}({node.ip}:{node.port})' for node in available_nodes]}")
             
             # 导入task_crud
             from crud import task as task_crud
             
             started_count = 0
-            for task in pending_tasks:
+            for task in running_tasks_with_not_started_subtasks:
                 try:
-                    logger.info(f"开始启动任务 {task.id}")
-                    success, message = await task_crud.start_task(db, task.id)
-                    if success:
-                        logger.info(f"任务 {task.id} 启动成功")
-                        started_count += 1
+                    # 打印任务详情
+                    logger.info(f"任务 {task.id} 信息: 状态={task.status}, 子任务数={len(task.sub_tasks)}, 错误消息={task.error_message}")
+                    
+                    # 打印子任务状态
+                    subtask_status = {}
+                    for subtask in task.sub_tasks:
+                        status = subtask.status
+                        if status not in subtask_status:
+                            subtask_status[status] = 0
+                        subtask_status[status] += 1
+                    
+                    logger.info(f"任务 {task.id} 的子任务状态分布: {subtask_status}")
+                    
+                    # 只有主任务为运行中状态(1)时才启动子任务
+                    if task.status == 1:
+                        logger.info(f"开始启动任务 {task.id}")
+                        success, message = await task_crud.start_task(db, task.id)
+                        if success:
+                            logger.info(f"任务 {task.id} 启动成功: {message}")
+                            started_count += 1
+                        else:
+                            logger.error(f"任务 {task.id} 启动失败: {message}")
                     else:
-                        logger.error(f"任务 {task.id} 启动失败: {message}")
+                        logger.info(f"任务 {task.id} 状态为 {task.status}，不是运行中状态，跳过启动")
                 except Exception as e:
                     logger.error(f"启动任务 {task.id} 时出错: {str(e)}")
                     import traceback
                     logger.error(traceback.format_exc())
             
-            logger.info(f"总启动情况：{started_count}/{len(pending_tasks)} 个任务启动成功")
+            logger.info(f"总启动情况：{started_count}/{len(running_tasks_with_not_started_subtasks)} 个任务启动成功")
             
         except Exception as e:
             logger.error(f"处理待启动任务时出错: {str(e)}")
@@ -433,51 +388,40 @@ class NodeHealthChecker:
 
     async def _handle_node_recovery(self, db: Session, recovered_nodes: List[Node]):
         """
-        处理节点恢复在线的情况，检查出错的子任务并迁移到新节点
+        处理节点恢复在线的情况，重新分配子任务
         
         参数:
         - db: 数据库会话
-        - recovered_nodes: 在线的节点列表，可以是新恢复的也可以是一直在线的
+        - recovered_nodes: 可用的节点列表
         """
         try:
-            logger.info(f"处理 {len(recovered_nodes)} 个恢复在线的节点...")
+            logger.info(f"处理任务分配，当前有 {len(recovered_nodes)} 个可用节点...")
             
             # 从crud导入task模块
             from crud import task as task_crud
             
-            # 查找需要迁移的子任务 - 找出所有状态为error的子任务
-            subtasks_to_migrate = db.query(SubTask).join(
+            # 查找所有需要处理的未启动状态子任务
+            # 1. 连接Task表，只处理非用户手动停止的任务
+            # 2. 过滤掉Task.status=2且错误消息='任务由用户手动停止'的子任务
+            subtasks_to_handle = db.query(SubTask).join(
                 Task, SubTask.task_id == Task.id
             ).filter(
-                SubTask.status == "error",
-                Task.status.in_(["running", "error"])  # 主任务仍在运行或处于错误状态
+                SubTask.status == 0,  # 子任务状态为未启动(0)
+                or_(
+                    Task.status != 2,  # 主任务非停止状态
+                    # 如果主任务是停止状态，确保不是用户手动停止的
+                    and_(
+                        Task.status == 2,  # 主任务为已停止(2)
+                        Task.error_message != "任务由用户手动停止"  # 排除用户手动停止的任务
+                    )
+                )
             ).all()
             
-            # 检查是否有因为节点离线而导致状态不正确的子任务
-            # 这些子任务状态为running但节点已离线
-            offline_subtasks = db.query(SubTask).join(
-                Node, SubTask.node_id == Node.id
-            ).filter(
-                SubTask.status == "running",
-                Node.service_status == "offline"
-            ).all()
-            
-            # 将离线节点的运行中子任务标记为错误状态
-            for subtask in offline_subtasks:
-                subtask.status = "error"
-                subtask.error_message = "节点离线，需要重新分配"
-                subtasks_to_migrate.append(subtask)
-            
-            # 提交更改
-            if offline_subtasks:
-                db.commit()
-                logger.info(f"将 {len(offline_subtasks)} 个离线节点的子任务标记为错误状态")
-            
-            if not subtasks_to_migrate:
-                logger.info("没有需要迁移的子任务")
+            if not subtasks_to_handle:
+                logger.info("没有未启动状态的子任务需要处理")
                 return
             
-            logger.info(f"找到 {len(subtasks_to_migrate)} 个需要迁移的子任务")
+            logger.info(f"找到 {len(subtasks_to_handle)} 个未启动状态的子任务")
             
             # 对可用节点进行排序
             available_nodes = []
@@ -492,58 +436,56 @@ class NodeHealthChecker:
                         available_nodes.append(node)
             
             if not available_nodes:
-                logger.warning("没有可用的分析服务节点，无法迁移子任务")
+                logger.warning("没有可用的分析服务节点，无法处理未启动的子任务")
                 return
             
-            logger.info(f"有 {len(available_nodes)} 个可用的分析服务节点用于子任务迁移")
+            logger.info(f"有 {len(available_nodes)} 个可用的分析服务节点用于任务分配")
             
-            # 按任务分组迁移子任务
-            tasks_to_update = set()
-            migrated_count = 0
-            
-            # 将子任务按任务ID分组
+            # 按任务分组处理子任务
             subtasks_by_task = {}
-            for subtask in subtasks_to_migrate:
+            for subtask in subtasks_to_handle:
                 if subtask.task_id not in subtasks_by_task:
                     subtasks_by_task[subtask.task_id] = []
                 subtasks_by_task[subtask.task_id].append(subtask)
             
-            # 为每个任务调用检查和迁移方法
+            # 为每个任务调用start_task方法
+            task_started_count = 0
             for task_id, subtasks in subtasks_by_task.items():
                 try:
-                    logger.info(f"迁移任务 {task_id} 的 {len(subtasks)} 个子任务")
+                    # 再次检查任务状态，确保不处理用户手动停止的任务
+                    task = db.query(Task).filter(Task.id == task_id).first()
+                    if not task:
+                        logger.error(f"找不到任务 {task_id}，跳过")
+                        continue
                     
-                    # 准备子任务的流、模型和配置信息
-                    for subtask in subtasks:
-                        # 重置子任务状态
-                        subtask.status = "created"
-                        subtask.error_message = None
-                        subtask.started_at = None
-                        subtask.completed_at = None
-                        subtask.analysis_task_id = None
+                    # 如果是用户手动停止的任务，跳过处理
+                    if task.status == 2 and task.error_message == "任务由用户手动停止":
+                        logger.info(f"任务 {task_id} 是用户手动停止的，跳过处理")
+                        continue
                     
-                    # 提交更改
-                    db.commit()
+                    logger.info(f"准备启动任务 {task_id}，包含 {len(subtasks)} 个未启动的子任务")
                     
-                    # 调用start_task重新启动整个任务
-                    success, message = await task_crud.start_task(db, task_id)
-                    
-                    if success:
-                        logger.info(f"任务 {task_id} 的子任务成功迁移: {message}")
-                        migrated_count += 1
+                    # 只有当运行中状态(1)的主任务才尝试启动子任务
+                    if task.status == 1:
+                        # 直接启动任务
+                        success, message = await task_crud.start_task(db, task_id)
+                        if success:
+                            logger.info(f"任务 {task_id} 启动成功: {message}")
+                            task_started_count += 1
+                        else:
+                            logger.error(f"任务 {task_id} 启动失败: {message}")
                     else:
-                        logger.error(f"任务 {task_id} 的子任务迁移失败: {message}")
+                        logger.info(f"任务 {task_id} 状态为 {task.status}，不是运行中状态，跳过启动")
                 
                 except Exception as e:
-                    logger.error(f"迁移任务 {task_id} 的子任务时出错: {str(e)}")
+                    logger.error(f"处理任务 {task_id} 时发生错误: {str(e)}")
                     import traceback
                     logger.error(traceback.format_exc())
-                    db.rollback()
             
-            logger.info(f"总共迁移了 {migrated_count}/{len(subtasks_by_task)} 个任务的子任务")
+            logger.info(f"总计处理了 {len(subtasks_by_task)} 个任务，成功启动了 {task_started_count} 个")
             
         except Exception as e:
-            logger.error(f"处理节点恢复时出错: {str(e)}")
+            logger.error(f"处理未启动子任务时出错: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
 

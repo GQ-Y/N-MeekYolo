@@ -806,13 +806,13 @@ class YOLODetector:
             task_id: 任务ID
             model_code: 模型代码
             stream_url: 流URL
-            callback_urls: 回调URL，多个用逗号分隔
-            system_callback_url: 系统回调URL（必须执行）
-            config: 配置参数
+            callback_urls: 回调地址，多个用逗号分隔
+            system_callback_url: 系统回调URL，用于系统级回调
+            config: 分析配置
             task_name: 任务名称
-            enable_callback: 是否启用用户回调
+            enable_callback: 是否启用回调
             save_result: 是否保存结果
-            analysis_type: 分析类型，支持detection、tracking、counting等
+            analysis_type: 分析类型
             
         Returns:
             Dict[str, Any]: 任务信息
@@ -835,7 +835,8 @@ class YOLODetector:
             existing_task = await self._get_task_info(task_id)
             if existing_task:
                 # 如果任务已存在但状态是完成或失败，则重置任务
-                if existing_task.get("status") in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.ERROR]:
+                # 修复：使用TaskStatus.FAILED替代不存在的TaskStatus.ERROR
+                if existing_task.get("status") in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED]:
                     logger.info(f"YOLODetector.start_stream_analysis - 任务 {task_id} 已存在但已完成或失败，重置任务")
                 # 否则返回已存在的任务信息
                 else:

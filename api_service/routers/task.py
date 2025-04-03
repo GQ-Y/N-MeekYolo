@@ -9,7 +9,7 @@
 - 任务控制：启动、停止和监控任务执行
 """
 from fastapi import APIRouter, Depends, Body, Request, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
 from models.responses import BaseResponse, TaskDetailResponse, SubTaskResponse
 from models.requests import TaskCreate, TaskUpdate
@@ -428,6 +428,17 @@ async def stop_task(
     - 停止操作结果
     """
     try:
+        # 打印任务和子任务的ID关系
+        task = db.query(task_crud.Task).options(joinedload(task_crud.Task.sub_tasks)).filter(task_crud.Task.id == task_id).first()
+        if task:
+            logger.info(f"准备停止任务 {task_id} (状态: {task.status})")
+            logger.info(f"子任务情况: 总数={len(task.sub_tasks)}, 状态: {task.status}")
+            
+            # 打印每个子任务的ID和分析任务ID
+            for idx, subtask in enumerate(task.sub_tasks):
+                logger.info(f"子任务 {idx+1}/{len(task.sub_tasks)}: ID={subtask.id}, analysis_task_id={subtask.analysis_task_id}, 状态={subtask.status}")
+                
+        # 调用停止逻辑
         success, message = await task_crud.stop_task(db, task_id)
         
         return BaseResponse(
@@ -442,4 +453,5 @@ async def stop_task(
             success=False,
             code=500,
             message=str(e)
-        ) 
+        )
+

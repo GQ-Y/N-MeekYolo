@@ -305,7 +305,7 @@ class SubTaskResponse(BaseModel):
     node_info: Optional[Dict[str, Any]] = None
     
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class TaskDetailResponse(BaseModel):
     """任务详情响应模型"""
@@ -325,4 +325,4 @@ class TaskDetailResponse(BaseModel):
     sub_tasks: List[SubTaskResponse] = []
     
     class Config:
-        orm_mode = True
+        from_attributes = True

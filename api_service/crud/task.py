@@ -22,7 +22,7 @@ def create_task(
     task = Task(
         name=task_data.name,
         save_result=task_data.save_result,
-        status="created",
+        status=0,  # 未启动状态(0)
         total_subtasks=sum(len(stream_config.models) for stream_config in task_data.tasks)
     )
     
@@ -77,7 +77,7 @@ def create_task(
                 task_id=task.id,
                 stream_id=stream.id,
                 model_id=model.id,
-                status="created",
+                status=0,  # 未启动状态(0)
                 config=model_config.config,
                 enable_callback=enable_callback,
                 callback_url=callback_url,
@@ -197,9 +197,27 @@ async def start_task(
         return False, "任务不存在"
     
     # 检查任务状态
-    if task.status != "created" and task.status != "stopped":
+    # 如果任务已经处于运行中状态(1)，直接进入子任务处理
+    # 如果任务是未启动状态(0)，改为运行中状态(1)
+    # 如果任务是已停止状态(2)并且不是用户手动停止的，改为运行中状态(1)
+    if task.status == 1:
+        logger.info(f"任务 {task_id} 已经处于运行中状态")
+    elif task.status == 0:
+        logger.info(f"任务 {task_id} 从未启动状态改为运行中状态")
+        task.status = 1  # 运行中状态
+        task.error_message = None
+    elif task.status == 2:
+        # 判断是否是用户手动停止的任务
+        if task.error_message == "任务由用户手动停止":
+            logger.error(f"任务 {task_id} 是用户手动停止的，无法启动")
+            return False, "用户手动停止的任务，需要先手动取消停止状态"
+        else:
+            logger.info(f"任务 {task_id} 从已停止状态改为运行中状态")
+            task.status = 1  # 运行中状态
+            task.error_message = None
+    else:
         logger.error(f"任务 {task_id} 状态为 {task.status}，无法启动")
-        return False, f"任务状态为 {task.status}，无法启动"
+        return False, f"任务状态无效，无法启动"
     
     # 获取子任务
     subtasks = task.sub_tasks
@@ -207,45 +225,55 @@ async def start_task(
         logger.error(f"任务 {task_id} 没有子任务，无法启动")
         return False, "任务没有子任务，无法启动"
     
-    logger.info(f"任务 {task_id} ({task.name}) 包含 {len(subtasks)} 个子任务")
+    # 如果是重新启动任务，更新启动时间和计数
+    if task.started_at:
+        logger.info(f"重启任务 {task_id}，清除之前的启动时间")
     
-    # 查找可用节点
-    available_node = NodeCRUD.get_available_node(db)
-    if not available_node:
-        # 更新任务状态
-        task.status = "no_node"
-        task.error_message = "没有可用的分析节点"
-        db.commit()
-        logger.error(f"任务 {task_id} 启动失败: 没有可用的分析节点")
-        return False, "没有可用的分析节点"
-        
-    logger.info(f"找到可用节点: ID={available_node.id}, IP={available_node.ip}, 端口={available_node.port}")
+    task.started_at = datetime.now()
+    task.completed_at = None
+    task.active_subtasks = 0
+    
+    # 处理未启动状态(0)的子任务
+    not_started_subtasks = [subtask for subtask in subtasks if subtask.status == 0]
+    logger.info(f"任务 {task_id} 中有 {len(not_started_subtasks)} 个未启动的子任务")
+    
+    # 如果没有未启动的子任务，检查是否有任何子任务处于运行中状态
+    if not not_started_subtasks:
+        running_subtasks = [subtask for subtask in subtasks if subtask.status == 1]
+        if running_subtasks:
+            logger.info(f"任务 {task_id} 中有 {len(running_subtasks)} 个运行中的子任务，无需额外启动")
+            task.active_subtasks = len(running_subtasks)
+            db.commit()
+            return True, f"任务中已有 {len(running_subtasks)} 个运行中的子任务"
+        else:
+            # 如果所有子任务都是已停止状态，将它们重置为未启动状态
+            logger.info(f"任务 {task_id} 中没有运行中或未启动的子任务，将所有子任务重置为未启动状态")
+            for subtask in subtasks:
+                subtask.status = 0  # 未启动状态
+                subtask.error_message = None
+                subtask.started_at = None
+                subtask.completed_at = None
+                subtask.node_id = None
+                subtask.analysis_task_id = None
+            not_started_subtasks = subtasks
+    
+    db.commit()
+    
+    logger.info(f"任务 {task_id} ({task.name}) 准备启动 {len(not_started_subtasks)} 个子任务")
     
     # 导入分析服务
     from services.analysis import AnalysisService
     analysis_service = AnalysisService()
     
-    # 更新任务状态
-    task.status = "running"
-    task.started_at = datetime.now()
-    
     # 构建系统回调URL - API服务接收回调的地址
     system_callback = f"http://{settings.SERVICE.host}:{settings.SERVICE.port}/api/v1/callback"
     logger.info(f"系统回调URL: {system_callback}")
     
-    # 逐个启动子任务
+    # 逐个启动未启动状态的子任务
     success_count = 0
     
-    for subtask in subtasks:
+    for subtask in not_started_subtasks:
         try:
-            # 先检查节点是否可用
-            if not available_node or available_node.image_task_count + available_node.video_task_count + available_node.stream_task_count >= available_node.max_tasks:
-                # 重新获取可用节点
-                available_node = NodeCRUD.get_available_node(db)
-                if not available_node:
-                    logger.error(f"子任务 {subtask.id} 无可用节点，跳过")
-                    continue
-            
             # 获取流和模型信息
             stream = db.query(Stream).filter(Stream.id == subtask.stream_id).first()
             model = db.query(Model).filter(Model.id == subtask.model_id).first()
@@ -256,25 +284,16 @@ async def start_task(
                 
             logger.info(f"准备启动子任务 {subtask.id}: 流={stream.name}({stream.url}), 模型={model.name}({model.code})")
             
-            # 更新子任务节点
-            subtask.node_id = available_node.id
-            subtask.status = "running"
-            subtask.started_at = datetime.now()
-            subtask.error_message = None
-            
-            # 更新节点任务计数
-            available_node.stream_task_count += 1
-            
             # 调用分析服务启动实际分析任务
             try:
                 # 用户配置的回调URL
                 user_callback_url = subtask.callback_url
                 
                 logger.info(f"调用分析服务启动子任务 {subtask.id}")
-                logger.info(f"子任务参数: 模型={model.code}, 流URL={stream.url}, 节点={available_node.ip}:{available_node.port}")
+                logger.info(f"子任务参数: 模型={model.code}, 流URL={stream.url}")
                 logger.info(f"子任务配置: {subtask.config}")
                 
-                analysis_task_id = await analysis_service.analyze_stream(
+                result = await analysis_service.analyze_stream(
                     model_code=model.code,
                     stream_url=stream.url,
                     task_name=f"{task.name}-{subtask.id}",
@@ -287,24 +306,30 @@ async def start_task(
                     analysis_type=subtask.analysis_type
                 )
                 
-                if not analysis_task_id:
-                    logger.error(f"子任务 {subtask.id} 启动失败: 未获取到分析任务ID")
-                    subtask.status = "error"
-                    subtask.error_message = "启动分析服务失败: 未获取到分析任务ID"
-                    available_node.stream_task_count -= 1
+                if not result:
+                    logger.error(f"子任务 {subtask.id} 启动失败: 未找到可用的分析节点")
+                    subtask.error_message = "启动分析服务失败: 未找到可用的分析节点"
+                    # 保持未启动状态(0)不变
                     continue
                 
-                # 保存分析任务ID
+                # 解包返回值
+                analysis_task_id, node_id = result
+                
+                # 保存分析任务ID和节点ID
                 subtask.analysis_task_id = analysis_task_id
-                logger.info(f"子任务 {subtask.id} 启动成功，分析任务ID: {analysis_task_id}")
+                subtask.node_id = node_id
+                
+                # 只有在确认启动成功后，才将状态设为运行中(1)
+                subtask.status = 1  # 运行中状态(1)
+                subtask.started_at = datetime.now()
+                
+                logger.info(f"子任务 {subtask.id} 启动成功，分析任务ID: {analysis_task_id}，节点ID: {node_id}")
                 success_count += 1
                 
             except Exception as e:
                 logger.error(f"启动子任务 {subtask.id} 的分析服务失败: {str(e)}")
-                subtask.status = "error"
                 subtask.error_message = f"启动分析服务失败: {str(e)}"
-                # 回滚节点任务计数
-                available_node.stream_task_count -= 1
+                # 保持未启动状态(0)
                 continue
             
         except Exception as e:
@@ -315,24 +340,27 @@ async def start_task(
     task.active_subtasks = success_count
     
     db.commit()
-    
-    if success_count == 0:
-        # 如果没有子任务启动成功，更新任务状态
-        task.status = "error"
+
+    if success_count == 0 and len(not_started_subtasks) > 0:
+        # 如果有子任务需要启动但全部启动失败
         task.error_message = "没有子任务启动成功"
         db.commit()
         logger.error(f"任务 {task_id} 启动失败: 没有子任务启动成功")
         return False, "没有子任务启动成功"
     
-    if success_count < len(subtasks):
+    if success_count < len(not_started_subtasks) and len(not_started_subtasks) > 0:
         # 如果只有部分子任务启动成功
-        task.error_message = f"部分子任务启动成功 ({success_count}/{len(subtasks)})"
+        task.error_message = f"部分子任务启动成功 ({success_count}/{len(not_started_subtasks)})"
         db.commit()
-        logger.warn(f"任务 {task_id} 部分启动成功: {success_count}/{len(subtasks)} 个子任务")
-        return True, f"部分子任务启动成功 ({success_count}/{len(subtasks)})"
+        logger.warn(f"任务 {task_id} 部分启动成功: {success_count}/{len(not_started_subtasks)} 个子任务")
+        return True, f"部分子任务启动成功 ({success_count}/{len(not_started_subtasks)})"
     
-    logger.info(f"任务 {task_id} 启动成功: {success_count}/{len(subtasks)} 个子任务")
-    return True, "任务启动成功"
+    if len(not_started_subtasks) > 0:
+        logger.info(f"任务 {task_id} 启动成功: {success_count}/{len(not_started_subtasks)} 个子任务")
+        return True, "任务启动成功"
+    else:
+        logger.info(f"任务 {task_id} 无需启动新的子任务")
+        return True, "任务已经处于运行状态"
 
 async def stop_task(
     db: Session,
@@ -351,25 +379,28 @@ async def stop_task(
         return False, "任务不存在"
     
     # 检查任务状态
-    if task.status != "running":
-        return False, f"任务状态为 {task.status}，无法停止"
+    if task.status != 1:  # 只有运行中的任务(1)可以停止
+        return False, f"任务状态为 {task.status}，不是运行中状态，无法停止"
     
     # 导入分析服务
     from services.analysis import AnalysisService
     analysis_service = AnalysisService()
     
     # 更新任务状态
-    task.status = "stopped"
+    task.status = 2  # 已停止状态(2)
     task.active_subtasks = 0
+    # 设置明确的错误消息，表明是用户手动停止的任务
+    task.error_message = "任务由用户手动停止"
     
     # 逐个停止子任务
     stopped_count = 0
     for subtask in task.sub_tasks:
-        if subtask.status == "running":
+        if subtask.status == 1:  # 只停止运行中的子任务(1)
             try:
                 # 更新子任务状态
-                subtask.status = "stopped"
+                subtask.status = 2  # 已停止状态(2)
                 subtask.completed_at = datetime.now()
+                subtask.error_message = "子任务由用户手动停止"
                 
                 # 如果有节点，更新节点任务计数
                 if subtask.node_id:
@@ -380,7 +411,8 @@ async def stop_task(
                 # 如果有分析任务ID，调用分析服务停止任务
                 if subtask.analysis_task_id:
                     try:
-                        await analysis_service.stop_task(subtask.analysis_task_id)
+                        # 传递节点ID，确保使用正确的节点停止任务
+                        await analysis_service.stop_task(subtask.analysis_task_id, subtask.node_id)
                         logger.info(f"已停止子任务 {subtask.id} 的分析任务 {subtask.analysis_task_id}")
                     except Exception as e:
                         logger.error(f"停止子任务 {subtask.id} 的分析任务失败: {str(e)}")
@@ -399,7 +431,7 @@ async def stop_task(
 def update_subtask_status(
     db: Session,
     subtask_id: int,
-    status: str,
+    status: int,
     error_message: Optional[str] = None
 ) -> Tuple[bool, str]:
     """更新子任务状态"""
@@ -412,8 +444,8 @@ def update_subtask_status(
     if error_message:
         subtask.error_message = error_message
     
-    # 如果是完成或错误状态，设置完成时间
-    if status in ["completed", "error"]:
+    # 如果是已停止状态(2)，设置完成时间
+    if status == 2:
         subtask.completed_at = datetime.now()
         
         # 如果有节点，更新节点任务计数
@@ -431,7 +463,7 @@ def update_task_status_from_subtasks(
     db: Session,
     task_id: int
 ) -> Tuple[bool, str]:
-    """根据子任务状态更新任务状态"""
+    """根据子任务状态更新任务状态（三态模型：未启动、运行中、停止）"""
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
         return False, "任务不存在"
@@ -440,45 +472,85 @@ def update_task_status_from_subtasks(
     subtask_stats = db.execute(text("""
         SELECT 
             COUNT(*) as total,
-            SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) as running,
-            SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errors,
-            SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed
+            SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) as running,
+            SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) as not_started,
+            SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) as stopped
         FROM sub_tasks
         WHERE task_id = :task_id
     """), {"task_id": task_id}).fetchone()
     
     total = subtask_stats[0] or 0
     running = subtask_stats[1] or 0
-    errors = subtask_stats[2] or 0
-    completed = subtask_stats[3] or 0
+    not_started = subtask_stats[2] or 0
+    stopped = subtask_stats[3] or 0
     
     # 更新任务统计信息
     task.active_subtasks = running
     task.total_subtasks = total
     
-    # 根据子任务状态更新任务状态
-    if running == 0 and total > 0:
-        if completed == total:
-            # 所有子任务都完成
-            task.status = "completed"
-            task.completed_at = datetime.now()
-        elif errors > 0:
-            # 有错误的子任务
-            if errors == total:
-                # 所有子任务都错误
-                task.status = "error"
-                task.error_message = "所有子任务执行失败"
+    # 用户手动停止的任务保持已停止状态
+    if task.status == 2 and task.error_message == "任务由用户手动停止":
+        db.commit()
+        return True, "用户手动停止的任务，保持已停止状态"
+    
+    # 根据子任务状态更新任务状态 - 三态模型
+    if running > 0:
+        # 只要有运行中的子任务，主任务就是运行中
+        task.status = 1  # 运行中状态(1)
+        
+        # 检查是否有子任务停止，记录原因
+        if stopped > 0:
+            task.error_message = f"部分子任务已停止 ({stopped}/{total})"
+    elif total == not_started:
+        # 所有子任务都未启动
+        task.status = 0  # 未启动状态(0)
+        task.error_message = None  # 清除错误消息
+    else:
+        # 没有运行中的子任务，且不是全部未启动，则标记为停止
+        task.status = 2  # 已停止状态(2)
+        
+        # 区分不同的停止原因
+        if stopped == total:
+            # 所有子任务都已停止
+            # 检查是否所有子任务都是因用户停止
+            user_stopped_count = db.query(SubTask).filter(
+                SubTask.task_id == task_id,
+                SubTask.status == 2,
+                SubTask.error_message == "子任务由用户手动停止"
+            ).count()
+            
+            if user_stopped_count == total:
+                task.error_message = "任务由用户手动停止"
+                task.completed_at = datetime.now()
             else:
-                # 部分子任务错误
-                task.status = "error"
-                task.error_message = f"部分子任务执行失败 ({errors}/{total})"
-    elif running > 0:
-        # 有运行中的子任务
-        task.status = "running"
-        if errors > 0:
-            # 有错误的子任务
-            task.error_message = f"部分子任务执行失败 ({errors}/{total})"
+                task.error_message = "所有子任务已停止"
+                task.completed_at = datetime.now()
+        else:
+            # 部分子任务已停止，部分未启动
+            task.error_message = f"部分子任务未启动 ({not_started}/{total})"
     
     db.commit()
     
-    return True, f"任务状态已更新: {task.status}" 
+    return True, f"任务状态已更新: {task.status}"
+
+def normalize_task_status(status: int) -> int:
+    """
+    将不同的状态规范化为三态模型中的一种状态
+    
+    参数:
+    - status: 原始状态
+    
+    返回:
+    - 规范化后的状态：0(未启动)、1(运行中)或2(已停止)
+    """
+    # 确保状态是整数并在有效范围内
+    try:
+        status_int = int(status)
+        if status_int in [0, 1, 2]:
+            return status_int
+        else:
+            logger.warning(f"遇到无效状态值: {status}，默认规范化为未启动(0)")
+            return 0
+    except (TypeError, ValueError):
+        logger.warning(f"无法将状态 {status} 转换为整数，默认规范化为未启动(0)")
+        return 0 

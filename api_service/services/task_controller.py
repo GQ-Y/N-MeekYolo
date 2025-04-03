@@ -151,8 +151,8 @@ class TaskController:
             task.active_subtasks = successful_tasks
             
             if successful_tasks == 0:
-                # 如果没有子任务启动成功，标记任务为错误状态
-                task.status = "error"
+                # 如果没有子任务启动成功，标记任务为停止状态，而非错误状态
+                task.status = "stopped"
                 task.error_message = "所有子任务启动失败"
             elif successful_tasks < len(sub_tasks):
                 # 如果部分子任务启动成功
@@ -444,7 +444,7 @@ class TaskController:
             
     async def _update_task_status_from_subtasks(self, db: Session, task_id: int) -> bool:
         """
-        根据子任务状态更新任务状态
+        根据子任务状态更新任务状态（三态模型：未启动、运行中、停止）
         
         参数:
         - db: 数据库会话
@@ -469,6 +469,11 @@ class TaskController:
                 SubTask.status == "error"
             ).count()
             
+            completed_count = db.query(SubTask).filter(
+                SubTask.task_id == task_id,
+                SubTask.status == "completed"
+            ).count()
+            
             total_count = db.query(SubTask).filter(
                 SubTask.task_id == task_id
             ).count()
@@ -477,23 +482,31 @@ class TaskController:
             task.active_subtasks = running_count
             task.total_subtasks = total_count
             
-            # 根据子任务状态更新任务状态
-            if running_count == 0:
-                if error_count == total_count:
+            # 根据子任务状态更新任务状态 - 遵循三态模型
+            if running_count > 0:
+                # 有运行中的子任务，主任务状态为运行中
+                task.status = "running"
+                if error_count > 0:
+                    # 部分子任务出错，但仍有子任务运行
+                    task.error_message = f"部分子任务执行失败 ({error_count}/{total_count})"
+            else:
+                # 没有运行中的子任务，状态为停止
+                task.status = "stopped"
+                
+                # 区分不同停止原因
+                if completed_count == total_count:
+                    # 所有子任务正常完成
+                    task.error_message = "所有子任务已正常完成"
+                    task.completed_at = datetime.now()
+                elif error_count == total_count:
                     # 所有子任务都出错
-                    task.status = "error"
                     task.error_message = "所有子任务执行失败"
                 elif error_count > 0:
                     # 部分子任务出错
-                    task.status = "error"
                     task.error_message = f"部分子任务执行失败 ({error_count}/{total_count})"
                 else:
-                    # 所有子任务完成
-                    task.status = "completed"
-                    task.completed_at = datetime.now()
-            elif error_count > 0:
-                # 部分子任务出错，但仍有子任务运行
-                task.error_message = f"部分子任务执行失败 ({error_count}/{total_count})"
+                    # 其他停止情况
+                    task.error_message = "任务已停止"
             
             db.commit()
             return True
