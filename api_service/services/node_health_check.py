@@ -19,7 +19,7 @@ from typing import List
 logger = setup_logger(__name__)
 
 class NodeHealthChecker:
-    def __init__(self, check_interval: int = 60):
+    def __init__(self, check_interval: int = 300):
         """
         初始化节点健康检查器
         :param check_interval: 检查间隔时间（秒），默认10秒
