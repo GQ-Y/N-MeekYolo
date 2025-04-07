@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 class APIServiceConfig(BaseSettings):
     """API服务配置"""
     
+    # 原始配置数据
+    config: Dict[str, Any] = {}
+    
     # 基础信息
     PROJECT_NAME: str = "MeekYolo API Service"
     VERSION: str = "1.0.0"
@@ -106,12 +109,28 @@ class APIServiceConfig(BaseSettings):
             if os.path.exists(config_path):
                 logger.debug(f"Config file exists: {config_path}")
                 with open(config_path, "r", encoding="utf-8") as f:
-                    config.update(yaml.safe_load(f))
+                    yaml_config = yaml.safe_load(f)
+                    config.update(yaml_config)
                     logger.debug(f"Loaded config: {config}")
             else:
                 logger.warning(f"Config file not found: {config_path}, using default values")
             
-            return cls(**config)
+            # 保存原始配置
+            instance = cls(**config)
+            instance.config = config
+            
+            # 服务配置兼容性处理
+            if "API_SERVICE" in config:
+                instance.SERVICE = cls.ServiceConfig(**config["API_SERVICE"])
+            
+            # 默认分组兼容性处理
+            if "GROUP" in config:
+                instance.DEFAULT_GROUP = cls.DefaultGroupConfig(
+                    name=config["GROUP"].get("default_group_name", "默认分组"),
+                    description="系统默认分组"
+                )
+            
+            return instance
         except Exception as e:
             logger.error(f"Failed to load config: {str(e)}")
             raise
@@ -119,7 +138,7 @@ class APIServiceConfig(BaseSettings):
 # 加载配置
 try:
     settings = APIServiceConfig.load_config()
-    logger.debug(f"Settings loaded successfully: {settings}")
+    logger.debug(f"Settings loaded successfully")
 except Exception as e:
     logger.error(f"Failed to load config: {str(e)}")
     raise 

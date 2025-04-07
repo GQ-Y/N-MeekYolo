@@ -43,6 +43,38 @@ class BaseResponse(BaseModel, Generic[T]):
         }
     }
 
+class PaginationResponse(BaseResponse[T]):
+    """分页响应模型"""
+    pagination: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "total": 0,
+            "page": 1,
+            "size": 20,
+            "pages": 0
+        },
+        description="分页信息"
+    )
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "requestId": "550e8400-e29b-41d4-a716-446655440000",
+                "path": "/api/v1/mqtt/nodes",
+                "success": True,
+                "message": "Success",
+                "code": 200,
+                "data": [],
+                "pagination": {
+                    "total": 0,
+                    "page": 1,
+                    "size": 20,
+                    "pages": 0
+                },
+                "timestamp": 1616633599000
+            }
+        }
+    }
+
 class NodeBase(BaseModel):
     """节点基础模型"""
     ip: str = Field(..., description="节点IP地址")

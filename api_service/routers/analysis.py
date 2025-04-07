@@ -7,22 +7,25 @@
 - 流分析：支持实时视频流的目标检测分析
 - 任务管理：支持停止正在进行的分析任务
 """
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Depends
 from typing import List, Dict, Any
 from models.requests import ImageAnalysisRequest, VideoAnalysisRequest, StreamAnalysisRequest
 from models.responses import BaseResponse
-from services.analysis import AnalysisService
+from services.analysis_client import AnalysisClient
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 router = APIRouter(prefix="/api/v1/analysis", tags=["分析"])
 
-analysis_service = AnalysisService()
+# 依赖注入函数，从请求状态中获取分析服务客户端
+def get_analysis_client(request: Request) -> AnalysisClient:
+    return request.state.analysis_client
 
 @router.post("/image/analyze", response_model=BaseResponse, summary="图片分析")
 async def analyze_image(
     request: Request,
-    analysis_request: ImageAnalysisRequest
+    analysis_request: ImageAnalysisRequest,
+    analysis_client: AnalysisClient = Depends(get_analysis_client)
 ):
     """
     对图片进行目标检测分析
@@ -37,16 +40,26 @@ async def analyze_image(
     - task_id: 分析任务ID，用于后续查询或停止任务
     """
     try:
-        task_id = await analysis_service.analyze_image(
-            analysis_request.model_code,
-            analysis_request.image_urls,
-            analysis_request.callback_url,
-            analysis_request.is_base64
+        result = await analysis_client.analyze_image(
+            model_code=analysis_request.model_code,
+            image_urls=analysis_request.image_urls,
+            config=analysis_request.config,
+            task_name=analysis_request.task_name,
+            callback_urls=analysis_request.callback_url,
+            enable_callback=True if analysis_request.callback_url else False,
+            save_result=analysis_request.save_result,
+            is_base64=analysis_request.is_base64
         )
+        
+        # 使用返回的结果构建响应
         return BaseResponse(
+            requestId=result.get("requestId", ""),
             path=str(request.url),
-            message="分析任务创建成功",
-            data={"task_id": task_id}
+            success=result.get("success", True),
+            message=result.get("message", "分析任务创建成功"),
+            code=result.get("code", 200),
+            data=result.get("data", {"task_id": ""}),
+            timestamp=result.get("timestamp", 0)
         )
     except Exception as e:
         logger.error(f"图片分析任务创建失败: {str(e)}")
@@ -60,7 +73,8 @@ async def analyze_image(
 @router.post("/video/analyze", response_model=BaseResponse, summary="视频分析")
 async def analyze_video(
     request: Request,
-    analysis_request: VideoAnalysisRequest
+    analysis_request: VideoAnalysisRequest,
+    analysis_client: AnalysisClient = Depends(get_analysis_client)
 ):
     """
     对视频文件进行目标检测分析
@@ -74,15 +88,25 @@ async def analyze_video(
     - task_id: 分析任务ID，用于后续查询或停止任务
     """
     try:
-        task_id = await analysis_service.analyze_video(
-            analysis_request.model_code,
-            analysis_request.video_url,
-            analysis_request.callback_url
+        result = await analysis_client.analyze_video(
+            model_code=analysis_request.model_code,
+            video_url=analysis_request.video_url,
+            config=analysis_request.config,
+            task_name=analysis_request.task_name,
+            callback_urls=analysis_request.callback_url,
+            enable_callback=True if analysis_request.callback_url else False,
+            save_result=analysis_request.save_result
         )
+        
+        # 使用返回的结果构建响应
         return BaseResponse(
+            requestId=result.get("requestId", ""),
             path=str(request.url),
-            message="分析任务创建成功",
-            data={"task_id": task_id}
+            success=result.get("success", True),
+            message=result.get("message", "分析任务创建成功"),
+            code=result.get("code", 200),
+            data=result.get("data", {"task_id": ""}),
+            timestamp=result.get("timestamp", 0)
         )
     except Exception as e:
         logger.error(f"视频分析任务创建失败: {str(e)}")
@@ -96,7 +120,8 @@ async def analyze_video(
 @router.post("/stream/analyze", response_model=BaseResponse, summary="流分析")
 async def analyze_stream(
     request: Request,
-    analysis_request: StreamAnalysisRequest
+    analysis_request: StreamAnalysisRequest,
+    analysis_client: AnalysisClient = Depends(get_analysis_client)
 ):
     """
     对实时视频流进行目标检测分析
@@ -112,17 +137,33 @@ async def analyze_stream(
     - task_id: 分析任务ID，用于后续查询或停止任务
     """
     try:
-        task_id = await analysis_service.analyze_stream(
-            analysis_request.model_code,
-            analysis_request.stream_url,
-            analysis_request.callback_url,
-            analysis_request.output_url,
-            analysis_request.callback_interval
+        # 构建配置
+        config = analysis_request.config or {}
+        if analysis_request.callback_interval:
+            config["callback_interval"] = analysis_request.callback_interval
+        if analysis_request.output_url:
+            config["output_url"] = analysis_request.output_url
+        
+        result = await analysis_client.analyze_stream(
+            model_code=analysis_request.model_code,
+            stream_url=analysis_request.stream_url,
+            config=config,
+            task_name=analysis_request.task_name,
+            callback_urls=analysis_request.callback_url,
+            enable_callback=True if analysis_request.callback_url else False,
+            save_result=analysis_request.save_result,
+            task_id=analysis_request.task_id
         )
+        
+        # 使用返回的结果构建响应
         return BaseResponse(
+            requestId=result.get("requestId", ""),
             path=str(request.url),
-            message="分析任务创建成功",
-            data={"task_id": task_id}
+            success=result.get("success", True),
+            message=result.get("message", "分析任务创建成功"),
+            code=result.get("code", 200),
+            data=result.get("data", {"task_id": ""}),
+            timestamp=result.get("timestamp", 0)
         )
     except Exception as e:
         logger.error(f"视频流分析任务创建失败: {str(e)}")
@@ -136,7 +177,8 @@ async def analyze_stream(
 @router.post("/task/stop", response_model=BaseResponse, summary="停止分析任务")
 async def stop_analysis(
     request: Request,
-    task_id: str
+    task_id: str,
+    analysis_client: AnalysisClient = Depends(get_analysis_client)
 ):
     """
     停止指定的分析任务
@@ -148,13 +190,53 @@ async def stop_analysis(
     - 操作结果
     """
     try:
-        await analysis_service.stop_task(task_id)
+        result = await analysis_client.stop_task(task_id)
+        
+        # 使用返回的结果构建响应
         return BaseResponse(
+            requestId=result.get("requestId", ""),
             path=str(request.url),
-            message="任务已停止"
+            success=result.get("success", True),
+            message=result.get("message", "任务已停止"),
+            code=result.get("code", 200),
+            data=result.get("data", None),
+            timestamp=result.get("timestamp", 0)
         )
     except Exception as e:
         logger.error(f"停止分析任务失败: {str(e)}")
+        return BaseResponse(
+            path=str(request.url),
+            success=False,
+            code=500,
+            message=str(e)
+        )
+        
+@router.post("/resource", response_model=BaseResponse, summary="获取资源状态")
+async def get_resource_status(
+    request: Request,
+    analysis_client: AnalysisClient = Depends(get_analysis_client)
+):
+    """
+    获取分析服务的资源状态
+    
+    返回:
+    - 资源状态信息
+    """
+    try:
+        result = await analysis_client.get_resource_status()
+        
+        # 使用返回的结果构建响应
+        return BaseResponse(
+            requestId=result.get("requestId", ""),
+            path=str(request.url),
+            success=result.get("success", True),
+            message=result.get("message", "资源状态获取成功"),
+            code=result.get("code", 200),
+            data=result.get("data", {}),
+            timestamp=result.get("timestamp", 0)
+        )
+    except Exception as e:
+        logger.error(f"获取资源状态失败: {str(e)}")
         return BaseResponse(
             path=str(request.url),
             success=False,

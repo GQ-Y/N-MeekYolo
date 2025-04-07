@@ -1,32 +1,35 @@
 # 服务基础配置
-PROJECT_NAME: "MeekYolo API Service"
-VERSION: "1.0.0"
+PROJECT:
+  name: MeekYOLO
+  version: 0.3.0
 
 # 服务配置
-SERVICE:
-  host: "0.0.0.0"
+API_SERVICE:
+  host: 0.0.0.0
   port: 8001
+  url: http://localhost:8001
 
-# 分析服务配置
-ANALYSIS_SERVICE:
-  url: "http://localhost:8002"
+# 通信模式配置，支持 http 或 mqtt
+COMMUNICATION:
+  mode: mqtt  # http 或 mqtt
 
-# 模型服务配置
-MODEL_SERVICE:
-  url: "http://localhost:8003"
-  api_prefix: "/api/v1"
+# MQTT配置
+MQTT:
+  broker_host: mqtt.yingzhu.net  # MQTT Broker主机地址
+  broker_port: 1883              # MQTT Broker端口
+  username: yolo                 # MQTT用户名
+  password: yolo                 # MQTT密码
+  client_id: api_service         # MQTT客户端ID前缀，会追加随机字符
+  topic_prefix: yolo/            # MQTT主题前缀
+  keepalive: 60                  # 保活时间(秒)
+  qos: 1                         # QoS等级
 
 # 数据库配置
 DATABASE:
-  type: "mysql"
-  host: "localhost"
-  port: 3306
-  username: "meekyolo"
-  password: "123456"
-  database: "api_service"
-  url: "mysql+pymysql://meekyolo:123456@localhost:3306/api_service?charset=utf8mb4"
+  url: mysql+pymysql://root:123456@localhost/api_service?charset=utf8mb4
+  echo: false
 
-# 默认分组配置
-DEFAULT_GROUP:
-  name: "默认分组"
-  description: "系统默认分组" 
+# 默认组配置
+GROUP:
+  default_group_id: 1
+  default_group_name: system 

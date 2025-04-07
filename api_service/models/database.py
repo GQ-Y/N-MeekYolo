@@ -287,3 +287,31 @@ class Node(Base):
     def __repr__(self):
         """返回节点的字符串表示"""
         return f"<Node(id={self.id}, ip={self.ip}, port={self.port}, service_name={self.service_name}, status={self.service_status})>"
+
+class MQTTNode(Base):
+    """MQTT节点表"""
+    __tablename__ = "mqtt_nodes"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="节点ID")
+    node_id = Column(String(100), nullable=False, unique=True, comment="MQTT节点ID")
+    client_id = Column(String(100), nullable=False, comment="MQTT客户端ID")
+    service_type = Column(String(50), nullable=False, comment="服务类型")
+    status = Column(String(20), nullable=False, default="offline", comment="节点状态")
+    ip = Column(String(50), nullable=True, comment="节点IP地址")
+    port = Column(Integer, nullable=True, comment="节点端口")
+    hostname = Column(String(100), nullable=True, comment="主机名")
+    cpu_usage = Column(Float, nullable=True, comment="CPU使用率")
+    memory_usage = Column(Float, nullable=True, comment="内存使用率")
+    gpu_usage = Column(Float, nullable=True, comment="GPU使用率")
+    task_count = Column(Integer, nullable=True, default=0, comment="当前任务数")
+    max_tasks = Column(Integer, nullable=True, default=10, comment="最大任务数")
+    version = Column(String(50), nullable=True, comment="节点版本")
+    last_active = Column(DateTime, nullable=True, comment="最后活跃时间")
+    is_active = Column(Boolean, default=True, comment="是否启用")
+    created_at = Column(DateTime, default=datetime.now, comment="创建时间")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment="更新时间")
+    node_metadata = Column(JSON, nullable=True, comment="元数据")
+    remark = Column(String(255), nullable=True, comment="备注")
+    
+    def __repr__(self):
+        return f"<MQTTNode(id={self.id}, node_id='{self.node_id}', status='{self.status}')>"
