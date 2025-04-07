@@ -26,6 +26,10 @@ from shared.utils.logger import setup_logger
 from services.analysis_client import AnalysisClient
 # 导入新的MQTT节点路由
 from routers.mqtt_node import router as mqtt_node_router
+# 导入新的视频流播放路由
+from routers.stream_player import router as stream_player_router
+from fastapi.staticfiles import StaticFiles
+import os
 
 logger = setup_logger(__name__)
 
@@ -47,6 +51,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 挂载静态文件目录
+static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+os.makedirs(static_dir, exist_ok=True)
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
 # 注册路由 - 使用统一的中文标签
 app.include_router(stream_router)
 app.include_router(stream_group_router)
@@ -59,6 +68,8 @@ app.include_router(node_router)
 app.include_router(analysis_callback_router)
 # 注册MQTT节点路由
 app.include_router(mqtt_node_router)
+# 注册视频流播放路由
+app.include_router(stream_player_router)
 
 # 创建视频源监控器
 stream_monitor = StreamMonitor()
@@ -170,6 +181,11 @@ async def shutdown_event():
         # 停止节点健康检查服务
         stop_health_checker()
         logger.info("节点健康检查服务已停止")
+        
+        # 停止所有视频流转换进程
+        from services.stream_player import stream_player_service
+        await stream_player_service.stop_all_conversions()
+        logger.info("所有视频流转换进程已停止")
     except Exception as e:
         logger.error(f"服务停止失败: {str(e)}")
 

@@ -16,3 +16,4 @@ mysqlclient>=2.1.0
 paho-mqtt>=2.1.0
 psutil>=5.9.0
 GPUtil>=1.4.0
+python-ffmpeg-video-streaming>=0.1.15

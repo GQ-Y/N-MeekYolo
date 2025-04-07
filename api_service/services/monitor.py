@@ -6,10 +6,11 @@ import cv2
 from datetime import datetime
 from sqlalchemy.orm import Session
 from concurrent.futures import ThreadPoolExecutor
-from models.database import Stream
+from models.database import Stream, Task, task_stream_association
 from models.requests import StreamStatus
 from services.database import SessionLocal
 from shared.utils.logger import setup_logger
+from sqlalchemy import select, join, and_
 
 logger = setup_logger(__name__)
 
@@ -90,16 +91,42 @@ class StreamMonitor:
                     
                     db = SessionLocal()
                     try:
-                        # 获取所有离线视频源的ID
-                        streams = db.query(Stream).filter(
-                            Stream.status == StreamStatus.OFFLINE
-                        ).all()
-                        stream_ids = [stream.id for stream in streams]
+                        # 获取与运行中任务关联的所有视频源ID
+                        # 任务状态1 = 运行中
+                        running_task_stream_ids = db.query(Stream.id).join(
+                            task_stream_association,
+                            Stream.id == task_stream_association.c.stream_id
+                        ).join(
+                            Task,
+                            and_(
+                                Task.id == task_stream_association.c.task_id,
+                                Task.status == 1  # 运行中的任务
+                            )
+                        ).distinct().all()
+                        
+                        # 将结果转换为列表
+                        running_stream_ids = [id[0] for id in running_task_stream_ids]
+                        
+                        # 获取离线且与运行中任务关联的视频源
+                        if running_stream_ids:
+                            streams = db.query(Stream).filter(
+                                Stream.status == StreamStatus.OFFLINE,
+                                Stream.id.in_(running_stream_ids)
+                            ).all()
+                            stream_ids = [stream.id for stream in streams]
+                            
+                            total_running_streams = len(running_stream_ids)
+                            offline_running_streams = len(stream_ids)
+                            
+                            logger.info(f"运行中的任务共关联 {total_running_streams} 个视频源，其中 {offline_running_streams} 个处于离线状态")
+                        else:
+                            stream_ids = []
+                            logger.info("当前没有运行中的任务，跳过视频源检查")
                     finally:
                         db.close()
                     
                     if stream_ids:
-                        logger.info(f"开始第 {self.stats['total_checks']} 次检查，发现 {len(stream_ids)} 个离线视频源")
+                        logger.info(f"开始第 {self.stats['total_checks']} 次检查，需要检查 {len(stream_ids)} 个离线视频源")
                         
                         # 并发检查所有离线视频源
                         tasks = []
@@ -117,6 +144,8 @@ class StreamMonitor:
                             f"- 本次检查视频源: {len(stream_ids)} 个\n"
                             f"- 累计重连成功: {self.stats['successful_reconnects']} 次"
                         )
+                    else:
+                        logger.info(f"第 {self.stats['total_checks']} 次检查: 没有需要检查的离线视频源")
                         
                 except Exception as e:
                     logger.error(f"监控视频源失败: {str(e)}")

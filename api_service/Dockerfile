@@ -77,6 +77,7 @@ RUN echo "deb https://mirrors.cloud.tencent.com/debian/ bookworm main contrib no
 RUN apt-get update && apt-get install -y --no-install-recommends \
     netcat-traditional \
     curl \
+    ffmpeg \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -90,9 +91,11 @@ ENV PATH="/opt/venv/bin:$PATH"
 # 创建必要的目录
 RUN mkdir -p /app/data /app/logs \
     && mkdir -p /app/config \
+    && mkdir -p /app/api_service/static/hls \
     && chmod -R 755 /app/data \
     && chmod -R 755 /app/logs \
     && chmod -R 755 /app/config \
+    && chmod -R 755 /app/api_service/static \
     && touch /app/data/api_service.db \
     && chmod 644 /app/data/api_service.db
 

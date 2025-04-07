@@ -8,6 +8,7 @@ from .callback import router as callback_router
 from .task import router as task_router
 from .analysis import router as analysis_router
 from .node import router as node_router
+from .stream_player import router as stream_player_router
 
 __all__ = [
     'stream_router',
@@ -16,5 +17,6 @@ __all__ = [
     'callback_router',
     'task_router',
     'analysis_router',
-    'node_router'
+    'node_router',
+    'stream_player_router'
 ] 
