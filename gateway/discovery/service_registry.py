@@ -38,20 +38,36 @@ class ServiceRegistry:
                         timeout=settings.DISCOVERY.timeout
                     ) as response:
                         if response.status == 200:
-                            service = ServiceInfo(
-                                name=name,
-                                url=url,
-                                description=description,
-                                status="healthy",
-                                started_at=datetime.now()
-                            )
-                            await self.register_service(service)
-                            logger.info(f"Discovered service: {name} at {url}")
+                            # 检查服务是否已经注册
+                            existing_service = self.services.get(name)
+                            if existing_service:
+                                # 仅更新服务状态，保留原有信息
+                                existing_service.status = "healthy"
+                                existing_service.last_check = datetime.now()
+                                logger.info(f"Updated service status: {name} is healthy")
+                            else:
+                                # 新服务，完整注册
+                                service = ServiceInfo(
+                                    name=name,
+                                    url=url,
+                                    description=description,
+                                    status="healthy",
+                                    started_at=datetime.now()
+                                )
+                                await self.register_service(service)
+                                logger.info(f"Discovered service: {name} at {url}")
                         else:
-                            logger.warning(f"Service {name} health check failed: {response.status}")
+                            # 服务不健康
+                            if name in self.services:
+                                self.services[name].status = "unhealthy"
+                                logger.warning(f"Service {name} health check failed: {response.status}")
                             
             except Exception as e:
                 logger.error(f"Failed to discover service {name}: {str(e)}")
+                # 标记为不健康但不移除服务
+                if name in self.services:
+                    self.services[name].status = "unhealthy"
+                    logger.warning(f"Service {name} marked as unhealthy due to error: {str(e)}")
     
     async def register_service(self, service: ServiceInfo) -> bool:
         """注册服务"""

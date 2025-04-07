@@ -8,7 +8,7 @@ from typing import Optional, Any, Dict
 from shared.utils.logger import setup_logger
 from discovery.service_registry import service_registry
 from core.models import StandardResponse, RouteRequest
-from core.auth import JWTBearer
+from core.auth import JWTBearer, Auth
 from core.exceptions import (
     GatewayException,
     ServiceNotFoundException,
@@ -35,12 +35,13 @@ router = APIRouter(
     }
 )
 
-async def route_request(route_req: RouteRequest, request: Request) -> StandardResponse:
+async def route_request(route_req: RouteRequest, request: Request, user_data: Dict = None) -> StandardResponse:
     """通用请求路由处理
     
     Args:
         route_req: 路由请求对象，包含目标服务、路径、方法等信息
         request: FastAPI请求对象
+        user_data: 用户数据，从JWTBearer获取
         
     Returns:
         StandardResponse: 标准响应对象
@@ -75,8 +76,8 @@ async def route_request(route_req: RouteRequest, request: Request) -> StandardRe
         
         # 转发请求
         try:
-            # 增加超时时间
-            timeout = aiohttp.ClientTimeout(total=60)  # 增加到60秒
+            # 增加超时时间到60秒
+            timeout = aiohttp.ClientTimeout(total=60)
             
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 try:
@@ -173,11 +174,16 @@ async def route_request(route_req: RouteRequest, request: Request) -> StandardRe
             data=None
         )
 
+# 自定义依赖函数，确保Token验证不受下游服务超时影响
+async def get_current_user(auth_header = Depends(JWTBearer())):
+    """获取当前用户数据，与下游服务请求分离"""
+    return auth_header
+
 @router.post(
     "/route",
     operation_id="route_request",
     response_model=StandardResponse,
-    dependencies=[Depends(JWTBearer())],
+    dependencies=[],  # 移除直接依赖
     description="""
     统一的路由处理入口
     
@@ -203,14 +209,19 @@ async def route_request(route_req: RouteRequest, request: Request) -> StandardRe
     ```
     """
 )
-async def handle_route_request(route_req: RouteRequest, request: Request) -> StandardResponse:
+async def handle_route_request(
+    route_req: RouteRequest, 
+    request: Request,
+    user_data: Dict = Depends(get_current_user)  # 使用自定义依赖
+) -> StandardResponse:
     """统一的路由处理入口
     
     Args:
         route_req: 路由请求对象，包含目标服务、路径、方法等信息
         request: FastAPI请求对象
+        user_data: 用户数据，从Token中获取
         
     Returns:
         StandardResponse: 标准响应对象
     """
-    return await route_request(route_req, request) 
+    return await route_request(route_req, request, user_data) 

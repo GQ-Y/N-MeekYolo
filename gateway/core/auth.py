@@ -21,7 +21,7 @@ from .exceptions import (
 # 配置信息
 JWT_SECRET = "your-secret-key"  # 生产环境应该使用环境变量
 JWT_ALGORITHM = "HS256"
-TOKEN_EXPIRE_MINUTES = 60
+TOKEN_EXPIRE_MINUTES = 1440  # 增加到24小时
 
 class Auth:
     """认证工具类"""

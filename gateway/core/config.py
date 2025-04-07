@@ -24,7 +24,7 @@ class GatewayServiceConfig(BaseSettings):
     
     # 服务发现配置
     class DiscoveryConfig(BaseModel):
-        interval: int = 30  # 服务发现间隔(秒)
+        interval: int = 3600  # 服务发现间隔(秒)，改为1小时
         timeout: int = 5    # 请求超时时间(秒)
         retry: int = 3      # 重试次数
     
