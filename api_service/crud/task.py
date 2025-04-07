@@ -18,41 +18,71 @@ def create_task(
     task_data: TaskCreate
 ) -> Task:
     """创建任务"""
+    # 记录所有模型ID，用于日志和错误报告
+    requested_model_ids = []
+    for stream_config in task_data.tasks:
+        for model_config in stream_config.models:
+            requested_model_ids.append(model_config.model_id)
+    
+    logger.info(f"创建任务使用模型ID: {requested_model_ids}")
+    
+    # 检查数据库中可用的模型
+    available_models = db.query(Model).filter(Model.id.in_(requested_model_ids)).all()
+    available_model_ids = [model.id for model in available_models]
+    
+    # 检查是否所有请求的模型都可用
+    missing_model_ids = [model_id for model_id in requested_model_ids if model_id not in available_model_ids]
+    if missing_model_ids:
+        logger.warning(f"创建任务时发现缺失的模型ID: {missing_model_ids}")
+    
     # 创建任务主记录
+    expected_subtasks = sum(len(stream_config.models) for stream_config in task_data.tasks)
     task = Task(
         name=task_data.name,
         save_result=task_data.save_result,
         status=0,  # 未启动状态(0)
-        total_subtasks=sum(len(stream_config.models) for stream_config in task_data.tasks)
+        total_subtasks=0  # 初始化为0，稍后根据实际创建的子任务更新
     )
     
     db.add(task)
-    db.flush()  # 获取任务ID
+    try:
+        db.flush()  # 获取任务ID
+        logger.info(f"成功创建主任务记录，ID: {task.id}")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"创建主任务记录失败: {str(e)}")
+        raise ValueError(f"创建主任务记录失败: {str(e)}")
     
     created_subtasks = []
+    failed_streams = []
+    failed_models = []
     
     # 为每个流和模型创建子任务
     for stream_config in task_data.tasks:
         # 获取流
         stream = db.query(Stream).filter(Stream.id == stream_config.stream_id).first()
         if not stream:
-            logger.warning(f"视频流 {stream_config.stream_id} 不存在")
+            failed_streams.append(stream_config.stream_id)
+            logger.warning(f"视频流 {stream_config.stream_id} 不存在，但继续创建任务")
             continue
             
         # 添加关联
         task.streams.append(stream)
+        logger.info(f"为任务 {task.id} 添加流 ID={stream.id}, name={stream.name}")
             
         # 处理每个模型配置
         for model_config in stream_config.models:
             # 获取模型
             model = db.query(Model).filter(Model.id == model_config.model_id).first()
             if not model:
-                logger.warning(f"模型 {model_config.model_id} 不存在")
+                failed_models.append(model_config.model_id)
+                logger.warning(f"模型 {model_config.model_id} 不存在，但继续创建任务")
                 continue
                 
             # 添加关联
             if model not in task.models:
                 task.models.append(model)
+                logger.info(f"为任务 {task.id} 添加模型 ID={model.id}, code={model.code}, name={model.name}")
                 
             # 提取回调配置
             enable_callback = False
@@ -87,11 +117,61 @@ def create_task(
             
             db.add(subtask)
             created_subtasks.append(subtask)
+            logger.info(f"创建子任务，task_id={task.id}, stream={stream.id}({stream.name}), model={model.id}({model.code})")
+            
+            # 定期提交以确保数据写入
+            try:
+                db.flush()
+                logger.info(f"成功添加子任务到数据库会话，stream={stream.id}, model={model.id}")
+            except Exception as e:
+                logger.error(f"添加子任务到会话失败: {str(e)}")
+                # 继续执行，尝试创建其他子任务
     
-    db.commit()
-    db.refresh(task)
+    # 更新实际的子任务数量
+    task.total_subtasks = len(created_subtasks)
+    logger.info(f"任务 {task.id} 共创建了 {task.total_subtasks} 个子任务")
     
-    return task
+    # 生成警告信息
+    warnings = []
+    if expected_subtasks > task.total_subtasks:
+        warnings.append(f"预期创建 {expected_subtasks} 个子任务，但只成功创建了 {task.total_subtasks} 个")
+    
+    if failed_streams:
+        warnings.append(f"以下视频流不存在或无法连接: {', '.join(map(str, failed_streams))}")
+    if failed_models:
+        warnings.append(f"以下模型不存在或未下载: {', '.join(map(str, failed_models))}")
+    
+    # 更新任务信息
+    if warnings:
+        task.error_message = " | ".join(warnings)
+    
+    try:
+        # 提交事务前再次检查
+        subtask_count = db.query(SubTask).filter(SubTask.task_id == task.id).count()
+        logger.info(f"提交前检查: 数据库中任务 {task.id} 的子任务数量: {subtask_count}")
+        
+        # 提交事务
+        db.commit()
+        logger.info(f"成功提交事务，任务 {task.id} 及其 {task.total_subtasks} 个子任务已保存到数据库")
+        
+        # 提交后再次验证
+        db.refresh(task)
+        actual_subtasks = db.query(SubTask).filter(SubTask.task_id == task.id).all()
+        logger.info(f"提交后验证: 数据库中任务 {task.id} 的子任务数量: {len(actual_subtasks)}")
+        
+        if len(actual_subtasks) != task.total_subtasks:
+            logger.warning(f"任务 {task.id} 的子任务数量不一致: 预期 {task.total_subtasks}，实际 {len(actual_subtasks)}")
+            # 更新total_subtasks以匹配实际数量
+            task.total_subtasks = len(actual_subtasks)
+            db.commit()
+        
+        return task
+    except Exception as e:
+        db.rollback()
+        logger.error(f"创建任务失败，事务回滚: {str(e)}")
+        import traceback
+        logger.error(f"详细错误跟踪: {traceback.format_exc()}")
+        raise ValueError(f"创建任务失败，数据库错误: {str(e)}")
 
 def get_task(
     db: Session,
@@ -197,9 +277,6 @@ async def start_task(
         return False, "任务不存在"
     
     # 检查任务状态
-    # 如果任务已经处于运行中状态(1)，直接进入子任务处理
-    # 如果任务是未启动状态(0)，改为运行中状态(1)
-    # 如果任务是已停止状态(2)，不管原因，都允许启动任务
     if task.status == 1:
         logger.info(f"任务 {task_id} 已经处于运行中状态")
     elif task.status == 0:
@@ -207,7 +284,6 @@ async def start_task(
         task.status = 1  # 运行中状态
         task.error_message = None
     elif task.status == 2:
-        # 允许启动所有已停止的任务，包括用户手动停止的任务
         logger.info(f"任务 {task_id} 从已停止状态改为运行中状态")
         task.status = 1  # 运行中状态
         task.error_message = None
@@ -218,8 +294,11 @@ async def start_task(
     # 获取子任务
     subtasks = task.sub_tasks
     if not subtasks:
-        logger.error(f"任务 {task_id} 没有子任务，无法启动")
-        return False, "任务没有子任务，无法启动"
+        error_msg = "任务没有可用的子任务"
+        if task.error_message:
+            error_msg += f"，原因：{task.error_message}"
+        logger.error(f"任务 {task_id} {error_msg}")
+        return False, error_msg
     
     # 检查模型服务状态
     from services.model import ModelService
@@ -228,7 +307,6 @@ async def start_task(
     
     if not model_service_available:
         logger.error(f"任务 {task_id} 无法启动：模型服务不可用")
-        # 如果模型服务不可用，将任务状态重置为未启动状态(0)
         task.status = 0  # 未启动状态(0)
         task.error_message = "模型服务不可用，任务无法启动"
         db.commit()
@@ -280,6 +358,7 @@ async def start_task(
     
     # 逐个启动未启动状态的子任务
     success_count = 0
+    failed_subtasks = []
     
     for subtask in not_started_subtasks:
         try:
@@ -288,7 +367,14 @@ async def start_task(
             model = db.query(Model).filter(Model.id == subtask.model_id).first()
             
             if not stream or not model:
-                logger.error(f"子任务 {subtask.id} 关联的流或模型不存在")
+                error_msg = []
+                if not stream:
+                    error_msg.append("视频流不存在或无法连接")
+                if not model:
+                    error_msg.append("模型不存在或未下载")
+                error_str = " 且 ".join(error_msg)
+                logger.error(f"子任务 {subtask.id} 无法启动：{error_str}")
+                failed_subtasks.append((subtask.id, error_str))
                 continue
                 
             logger.info(f"准备启动子任务 {subtask.id}: 流={stream.name}({stream.url}), 模型={model.name}({model.code})")
@@ -316,9 +402,10 @@ async def start_task(
                 )
                 
                 if not result:
-                    logger.error(f"子任务 {subtask.id} 启动失败: 未找到可用的分析节点")
-                    subtask.error_message = "启动分析服务失败: 未找到可用的分析节点"
-                    # 保持未启动状态(0)不变
+                    error_msg = "未找到可用的分析节点"
+                    logger.error(f"子任务 {subtask.id} 启动失败: {error_msg}")
+                    subtask.error_message = f"启动分析服务失败: {error_msg}"
+                    failed_subtasks.append((subtask.id, error_msg))
                     continue
                 
                 # 解包返回值
@@ -336,34 +423,49 @@ async def start_task(
                 success_count += 1
                 
             except Exception as e:
-                logger.error(f"启动子任务 {subtask.id} 的分析服务失败: {str(e)}")
-                subtask.error_message = f"启动分析服务失败: {str(e)}"
-                # 保持未启动状态(0)
+                error_msg = str(e)
+                logger.error(f"启动子任务 {subtask.id} 的分析服务失败: {error_msg}")
+                subtask.error_message = f"启动分析服务失败: {error_msg}"
+                failed_subtasks.append((subtask.id, error_msg))
                 continue
             
         except Exception as e:
-            logger.error(f"处理子任务 {subtask.id} 失败: {str(e)}")
+            error_msg = str(e)
+            logger.error(f"处理子任务 {subtask.id} 失败: {error_msg}")
+            failed_subtasks.append((subtask.id, error_msg))
             continue
     
     # 更新任务统计信息
     task.active_subtasks = success_count
     
+    # 生成详细的错误信息
+    if failed_subtasks:
+        error_details = []
+        for subtask_id, error in failed_subtasks:
+            error_details.append(f"子任务 {subtask_id}: {error}")
+        task.error_message = " | ".join(error_details)
+    
     db.commit()
 
     if success_count == 0 and len(not_started_subtasks) > 0:
         # 如果有子任务需要启动但全部启动失败，保持主任务仍处于运行中状态(1)
-        # 这样系统可以后续继续尝试启动这些子任务
-        task.error_message = "没有子任务启动成功，但任务保持运行中，等待后续尝试"
+        error_msg = "没有子任务启动成功"
+        if task.error_message:
+            error_msg += f"，原因：{task.error_message}"
+        task.error_message = error_msg
         db.commit()
-        logger.warn(f"任务 {task_id} 暂时未能启动子任务: 所有子任务启动暂未成功，但任务保持运行中状态")
-        return True, "任务保持运行中状态，等待后续尝试启动子任务"
+        logger.warn(f"任务 {task_id} 暂时未能启动子任务: {error_msg}")
+        return True, f"任务保持运行中状态，但启动失败：{error_msg}"
     
     if success_count < len(not_started_subtasks) and len(not_started_subtasks) > 0:
         # 如果只有部分子任务启动成功
-        task.error_message = f"部分子任务启动成功 ({success_count}/{len(not_started_subtasks)})"
+        error_msg = f"部分子任务启动成功 ({success_count}/{len(not_started_subtasks)})"
+        if task.error_message:
+            error_msg += f"，失败原因：{task.error_message}"
+        task.error_message = error_msg
         db.commit()
-        logger.warn(f"任务 {task_id} 部分启动成功: {success_count}/{len(not_started_subtasks)} 个子任务")
-        return True, f"部分子任务启动成功 ({success_count}/{len(not_started_subtasks)})"
+        logger.warn(f"任务 {task_id} 部分启动成功: {error_msg}")
+        return True, error_msg
     
     if len(not_started_subtasks) > 0:
         logger.info(f"任务 {task_id} 启动成功: {success_count}/{len(not_started_subtasks)} 个子任务")

@@ -166,8 +166,78 @@ class ModelService:
             return db.query(Model).all()
     
     async def get_model(self, db: Session, model_id: int) -> Optional[Model]:
-        """获取模型"""
-        return db.query(Model).filter(Model.id == model_id).first()
+        """获取模型
+        
+        先尝试从本地数据库获取模型，如果没有找到则尝试从模型服务获取
+        """
+        # 先尝试从本地数据库获取
+        model = db.query(Model).filter(Model.id == model_id).first()
+        if model:
+            logger.info(f"从本地数据库找到模型 ID={model_id}, code={model.code}")
+            return model
+        
+        # 检查模型服务是否可用
+        if not await self.check_model_service():
+            logger.warning(f"模型服务不可用，无法获取模型ID {model_id}")
+            return None
+        
+        base_url = self._get_model_service_url()
+        if not base_url:
+            logger.warning(f"未找到模型服务节点，无法获取模型ID {model_id}")
+            return None
+        
+        try:
+            # 尝试从模型服务获取模型详情
+            async with httpx.AsyncClient() as client:
+                # 使用模型详情接口
+                response = await client.get(
+                    self._get_api_url("/models/detail", base_url),
+                    params={"id": model_id}
+                )
+                
+                if response.status_code == 404:
+                    logger.warning(f"模型服务中不存在模型ID {model_id}")
+                    return None
+                
+                response.raise_for_status()
+                data = response.json()
+                
+                if not data.get("success", False):
+                    logger.warning(f"获取模型ID {model_id} 失败：{data.get('message')}")
+                    return None
+                
+                model_data = data.get("data", {})
+                if not model_data:
+                    logger.warning(f"获取的模型ID {model_id} 数据为空")
+                    return None
+                
+                # 创建新模型记录
+                model = Model(
+                    id=model_id,  # 保持ID一致
+                    code=model_data.get("code", f"model_{model_id}"),  # 如果没有code，使用默认值
+                    name=model_data.get("name", f"Model {model_id}"),  # 如果没有name，使用默认值
+                    path=model_data.get("path", ""),
+                    description=model_data.get("description", ""),
+                    nc=model_data.get("nc", 0),
+                    names=model_data.get("names", {}),
+                    version=model_data.get("version", "1.0.0"),
+                    author=model_data.get("author", "")
+                )
+                
+                # 保存到数据库
+                db.add(model)
+                try:
+                    db.commit()
+                    db.refresh(model)
+                    logger.info(f"成功从模型服务获取并保存模型 ID={model_id}, code={model.code}")
+                    return model
+                except Exception as e:
+                    db.rollback()
+                    logger.error(f"保存模型 ID={model_id} 到数据库失败: {str(e)}")
+                    return None
+        except Exception as e:
+            logger.error(f"从模型服务获取模型 ID={model_id} 失败: {str(e)}")
+            return None
     
     async def get_model_by_code(self, db: Session, code: str) -> Optional[Model]:
         """通过代码获取模型"""

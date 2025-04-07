@@ -132,6 +132,8 @@ class Model(Base):
     description = Column(String(500), nullable=True, comment="模型描述")
     nc = Column(Integer, nullable=False, default=0, comment="模型支持的检测类别数量")
     names = Column(JSON, nullable=True, comment="模型支持的检测类别名称映射")
+    version = Column(String(50), nullable=True, comment="模型版本")
+    author = Column(String(100), nullable=True, comment="模型作者")
     created_at = Column(DateTime, default=datetime.now, comment="创建时间")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment="更新时间")
 
@@ -304,6 +306,9 @@ class MQTTNode(Base):
     memory_usage = Column(Float, nullable=True, comment="内存使用率")
     gpu_usage = Column(Float, nullable=True, comment="GPU使用率")
     task_count = Column(Integer, nullable=True, default=0, comment="当前任务数")
+    image_task_count = Column(Integer, nullable=True, default=0, comment="当前图像任务数")
+    video_task_count = Column(Integer, nullable=True, default=0, comment="当前视频任务数")
+    stream_task_count = Column(Integer, nullable=True, default=0, comment="当前流任务数")
     max_tasks = Column(Integer, nullable=True, default=10, comment="最大任务数")
     version = Column(String(50), nullable=True, comment="节点版本")
     last_active = Column(DateTime, nullable=True, comment="最后活跃时间")

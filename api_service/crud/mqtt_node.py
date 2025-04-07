@@ -280,7 +280,17 @@ class MQTTNodeCRUD:
                         logger.info(f"更新GPU使用率: {resource['gpu_usage']}")
                     if 'task_count' in resource:
                         mqtt_node.task_count = resource['task_count']
-                        logger.info(f"更新任务数: {resource['task_count']}")
+                        logger.info(f"更新总任务数: {resource['task_count']}")
+                    # 更新具体任务类型的数量
+                    if 'image_task_count' in resource:
+                        mqtt_node.image_task_count = resource['image_task_count']
+                        logger.info(f"更新图像任务数: {resource['image_task_count']}")
+                    if 'video_task_count' in resource:
+                        mqtt_node.video_task_count = resource['video_task_count']
+                        logger.info(f"更新视频任务数: {resource['video_task_count']}")
+                    if 'stream_task_count' in resource:
+                        mqtt_node.stream_task_count = resource['stream_task_count']
+                        logger.info(f"更新流任务数: {resource['stream_task_count']}")
             
             try:
                 logger.info(f"开始提交节点 {node_id} 的更新到数据库")
