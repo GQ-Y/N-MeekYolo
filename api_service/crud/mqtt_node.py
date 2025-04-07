@@ -28,30 +28,60 @@ class MQTTNodeCRUD:
             MQTTNode: 创建的MQTT节点对象
         """
         try:
+            node_id = node_data.get('node_id')
+            logger.info(f"开始创建/更新MQTT节点: {node_id}")
+            logger.info(f"节点数据: {json.dumps(node_data, ensure_ascii=False, default=str)}")
+            
             # 检查是否已存在相同node_id的节点
-            existing_node = db.query(MQTTNode).filter(MQTTNode.node_id == node_data.get('node_id')).first()
+            existing_node = db.query(MQTTNode).filter(MQTTNode.node_id == node_id).first()
             if existing_node:
+                logger.info(f"找到现有节点 - ID: {existing_node.id}, 节点ID: {existing_node.node_id}")
                 # 更新现有节点
                 for key, value in node_data.items():
-                    setattr(existing_node, key, value)
+                    if hasattr(existing_node, key):
+                        logger.info(f"更新属性 {key}: {getattr(existing_node, key)} -> {value}")
+                        setattr(existing_node, key, value)
+                
                 existing_node.updated_at = datetime.now()
                 existing_node.last_active = datetime.now()
-                db.commit()
-                db.refresh(existing_node)
-                logger.info(f"更新MQTT节点: {existing_node.node_id}")
-                return existing_node
+                
+                try:
+                    logger.info(f"提交节点 {node_id} 更新到数据库")
+                    db.commit()
+                    logger.info(f"成功提交节点 {node_id} 更新")
+                    db.refresh(existing_node)
+                    logger.info(f"刷新节点 {node_id} 数据完成")
+                    logger.info(f"更新MQTT节点成功: {existing_node.node_id}")
+                    return existing_node
+                except Exception as e:
+                    logger.error(f"提交节点 {node_id} 更新失败: {e}")
+                    db.rollback()
+                    raise
             
             # 创建新节点
+            logger.info(f"创建新的MQTT节点: {node_id}")
             mqtt_node = MQTTNode(**node_data)
             mqtt_node.last_active = datetime.now()
-            db.add(mqtt_node)
-            db.commit()
-            db.refresh(mqtt_node)
-            logger.info(f"创建MQTT节点: {mqtt_node.node_id}")
-            return mqtt_node
+            
+            try:
+                logger.info(f"添加新节点 {node_id} 到数据库")
+                db.add(mqtt_node)
+                logger.info(f"提交新节点 {node_id} 到数据库")
+                db.commit()
+                logger.info(f"成功提交新节点 {node_id}")
+                db.refresh(mqtt_node)
+                logger.info(f"刷新新节点 {node_id} 数据完成")
+                logger.info(f"创建MQTT节点成功: {mqtt_node.node_id}, 数据库ID: {mqtt_node.id}")
+                return mqtt_node
+            except Exception as e:
+                logger.error(f"保存新节点 {node_id} 失败: {e}")
+                db.rollback()
+                raise
         except Exception as e:
             db.rollback()
             logger.error(f"创建MQTT节点失败: {e}")
+            import traceback
+            logger.error(f"错误详情: {traceback.format_exc()}")
             raise
     
     @staticmethod
@@ -211,38 +241,63 @@ class MQTTNodeCRUD:
             Optional[MQTTNode]: 更新后的MQTT节点对象
         """
         try:
+            logger.info(f"正在更新节点 {node_id} 状态为 {status}")
             mqtt_node = db.query(MQTTNode).filter(MQTTNode.node_id == node_id).first()
+            
             if not mqtt_node:
+                logger.warning(f"未找到节点 {node_id}，无法更新状态")
                 return None
             
+            logger.info(f"找到节点: ID={mqtt_node.id}, 节点ID={mqtt_node.node_id}, 当前状态={mqtt_node.status}")
+            
+            # 更新状态和最后活动时间
             mqtt_node.status = status
             mqtt_node.last_active = datetime.now()
+            logger.info(f"已更新节点 {node_id} 状态为 {status} 和最后活动时间")
             
             if metadata:
+                logger.info(f"开始更新节点 {node_id} 的元数据")
                 # 更新元数据
                 if not mqtt_node.node_metadata:
                     mqtt_node.node_metadata = {}
+                    logger.info(f"初始化节点 {node_id} 的元数据字段")
                 
                 mqtt_node.node_metadata.update(metadata)
+                logger.info(f"已更新节点 {node_id} 的元数据")
                 
                 # 如果元数据中包含资源信息，更新相应字段
                 resource = metadata.get('resource', {})
                 if resource:
+                    logger.info(f"开始更新节点 {node_id} 的资源信息: {resource}")
                     if 'cpu_usage' in resource:
                         mqtt_node.cpu_usage = resource['cpu_usage']
+                        logger.info(f"更新CPU使用率: {resource['cpu_usage']}")
                     if 'memory_usage' in resource:
                         mqtt_node.memory_usage = resource['memory_usage']
+                        logger.info(f"更新内存使用率: {resource['memory_usage']}")
                     if 'gpu_usage' in resource:
                         mqtt_node.gpu_usage = resource['gpu_usage']
+                        logger.info(f"更新GPU使用率: {resource['gpu_usage']}")
                     if 'task_count' in resource:
                         mqtt_node.task_count = resource['task_count']
+                        logger.info(f"更新任务数: {resource['task_count']}")
             
-            db.commit()
-            db.refresh(mqtt_node)
-            return mqtt_node
+            try:
+                logger.info(f"开始提交节点 {node_id} 的更新到数据库")
+                db.commit()
+                logger.info(f"成功提交节点 {node_id} 的更新到数据库")
+                db.refresh(mqtt_node)
+                logger.info(f"刷新节点 {node_id} 数据完成")
+                return mqtt_node
+            except Exception as e:
+                logger.error(f"提交节点 {node_id} 更新到数据库失败: {e}")
+                db.rollback()
+                raise
         except Exception as e:
-            db.rollback()
             logger.error(f"更新MQTT节点状态失败: {e}")
+            db.rollback()
+            import traceback
+            logger.error(f"错误详情: {traceback.format_exc()}")
             raise
     
     @staticmethod

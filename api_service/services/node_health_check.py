@@ -6,14 +6,15 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import text
 from crud.node import NodeCRUD
-from models.database import Node
+from models.database import Node, MQTTNode
 from core.database import SessionLocal
 from shared.utils.logger import setup_logger
 import httpx
 from models.database import Task, SubTask
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import joinedload
-from typing import List
+from typing import List, Dict, Any, Optional
+import yaml
 
 # 配置日志
 logger = setup_logger(__name__)
@@ -22,11 +23,22 @@ class NodeHealthChecker:
     def __init__(self, check_interval: int = 300):
         """
         初始化节点健康检查器
-        :param check_interval: 检查间隔时间（秒），默认10秒
+        :param check_interval: 检查间隔时间（秒），默认300秒
         """
         self.check_interval = check_interval
         self.is_running = False
         self.check_count = 0
+        self.comm_mode = self._get_comm_mode()
+
+    def _get_comm_mode(self) -> str:
+        """获取当前通信模式"""
+        try:
+            with open("config/config.yaml", "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+                return config.get('COMMUNICATION', {}).get('mode', 'http')
+        except Exception as e:
+            logger.error(f"读取配置文件失败: {e}")
+            return "http"
 
     async def start(self):
         """启动健康检查服务"""
@@ -38,7 +50,14 @@ class NodeHealthChecker:
                 logger.info(f"开始第 {self.check_count} 次节点健康检查...")
                 start_time = datetime.now()
                 
-                await self.check_nodes_health()
+                # 重新读取通信模式，以防运行时配置更改
+                self.comm_mode = self._get_comm_mode()
+                logger.info(f"当前通信模式: {self.comm_mode}")
+                
+                if self.comm_mode == "mqtt":
+                    await self.check_mqtt_nodes_health()
+                else:  # http 模式
+                    await self.check_nodes_health()
                 
                 end_time = datetime.now()
                 duration = (end_time - start_time).total_seconds()
@@ -55,11 +74,120 @@ class NodeHealthChecker:
         logger.info("节点健康检查服务停止")
         self.is_running = False
 
-    async def check_nodes_health(self):
-        """执行节点健康检查"""
+    async def check_mqtt_nodes_health(self):
+        """
+        执行MQTT节点健康检查
+        
+        在MQTT模式下，无需主动发起HTTP请求检查节点健康，
+        而是依赖MQTT的连接状态和节点发布的状态消息。
+        """
         db = SessionLocal()
         try:
-            logger.info("==================== 节点健康检查开始 ====================")
+            logger.info("==================== MQTT节点健康检查开始 ====================")
+            
+            # 检查MQTT节点表是否存在
+            try:
+                db.execute(text("SELECT 1 FROM mqtt_nodes LIMIT 1"))
+            except SQLAlchemyError as e:
+                logger.error(f"MQTT节点表不存在或数据库错误: {str(e)}")
+                logger.info("==================== MQTT节点健康检查结束 ====================")
+                return
+            
+            # 获取当前在线MQTT节点数量
+            online_count = db.query(MQTTNode).filter_by(status="online").count()
+            logger.info(f"当前在线MQTT节点数: {online_count}")
+            
+            # 获取所有节点
+            nodes = db.query(MQTTNode).all()
+            logger.info(f"数据库中共有 {len(nodes)} 个MQTT节点记录")
+            
+            if not nodes:
+                logger.warning("数据库中没有MQTT节点记录，健康检查结束")
+                logger.info("==================== MQTT节点健康检查结束 ====================")
+                return
+            
+            # 根据last_active时间检查节点是否超时离线
+            now = datetime.now()
+            timeout_seconds = self.check_interval * 2  # 超时时间为检查间隔的2倍
+            updated_nodes = []
+            
+            for node in nodes:
+                logger.info(f"------- 检查MQTT节点 {node.id} ({node.node_id}) -------")
+                logger.info(f"节点 {node.id} 原状态: {node.status}")
+                
+                # 如果节点处于在线状态，检查最后活跃时间是否超时
+                if node.status == "online" and node.last_active:
+                    # 计算时间差
+                    time_diff = (now - node.last_active).total_seconds()
+                    
+                    if time_diff > timeout_seconds:
+                        logger.warning(f"MQTT节点 {node.id} ({node.node_id}) 超时 {time_diff:.0f}秒未活跃，标记为离线")
+                        node.status = "offline"
+                        updated_nodes.append(node)
+                
+                logger.info(f"节点 {node.id} 当前状态: {node.status}")
+                logger.info(f"------- 节点 {node.id} 检查完成 -------")
+            
+            # 更新超时节点状态
+            if updated_nodes:
+                logger.info(f"更新 {len(updated_nodes)} 个超时离线的MQTT节点状态")
+                db.commit()
+                logger.info("节点状态更新成功")
+            else:
+                logger.info("没有超时离线的MQTT节点")
+            
+            # 处理节点分配
+            await self._handle_mqtt_task_allocation(db)
+            
+            logger.info("所有MQTT节点状态正常")
+            logger.info("==================== MQTT节点健康检查结束 ====================")
+            
+        except Exception as e:
+            logger.error(f"MQTT节点健康检查出错: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+        finally:
+            db.close()
+
+    async def _handle_mqtt_task_allocation(self, db: Session):
+        """在MQTT模式下处理任务分配"""
+        try:
+            logger.info("处理MQTT模式下的任务分配...")
+            # 获取所有活跃的MQTT节点
+            active_nodes = db.query(MQTTNode).filter(
+                MQTTNode.status == "online",
+                MQTTNode.is_active == True
+            ).all()
+            
+            if not active_nodes:
+                logger.warning("没有在线的MQTT节点，无法分配任务")
+                return
+            
+            logger.info(f"发现 {len(active_nodes)} 个在线MQTT节点")
+            
+            # 获取所有未启动状态的子任务
+            # 这里可以根据实际情况实现任务分配逻辑
+            # 由于MQTT模式下通常使用发布/订阅模式，任务分配方式可能与HTTP模式不同
+            
+            # 示例:
+            # 1. 获取所有待分配的任务
+            # 2. 按照节点的负载均衡策略选择合适的节点
+            # 3. 发布任务到MQTT，等待节点认领
+            
+            logger.info("MQTT模式下暂不实现自动任务分配，等待节点通过MQTT主动认领任务")
+            
+        except Exception as e:
+            logger.error(f"处理MQTT任务分配出错: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+    async def check_nodes_health(self):
+        """
+        执行HTTP节点健康检查（仅在HTTP模式下使用）
+        """
+        db = SessionLocal()
+        try:
+            logger.info("==================== HTTP节点健康检查开始 ====================")
             try:
                 # 先检查是否有节点表，使用text()函数包装SQL语句
                 db.execute(text("SELECT 1 FROM nodes LIMIT 1"))
@@ -80,7 +208,7 @@ class NodeHealthChecker:
             
             if not nodes:
                 logger.warning("数据库中没有节点记录，健康检查结束")
-                logger.info("==================== 节点健康检查结束 ====================")
+                logger.info("==================== HTTP节点健康检查结束 ====================")
                 return
                 
             updated_nodes = []
@@ -239,7 +367,7 @@ class NodeHealthChecker:
 
             duration = (after_check - before_check).total_seconds()
             logger.info(f"健康检查耗时: {duration:.2f} 秒")
-            logger.info("==================== 节点健康检查结束 ====================")
+            logger.info("==================== HTTP节点健康检查结束 ====================")
 
         except Exception as e:
             logger.error(f"节点健康检查出错: {str(e)}")
@@ -299,7 +427,7 @@ class NodeHealthChecker:
                 GROUP BY status
             """)).fetchall()
             
-            logger.info(f"当前任务状态分布: {', '.join([f'{status}: {count}' for status, count in task_status_counts])}")
+            logger.info(f"当前任务状态分布: {', '.join([f'{status}: {count}' for status, count in task_status_counts])}" if task_status_counts else "没有任务")
             
             # 查找运行中(状态1)的主任务中有未启动(状态0)的子任务
             running_tasks_with_not_started_subtasks = db.query(Task).join(

@@ -51,7 +51,7 @@ async def get_mqtt_nodes(
         )
         
         # 转换为响应模型
-        node_responses = [MQTTNodeResponse.from_orm(node) for node in nodes]
+        node_responses = [MQTTNodeResponse.model_validate(node) for node in nodes]
         
         # 构建分页响应
         return PaginationResponse(
@@ -99,7 +99,7 @@ async def get_mqtt_node(
             success=True,
             message="Success",
             code=200,
-            data=MQTTNodeResponse.from_orm(node),
+            data=MQTTNodeResponse.model_validate(node),
             timestamp=int(time.time())
         )
     except Exception as e:
@@ -132,7 +132,7 @@ async def update_mqtt_node(
         updated_node = MQTTNodeCRUD.update_mqtt_node(
             db=db, 
             node_id=node_id, 
-            node_data=node_data.dict(exclude_unset=True)
+            node_data=node_data.model_dump(exclude_unset=True)
         )
         
         # 构建响应
@@ -141,7 +141,7 @@ async def update_mqtt_node(
             success=True,
             message="节点更新成功",
             code=200,
-            data=MQTTNodeResponse.from_orm(updated_node),
+            data=MQTTNodeResponse.model_validate(updated_node),
             timestamp=int(time.time())
         )
     except Exception as e:
@@ -211,7 +211,7 @@ async def toggle_mqtt_node_status(
             success=True,
             message=f"节点{status_str}成功",
             code=200,
-            data=MQTTNodeResponse.from_orm(node),
+            data=MQTTNodeResponse.model_validate(node),
             timestamp=int(time.time())
         )
     except Exception as e:

@@ -129,13 +129,16 @@ async def startup_event():
         health_check_task = asyncio.create_task(start_health_checker())
         await asyncio.sleep(1)  # 等待服务启动
         if not health_check_task.done():
-            logger.info("节点健康检查服务启动成功")
+            if comm_mode == "mqtt":
+                logger.info("节点健康检查服务启动成功 (MQTT模式 - 被动监控节点状态)")
+            else:
+                logger.info("节点健康检查服务启动成功 (HTTP模式 - 主动检查节点状态)")
             
             # 启动后立即手动执行一次节点健康检查
             from services.node_health_check import health_checker
             logger.info("执行首次节点健康检查...")
             try:
-                await health_checker.check_nodes_health()
+                await health_checker.check_nodes_health() if comm_mode == "http" else await health_checker.check_mqtt_nodes_health()
                 logger.info("首次节点健康检查完成")
             except Exception as e:
                 logger.error(f"首次节点健康检查失败: {str(e)}")

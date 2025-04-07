@@ -6,9 +6,11 @@ from typing import Dict, Any, Callable, List, Optional
 from paho.mqtt import client as mqtt_client
 from core.database import SessionLocal
 from crud.mqtt_node import MQTTNodeCRUD
+from models.database import MQTTNode  # 显式导入MQTTNode模型
 import socket
 import platform
 import psutil
+import traceback  # 添加traceback模块用于打印详细错误
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,7 @@ class MQTTClient:
         """
         try:
             # API服务作为管理者不需要设置遗嘱消息
+            logger.info(f"正在连接到MQTT Broker: {self.config.get('broker_host', 'localhost')}:{self.config.get('broker_port', 1883)}")
             
             # 连接到broker
             self.client.connect(
@@ -233,18 +236,39 @@ class MQTTClient:
         """
         处理节点状态更新消息
         """
-        if not isinstance(payload, dict) or not payload.get('payload', {}).get('node_id'):
+        logger.info(f"接收到节点状态消息 - 主题: {topic}")
+        logger.info(f"消息内容: {json.dumps(payload, ensure_ascii=False)}")
+        
+        if not isinstance(payload, dict):
+            logger.error(f"消息格式错误: payload不是字典类型 - {type(payload)}")
+            return
+        
+        if not payload.get('payload', {}).get('node_id'):
+            logger.error(f"消息格式错误: 缺少node_id - {payload}")
             return
         
         topic_prefix = self.config.get('topic_prefix', 'yolo/')
         node_id = payload['payload']['node_id']
         status = payload['payload'].get('status')
         
+        logger.info(f"提取的节点信息 - ID: {node_id}, 状态: {status}")
+        
+        # 跳过API服务自身的节点ID处理
+        if node_id.startswith("api_service-"):
+            logger.info(f"跳过API服务自身的节点ID: {node_id}")
+            return
+        
         # 解析主题中的节点ID
         # 格式: {topic_prefix}nodes/{node_id}/status
         parts = topic.split('/')
         if len(parts) >= 3:
             topic_node_id = parts[-2]  # 倒数第二个部分是节点ID
+            logger.info(f"从主题提取的节点ID: {topic_node_id}")
+            
+            # 跳过API服务自身的节点ID处理（从主题中获取）
+            if topic_node_id.startswith("api_service-"):
+                logger.info(f"跳过API服务自身的节点ID(从主题): {topic_node_id}")
+                return
             
             if node_id != topic_node_id:
                 logger.warning(f"节点ID不匹配: 主题={topic_node_id}, 负载={node_id}")
@@ -254,8 +278,16 @@ class MQTTClient:
             metadata = payload['payload'].get('metadata', {})
             service_type = payload['payload'].get('service_type', 'unknown')
             
+            # 再次检查服务类型，跳过API服务
+            if service_type == "api":
+                logger.info(f"跳过API服务类型的节点: {node_id}")
+                return
+            
             if node_id not in self.nodes:
+                logger.info(f"发现新节点: {node_id} ({service_type})")
                 self.nodes[node_id] = {}
+            else:
+                logger.info(f"更新已知节点: {node_id} ({service_type})")
             
             self.nodes[node_id].update({
                 'node_id': node_id,
@@ -269,6 +301,7 @@ class MQTTClient:
             
             # 保存到数据库
             try:
+                logger.info(f"开始保存节点 {node_id} 状态到数据库...")
                 db = SessionLocal()
                 
                 # 提取IP和端口信息（如果有）
@@ -278,10 +311,13 @@ class MQTTClient:
                 version = None
                 
                 if metadata:
+                    logger.info(f"节点元数据: {json.dumps(metadata, ensure_ascii=False)}")
                     ip = metadata.get('ip')
                     port = metadata.get('port')
                     hostname = metadata.get('hostname')
                     version = metadata.get('version')
+                    
+                    logger.info(f"解析元数据 - IP: {ip}, 端口: {port}, 主机名: {hostname}, 版本: {version}")
                 
                 # 构建节点数据
                 node_data = {
@@ -289,121 +325,54 @@ class MQTTClient:
                     'client_id': node_id,  # 使用node_id作为client_id
                     'service_type': service_type,
                     'status': status,
-                    'node_metadata': metadata,
+                    'node_metadata': metadata,  # 字段已修改
                     'ip': ip,
                     'port': port,
                     'hostname': hostname,
                     'version': version
                 }
                 
+                logger.info(f"准备更新或创建节点，节点数据: {json.dumps(node_data, ensure_ascii=False, default=str)}")
+                
+                # 检查节点是否已存在
+                existing_node = db.query(MQTTNode).filter(MQTTNode.node_id == node_id).first()
+                if existing_node:
+                    logger.info(f"节点 {node_id} 已存在，更新状态...")
+                else:
+                    logger.info(f"节点 {node_id} 不存在，将创建新记录")
+                
                 # 更新或创建节点
-                MQTTNodeCRUD.update_mqtt_node_status(db, node_id, status, metadata)
+                try:
+                    result = MQTTNodeCRUD.update_mqtt_node_status(db, node_id, status, metadata)
+                    if result:
+                        logger.info(f"成功更新节点 {node_id} 状态为 {status}")
+                    else:
+                        logger.warning(f"未找到节点 {node_id}，尝试创建新节点")
+                        node_obj = MQTTNodeCRUD.create_mqtt_node(db, node_data)
+                        if node_obj:
+                            logger.info(f"成功创建节点 {node_id}")
+                        else:
+                            logger.error(f"创建节点 {node_id} 失败")
+                except Exception as e:
+                    logger.error(f"更新/创建节点状态时出错: {e}")
+                    logger.error(f"错误详情: {traceback.format_exc()}")
                 
                 db.close()
+                logger.info(f"节点 {node_id} 状态处理完成")
             except Exception as e:
                 logger.error(f"保存MQTT节点状态到数据库失败: {e}")
+                logger.error(f"错误详情: {traceback.format_exc()}")
     
     def _publish_node_status(self, status: str):
         """
-        发布节点状态消息
-        
+        API服务作为管理者，不应发布自身状态。
+        此方法已禁用，保留仅为兼容性。
+
         Args:
             status: 节点状态 (online/offline)
         """
-        topic_prefix = self.config.get('topic_prefix', 'yolo/')
-        topic = f"{topic_prefix}nodes/{self.client_id}/status"
-        
-        # 获取系统信息
-        try:
-            hostname = socket.gethostname()
-            ip = socket.gethostbyname(hostname)
-            system_info = {
-                "platform": platform.system(),
-                "version": platform.version(),
-                "processor": platform.processor(),
-                "hostname": hostname,
-                "ip": ip
-            }
-            
-            # 获取资源使用情况
-            cpu_usage = psutil.cpu_percent(interval=0.1)
-            memory = psutil.virtual_memory()
-            memory_usage = memory.percent
-            
-            # 尝试获取GPU信息
-            gpu_usage = 0
-            try:
-                import GPUtil
-                gpus = GPUtil.getGPUs()
-                if gpus:
-                    gpu_usage = gpus[0].memoryUtil * 100
-            except:
-                pass
-        except Exception as e:
-            logger.warning(f"获取系统信息失败: {e}")
-            system_info = {}
-            cpu_usage = 0
-            memory_usage = 0
-            gpu_usage = 0
-        
-        payload = {
-            "version": "2.0.0",
-            "message_type": "node_status",
-            "timestamp": int(time.time()),
-            "payload": {
-                "node_id": self.client_id,
-                "status": status,
-                "service_type": "api",
-                "metadata": {
-                    "version": "1.0.0",
-                    "system": system_info,
-                    "resource": {
-                        "cpu_usage": cpu_usage,
-                        "memory_usage": memory_usage,
-                        "gpu_usage": gpu_usage,
-                        "task_count": 0
-                    },
-                    "ip": ip if 'ip' in locals() else None,
-                    "hostname": hostname if 'hostname' in locals() else None
-                }
-            }
-        }
-        
-        # 保存到数据库
-        try:
-            if status == "online":
-                db = SessionLocal()
-                node_id = self.client_id
-                metadata = payload["payload"]["metadata"]
-                
-                # 构建节点数据
-                node_data = {
-                    "node_id": node_id,
-                    "client_id": node_id,
-                    "service_type": "api",
-                    "status": status,
-                    "ip": ip if 'ip' in locals() else None,
-                    "hostname": hostname if 'hostname' in locals() else None,
-                    "cpu_usage": cpu_usage,
-                    "memory_usage": memory_usage,
-                    "gpu_usage": gpu_usage,
-                    "task_count": 0,
-                    "version": "1.0.0",
-                    "node_metadata": metadata
-                }
-                
-                # 创建或更新节点
-                MQTTNodeCRUD.create_mqtt_node(db, node_data)
-                db.close()
-        except Exception as e:
-            logger.error(f"保存API节点信息到数据库失败: {e}")
-        
-        return self.client.publish(
-            topic,
-            json.dumps(payload),
-            qos=self.config.get('qos', 1),
-            retain=True
-        )
+        logger.info(f"_publish_node_status方法已禁用，API服务不应发布自身状态")
+        return None  # 直接返回，不执行任何发布操作
     
     def publish_task_request(self, task_id: str, task_type: str, config: Dict[str, Any]) -> bool:
         """
