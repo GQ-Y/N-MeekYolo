@@ -16,6 +16,8 @@ from sqlalchemy.orm import Session
 from models.database import Stream
 from shared.utils.logger import setup_logger
 from core.config import settings
+from datetime import datetime
+from services.database import SessionLocal
 
 logger = setup_logger(__name__)
 
@@ -278,6 +280,21 @@ class StreamPlayerService:
                 
                 self._stop_conversion(stream_id)
                 raise HTTPException(status_code=500, detail=f"视频流转换初始化超时，FFmpeg输出: {error_msg}")
+            
+            # 获取数据库会话并更新视频流状态为在线(1)
+            db = SessionLocal()
+            try:
+                stream = db.query(Stream).filter(Stream.id == stream_id).first()
+                if stream:
+                    stream.status = 1  # 在线状态
+                    stream.updated_at = datetime.now()
+                    db.commit()
+                    logger.info(f"视频流 {stream_id} 转换成功，已更新状态为在线")
+            except Exception as e:
+                db.rollback()
+                logger.error(f"更新视频流 {stream_id} 状态失败: {str(e)}")
+            finally:
+                db.close()
             
             # 转换成功
             return {

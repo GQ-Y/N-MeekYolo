@@ -169,7 +169,16 @@ class StreamService:
                 return False
                 
             try:
-                # 先检查是否有关联的任务
+                # 检查是否有关联的子任务
+                subtasks = db.query(SubTask).filter(SubTask.stream_id == stream_id).count()
+                if subtasks > 0:
+                    logger.warning(f"流 {stream_id} 有 {subtasks} 个关联子任务，无法删除")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"该摄像头已被 {subtasks} 个任务使用，不能删除。请先删除相关任务后再尝试。"
+                    )
+                
+                # 检查是否有关联的任务
                 logger.info(f"正在检查流 {stream_id} 是否有关联的任务...")
                 associated_tasks = stream.tasks
                 
@@ -191,6 +200,8 @@ class StreamService:
                 logger.info(f"流 {stream_id} 删除成功")
                 return True
                 
+            except HTTPException:
+                raise
             except Exception as e:
                 db.rollback()
                 logger.error(f"删除流失败: {str(e)}", exc_info=True)
@@ -199,6 +210,8 @@ class StreamService:
                     detail=f"删除失败: {str(e)}"
                 )
                 
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"获取流信息失败: {str(e)}", exc_info=True)
             raise HTTPException(
