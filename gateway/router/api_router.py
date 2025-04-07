@@ -18,6 +18,7 @@ from core.exceptions import (
 )
 import aiohttp
 import uuid
+import asyncio
 
 logger = setup_logger(__name__)
 
@@ -74,59 +75,102 @@ async def route_request(route_req: RouteRequest, request: Request) -> StandardRe
         
         # 转发请求
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.request(
-                    method=route_req.method,
-                    url=target_url,
-                    headers=headers,
-                    params=route_req.query_params,
-                    json=route_req.body,
-                    timeout=30  # 设置超时时间
-                ) as response:
-                    response_data = await response.json()
-                    
-                    # 如果下游服务已经返回标准格式，进行格式转换
-                    if isinstance(response_data, dict) and all(key in response_data for key in ['code', 'message', 'data']):
+            # 增加超时时间
+            timeout = aiohttp.ClientTimeout(total=60)  # 增加到60秒
+            
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                try:
+                    async with session.request(
+                        method=route_req.method,
+                        url=target_url,
+                        headers=headers,
+                        params=route_req.query_params,
+                        json=route_req.body
+                    ) as response:
+                        response_data = await response.json()
+                        
+                        # 如果下游服务已经返回标准格式，进行格式转换
+                        if isinstance(response_data, dict) and all(key in response_data for key in ['code', 'message', 'data']):
+                            return StandardResponse(
+                                requestId=request_id,
+                                path=request.url.path,
+                                success=response_data.get('code', 200) < 400,
+                                code=response_data.get('code', 200),
+                                message=response_data.get('message', 'Success'),
+                                data=response_data.get('data')
+                            )
+                        
+                        # 否则包装成标准格式
+                        if response.status >= 400:
+                            raise DownstreamServiceException(
+                                route_req.service,
+                                response.status,
+                                str(response_data)
+                            )
+                            
                         return StandardResponse(
                             requestId=request_id,
                             path=request.url.path,
-                            success=response_data.get('code', 200) < 400,
-                            code=response_data.get('code', 200),
-                            message=response_data.get('message', 'Success'),
-                            data=response_data.get('data')
+                            success=True,
+                            code=response.status,
+                            message="Success",
+                            data=response_data
                         )
-                    
-                    # 否则包装成标准格式
-                    if response.status >= 400:
-                        raise DownstreamServiceException(
-                            route_req.service,
-                            response.status,
-                            str(response_data)
-                        )
-                        
+                except asyncio.TimeoutError:
+                    # 处理超时异常，返回超时信息而非抛出异常
+                    logger.error(f"Request to {route_req.service} timed out after 60 seconds: {target_url}")
                     return StandardResponse(
                         requestId=request_id,
                         path=request.url.path,
-                        success=True,
-                        code=response.status,
-                        message="Success",
-                        data=response_data
+                        success=False,
+                        code=504,  # Gateway Timeout
+                        message=f"请求超时: 服务 {route_req.service} 响应时间超过60秒",
+                        data={
+                            "service": route_req.service,
+                            "url": target_url,
+                            "timeout": 60
+                        }
                     )
-                    
+                except aiohttp.ClientError as e:
+                    # 处理其他客户端错误
+                    logger.error(f"Client error when connecting to {route_req.service}: {str(e)}")
+                    return StandardResponse(
+                        requestId=request_id,
+                        path=request.url.path,
+                        success=False,
+                        code=502,  # Bad Gateway
+                        message=f"无法连接到服务 {route_req.service}: {str(e)}",
+                        data={
+                            "service": route_req.service,
+                            "url": target_url,
+                            "error": str(e)
+                        }
+                    )
+                        
+        except DownstreamServiceException:
+            raise
         except aiohttp.ClientError as e:
-            raise DownstreamServiceException(
-                route_req.service,
-                500,
-                f"Failed to connect to downstream service: {str(e)}"
+            logger.error(f"Failed to connect to downstream service {route_req.service}: {str(e)}")
+            return StandardResponse(
+                requestId=request_id,
+                path=request.url.path,
+                success=False,
+                code=502,  # Bad Gateway
+                message=f"无法连接到服务 {route_req.service}: {str(e)}",
+                data=None
             )
                 
     except GatewayException:
         raise
     except Exception as e:
         logger.error(f"Route request error: {str(e)}", exc_info=True)
-        raise GatewayException(
-            message=f"Internal gateway error: {str(e)}",
-            code=500
+        return StandardResponse(
+            requestId=request_id,
+            path=request.url.path,
+            success=False,
+            code=500,  # Internal Server Error
+            message=f"网关内部错误: {str(e)}",
+            data=None
         )
 
 @router.post(
