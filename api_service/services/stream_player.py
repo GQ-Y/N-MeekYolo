@@ -11,7 +11,7 @@ import asyncio
 import logging
 import subprocess
 from typing import Dict, Optional, Tuple, List
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from sqlalchemy.orm import Session
 from models.database import Stream
 from shared.utils.logger import setup_logger
@@ -51,10 +51,11 @@ class StreamPlayerService:
         except Exception as e:
             logger.error(f"清理旧转换目录失败: {e}")
             
-    async def get_playable_url(self, db: Session, stream_id: int) -> Dict:
+    async def get_playable_url(self, request: Request, db: Session, stream_id: int) -> Dict:
         """获取可播放的URL
         
         Args:
+            request: HTTP请求对象，用于获取主机信息
             db: 数据库会话
             stream_id: 流ID
             
@@ -66,10 +67,24 @@ class StreamPlayerService:
         if not stream:
             raise HTTPException(status_code=404, detail=f"流 {stream_id} 不存在")
             
+        # 获取基础URL，用于构建完整播放URL
+        base_server_url = self._get_base_url(request)
+            
         # 检查URL类型
         url_type = self._get_url_type(stream.url)
         logger.info(f"流 {stream_id} ({stream.name}) URL类型: {url_type}, 地址: {stream.url}")
         
+        # 不支持RTMP流，直接返回错误信息
+        if url_type == "rtmp":
+            logger.warning(f"流 {stream_id} 使用了不支持的RTMP协议: {stream.url}")
+            return {
+                "original_url": stream.url,
+                "playable_url": "",
+                "protocol": url_type,
+                "converted": False,
+                "error": "暂不支持RTMP流，请使用RTSP或HLS格式"
+            }
+            
         if url_type == "hls" or url_type == "http":
             # 已经是HLS或HTTP直接可播放的流，直接返回原URL
             logger.info(f"流 {stream_id} 已经是可播放格式: {url_type}")
@@ -86,9 +101,11 @@ class StreamPlayerService:
             # 检查进程是否还活着
             if conversion_info["process"].poll() is None:
                 logger.info(f"流 {stream_id} 已有转换任务运行中")
+                # 构建完整URL
+                full_url = f"{base_server_url}{conversion_info['hls_url']}"
                 return {
                     "original_url": stream.url,
-                    "playable_url": conversion_info["hls_url"],
+                    "playable_url": full_url,
                     "protocol": "hls",
                     "converted": True
                 }
@@ -98,7 +115,20 @@ class StreamPlayerService:
                 self._stop_conversion(stream_id)
         
         # 开始新的转换流程
-        return await self._start_conversion(stream_id, stream.url)
+        return await self._start_conversion(request, stream_id, stream.url)
+    
+    def _get_base_url(self, request: Request) -> str:
+        """获取基础URL
+        
+        Args:
+            request: HTTP请求对象
+            
+        Returns:
+            str: 基础URL，如 http://localhost:8001
+        """
+        host = request.headers.get("host", "localhost:8001")
+        scheme = request.headers.get("x-forwarded-proto", "http")
+        return f"{scheme}://{host}"
     
     def _get_url_type(self, url: str) -> str:
         """获取URL的类型"""
@@ -132,10 +162,11 @@ class StreamPlayerService:
             logger.error(f"读取FFmpeg输出时出错: {e}")
         return lines
     
-    async def _start_conversion(self, stream_id: int, url: str) -> Dict:
+    async def _start_conversion(self, request: Request, stream_id: int, url: str) -> Dict:
         """启动转换流程
         
         Args:
+            request: HTTP请求对象，用于获取主机信息
             stream_id: 流ID
             url: 原始流URL
             
@@ -143,6 +174,9 @@ class StreamPlayerService:
             Dict: 包含转换信息的字典
         """
         try:
+            # 获取基础URL
+            base_server_url = self._get_base_url(request)
+            
             # 创建转换目录
             stream_output_dir = os.path.join(self.output_dir, f"stream_{stream_id}")
             if os.path.exists(stream_output_dir):
@@ -179,14 +213,16 @@ class StreamPlayerService:
                 bufsize=1  # 行缓冲
             )
             
-            # 生成可播放URL
-            base_url = f"/static/hls/stream_{stream_id}/index.m3u8"
+            # 生成相对URL路径
+            relative_url = f"/static/hls/stream_{stream_id}/index.m3u8"
+            # 生成完整URL
+            full_url = f"{base_server_url}{relative_url}"
             
             # 保存转换信息
             active_conversions[stream_id] = {
                 "process": process,
                 "output_dir": stream_output_dir,
-                "hls_url": base_url,
+                "hls_url": relative_url,
                 "command": cmd_str
             }
             
@@ -246,7 +282,7 @@ class StreamPlayerService:
             # 转换成功
             return {
                 "original_url": url,
-                "playable_url": base_url,
+                "playable_url": full_url,
                 "protocol": "hls",
                 "converted": True
             }

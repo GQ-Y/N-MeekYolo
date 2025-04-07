@@ -24,19 +24,33 @@ async def get_playable_url(
     db: Session = Depends(get_db)
 ):
     """
-    获取视频流的可播放地址，自动将RTSP/RTMP流转换为HLS格式
+    获取视频流的可播放地址，自动将RTSP流转换为HLS格式
     
     参数:
     - stream_id: 视频流ID
     
     返回:
     - original_url: 原始视频流地址
-    - playable_url: 可播放的视频流地址（HLS格式）
+    - playable_url: 可播放的视频流地址（HLS格式，完整URL）
     - protocol: 播放协议
     - converted: 是否进行了转换
+    
+    注意: 目前暂不支持RTMP流，请使用RTSP或HLS格式的视频流
     """
     try:
-        result = await stream_player_service.get_playable_url(db, stream_id)
+        result = await stream_player_service.get_playable_url(request, db, stream_id)
+        
+        # 检查是否有错误信息
+        if "error" in result and result.get("error"):
+            # 返回带有错误信息的响应，但HTTP状态码保持200以确保前端能够正确处理
+            return BaseResponse(
+                path=str(request.url),
+                success=False,
+                code=200,  # 使用200状态码确保前端能收到响应
+                message=f"获取播放地址失败: {result.get('error')}",
+                data=result
+            )
+            
         return BaseResponse(
             path=str(request.url),
             message="获取播放地址成功",
