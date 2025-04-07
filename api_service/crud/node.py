@@ -208,45 +208,134 @@ class NodeCRUD:
         return True
 
     @staticmethod
-    async def check_node_health(node: Node) -> bool:
+    async def check_node_health(db: Session, node: Node) -> bool:
         """
         检查单个节点健康状态
         
         参数:
+        - db: 数据库会话
         - node: 节点对象
         
         返回:
         - 节点是否健康
         """
         try:
+            # 验证数据库连接
+            try:
+                db.execute("SELECT 1")
+                logger.info(f"数据库连接正常，开始检查节点 {node.id} ({node.ip}:{node.port}) 健康状态")
+            except Exception as e:
+                logger.error(f"数据库连接异常: {str(e)}")
+                return False
+
             node_url = f"http://{node.ip}:{node.port}/health"
-            logger.info(f"正在检查节点 {node.id} ({node.ip}:{node.port}) 健康状态: {node_url}")
+            logger.info(f"开始请求节点健康检查接口: {node_url}")
             
             async with httpx.AsyncClient(timeout=5.0) as client:
                 try:
                     response = await client.get(node_url)
+                    logger.info(f"节点 {node.id} 健康检查接口响应状态码: {response.status_code}")
+                    
                     if response.status_code == 200:
                         data = response.json()
-                        logger.info(f"节点 {node.id} 健康检查响应: {data}")
+                        logger.info(f"节点 {node.id} 健康检查响应数据: {data}")
+                        
                         if data.get("success") and data.get("data", {}).get("status") == "healthy":
                             # 更新资源使用情况
-                            if "memory_usage" in data.get("data", {}):
-                                node.memory_usage = data["data"]["memory_usage"]
-                            if "gpu_memory_usage" in data.get("data", {}):
-                                node.gpu_memory_usage = data["data"]["gpu_memory_usage"]
-                            logger.info(f"节点 {node.id} 健康检查成功，节点状态正常")
-                            return True
+                            node_data = data.get("data", {})
+                            current_time = datetime.now()
+                            
+                            try:
+                                logger.info(f"开始获取节点 {node.id} 的数据库记录")
+                                # 获取最新的节点数据，使用悲观锁
+                                db_node = db.query(Node).filter(Node.id == node.id).with_for_update(nowait=True).first()
+                                if not db_node:
+                                    logger.error(f"节点 {node.id} 在数据库中不存在")
+                                    return False
+                                
+                                logger.info(f"成功获取节点 {node.id} 的数据库记录，当前状态: service_status={db_node.service_status}, cpu_usage={db_node.cpu_usage}, memory_usage={db_node.memory_usage}")
+                                
+                                # 更新CPU使用率
+                                cpu_str = node_data.get("cpu", "0%")
+                                old_cpu = db_node.cpu_usage
+                                try:
+                                    db_node.cpu_usage = float(cpu_str.rstrip("%"))
+                                    logger.info(f"节点 {node.id} CPU使用率从 {old_cpu}% 更新为 {db_node.cpu_usage}%")
+                                except (ValueError, AttributeError) as e:
+                                    logger.warning(f"解析CPU使用率失败: {str(e)}, 设置为0%")
+                                    db_node.cpu_usage = 0
+                                    
+                                # 更新GPU使用率
+                                gpu_str = node_data.get("gpu", "N/A")
+                                old_gpu = db_node.gpu_usage
+                                if gpu_str != "N/A":
+                                    try:
+                                        db_node.gpu_usage = float(gpu_str.rstrip("%"))
+                                        logger.info(f"节点 {node.id} GPU使用率从 {old_gpu}% 更新为 {db_node.gpu_usage}%")
+                                    except (ValueError, AttributeError) as e:
+                                        logger.warning(f"解析GPU使用率失败: {str(e)}, 设置为0%")
+                                        db_node.gpu_usage = 0
+                                else:
+                                    db_node.gpu_usage = 0
+                                    logger.info(f"节点 {node.id} 不支持GPU，使用率设置为0%")
+                                    
+                                # 更新内存使用率
+                                memory_str = node_data.get("memory", "0%")
+                                old_memory = db_node.memory_usage
+                                try:
+                                    db_node.memory_usage = float(memory_str.rstrip("%"))
+                                    logger.info(f"节点 {node.id} 内存使用率从 {old_memory}% 更新为 {db_node.memory_usage}%")
+                                except (ValueError, AttributeError) as e:
+                                    logger.warning(f"解析内存使用率失败: {str(e)}, 设置为0%")
+                                    db_node.memory_usage = 0
+                                
+                                # 更新节点状态和时间戳
+                                old_status = db_node.service_status
+                                db_node.service_status = "online"
+                                db_node.last_heartbeat = current_time
+                                db_node.updated_at = current_time
+                                
+                                logger.info(f"准备提交节点 {node.id} 的更新：status: {old_status}->{db_node.service_status}, CPU: {old_cpu}%->{db_node.cpu_usage}%, Memory: {old_memory}%->{db_node.memory_usage}%")
+                                
+                                try:
+                                    # 提交更改
+                                    db.commit()
+                                    logger.info(f"成功提交节点 {node.id} 的更新到数据库")
+                                    
+                                    # 验证更新是否成功
+                                    db.refresh(db_node)
+                                    logger.info(f"刷新后的节点 {node.id} 数据：CPU={db_node.cpu_usage}%, GPU={db_node.gpu_usage}%, Memory={db_node.memory_usage}%")
+                                    
+                                    # 更新传入的节点对象
+                                    node.cpu_usage = db_node.cpu_usage
+                                    node.gpu_usage = db_node.gpu_usage
+                                    node.memory_usage = db_node.memory_usage
+                                    node.service_status = db_node.service_status
+                                    node.last_heartbeat = db_node.last_heartbeat
+                                    node.updated_at = db_node.updated_at
+                                    
+                                    return True
+                                    
+                                except Exception as e:
+                                    logger.error(f"提交节点 {node.id} 更新时发生错误: {str(e)}")
+                                    db.rollback()
+                                    return False
+                                    
+                            except Exception as e:
+                                logger.error(f"更新节点 {node.id} 数据时发生错误: {str(e)}")
+                                db.rollback()
+                                return False
                         else:
                             logger.warning(f"节点 {node.id} 响应异常: {data}")
                             return False
                     else:
-                        logger.warning(f"节点 {node.id} 响应状态码: {response.status_code}")
+                        logger.warning(f"节点 {node.id} 响应状态码异常: {response.status_code}")
                         return False
                 except Exception as e:
                     logger.error(f"请求节点 {node.id} 健康接口失败: {str(e)}")
                     return False
         except Exception as e:
-            logger.error(f"检查节点 {node.id} 健康状态失败: {str(e)}")
+            logger.error(f"检查节点 {node.id} 健康状态时发生未预期的错误: {str(e)}")
             return False
 
     @staticmethod
@@ -260,34 +349,37 @@ class NodeCRUD:
         """
         # 获取所有节点
         nodes = db.query(Node).all()
-        updated_nodes = []
+        offline_nodes = []
         
         logger.info(f"开始检查 {len(nodes)} 个节点的健康状态")
-        offline_nodes = []
         
         # 检查每个节点的健康状态
         for node in nodes:
             old_status = node.service_status
-            is_healthy = await NodeCRUD.check_node_health(node)
+            is_healthy = await NodeCRUD.check_node_health(db, node)
             
-            # 更新节点状态
-            if is_healthy:
-                node.service_status = "online"
-                node.last_heartbeat = datetime.now()
-                if old_status != "online":
-                    logger.info(f"节点 {node.id} ({node.ip}:{node.port}) 从 {old_status} 状态恢复为在线状态")
-                    updated_nodes.append(node)
-            else:
+            # 如果节点不健康，添加到离线节点列表
+            if not is_healthy:
                 if node.service_status != "offline":
                     node.service_status = "offline"
+                    node.updated_at = datetime.now()
+                    # 更新离线状态到数据库
+                    db.execute(
+                        """
+                        UPDATE nodes 
+                        SET service_status = :service_status,
+                            updated_at = :updated_at
+                        WHERE id = :node_id
+                        """,
+                        {
+                            "service_status": "offline",
+                            "updated_at": datetime.now(),
+                            "node_id": node.id
+                        }
+                    )
+                    db.commit()
                     logger.warning(f"节点 {node.id} ({node.ip}:{node.port}) 标记为离线状态")
-                    updated_nodes.append(node)
-                    offline_nodes.append(node)
-        
-        # 提交所有节点状态更改
-        if updated_nodes:
-            db.commit()
-            logger.info(f"健康检查更新了 {len(updated_nodes)} 个节点状态")
+                offline_nodes.append(node)
         
         # 处理离线节点上的任务
         task_count = 0

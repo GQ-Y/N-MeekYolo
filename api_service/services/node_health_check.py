@@ -250,7 +250,7 @@ class NodeHealthChecker:
     
     async def _check_node_health(self, node: Node) -> bool:
         """
-        检查单个节点健康状态，并更新节点资源使用信息
+        检查单个节点的健康状态
         
         参数:
         - node: 节点对象
@@ -259,102 +259,33 @@ class NodeHealthChecker:
         - 节点是否健康
         """
         try:
-            node_url = f"http://{node.ip}:{node.port}/health"
-            logger.info(f"正在检查节点 {node.id} ({node.ip}:{node.port}) 健康状态: {node_url}")
-            
+            db = SessionLocal()
             try:
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    logger.info(f"开始发送请求到节点 {node.id} 的健康接口...")
-                    response = await client.get(node_url)
-                    logger.info(f"节点 {node.id} 响应状态码: {response.status_code}")
+                # 使用 NodeCRUD 类的实现
+                logger.info(f"使用 NodeCRUD.check_node_health 检查节点 {node.id} ({node.ip}:{node.port})")
+                is_healthy = await NodeCRUD.check_node_health(db, node)
+                
+                if is_healthy:
+                    logger.info(f"节点 {node.id} 健康检查通过")
+                else:
+                    logger.warning(f"节点 {node.id} 健康检查未通过")
                     
-                    if response.status_code == 200:
-                        data = response.json()
-                        logger.info(f"节点 {node.id} 健康检查响应: {data}")
-                        
-                        # 处理新的标准响应格式
-                        node_data = data.get("data", {}) if isinstance(data, dict) else {}
-                        
-                        # 检查是否为新的标准格式响应
-                        if data.get("success") and node_data.get("status") == "healthy":
-                            # 更新节点资源使用情况
-                            self._update_node_resources(node, node_data)
-                            logger.info(f"节点 {node.id} 健康检查成功，节点状态正常")
-                            return True
-                        
-                        # 兼容旧格式
-                        elif data.get("status") == "ok" or (isinstance(node_data, dict) and node_data.get("status") == "healthy"):
-                            logger.info(f"节点 {node.id} 健康检查成功，节点状态正常(旧格式)")
-                            return True
-                        else:
-                            logger.warning(f"节点 {node.id} 响应异常: {data}")
-                            return False
-                    else:
-                        logger.warning(f"节点 {node.id} 响应状态码异常: {response.status_code}")
-                        return False
-            except httpx.ConnectError:
-                logger.warning(f"节点 {node.id} 连接失败，服务可能未运行")
-                return False
-            except httpx.TimeoutException:
-                logger.warning(f"节点 {node.id} 请求超时，服务可能响应慢或不可用")
-                return False
+                return is_healthy
+                
             except Exception as e:
-                logger.error(f"请求节点 {node.id} 健康接口时发生异常: {str(e)}")
+                logger.error(f"检查节点 {node.id} 健康状态时出错: {str(e)}")
                 import traceback
                 logger.error(traceback.format_exc())
                 return False
+                
+            finally:
+                db.close()
+                
         except Exception as e:
-            logger.error(f"检查节点 {node.id} 健康状态失败: {str(e)}")
+            logger.error(f"检查节点 {node.id} 健康状态时发生未预期的错误: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
             return False
-
-    def _update_node_resources(self, node: Node, node_data: dict):
-        """
-        更新节点资源使用信息
-        
-        参数:
-        - node: 节点对象
-        - node_data: 节点响应数据
-        """
-        try:
-            # 提取CPU使用率
-            cpu_usage = node_data.get("cpu", "")
-            if cpu_usage:
-                try:
-                    # 尝试从百分比字符串(如"45.2%")中提取数值
-                    cpu_value = float(cpu_usage.rstrip("%"))
-                    node.cpu_usage = cpu_value
-                    logger.info(f"更新节点 {node.id} CPU使用率: {cpu_value}%")
-                except (ValueError, AttributeError):
-                    logger.warning(f"无法解析CPU使用率数据: {cpu_usage}")
-            
-            # 提取GPU使用率
-            gpu_usage = node_data.get("gpu", "")
-            if gpu_usage and gpu_usage != "N/A":
-                try:
-                    # 尝试从百分比字符串中提取数值
-                    gpu_value = float(gpu_usage.rstrip("%"))
-                    node.gpu_usage = gpu_value
-                    logger.info(f"更新节点 {node.id} GPU使用率: {gpu_value}%")
-                except (ValueError, AttributeError):
-                    logger.warning(f"无法解析GPU使用率数据: {gpu_usage}")
-            
-            # 提取内存使用率
-            memory_usage = node_data.get("memory", "")
-            if memory_usage:
-                try:
-                    # 尝试从百分比字符串中提取数值
-                    memory_value = float(memory_usage.rstrip("%"))
-                    node.memory_usage = memory_value
-                    logger.info(f"更新节点 {node.id} 内存使用率: {memory_value}%")
-                except (ValueError, AttributeError):
-                    logger.warning(f"无法解析内存使用率数据: {memory_usage}")
-                    
-        except Exception as e:
-            logger.error(f"更新节点 {node.id} 资源使用信息时出错: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
 
     async def _start_pending_tasks(self, db: Session):
         """启动处于未启动状态的任务"""

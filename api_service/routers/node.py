@@ -193,6 +193,8 @@ def get_nodes(
                 "compute_type": node.compute_type,
                 "memory_usage": node.memory_usage,
                 "gpu_memory_usage": node.gpu_memory_usage,
+                "cpu_usage": node.cpu_usage,
+                "gpu_usage": node.gpu_usage,
                 "total_tasks": (node.image_task_count or 0) + (node.video_task_count or 0) + (node.stream_task_count or 0)
             }
             nodes.append(node_data)

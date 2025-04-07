@@ -111,6 +111,8 @@ class NodeResponse(BaseModel):
     compute_type: str = Field("cpu", description="计算类型：cpu(CPU计算边缘节点)、camera(摄像头边缘节点)、gpu(GPU计算边缘节点)、elastic(弹性集群节点)")
     memory_usage: float = Field(0, description="内存占用率")
     gpu_memory_usage: float = Field(0, description="GPU显存占用率")
+    cpu_usage: float = Field(0, description="CPU占用率")
+    gpu_usage: float = Field(0, description="GPU占用率")
     total_tasks: int = Field(0, description="总任务数量")
 
     model_config = {
