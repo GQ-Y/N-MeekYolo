@@ -130,7 +130,9 @@ def create_task(
     
     # 更新实际的子任务数量
     task.total_subtasks = len(created_subtasks)
-    logger.info(f"任务 {task.id} 共创建了 {task.total_subtasks} 个子任务")
+    # 确保active_subtasks初始为0
+    task.active_subtasks = 0
+    logger.info(f"任务 {task.id} 共创建了 {task.total_subtasks} 个子任务，初始活跃子任务为 {task.active_subtasks}")
     
     # 生成警告信息
     warnings = []
@@ -423,53 +425,81 @@ async def start_task(
                         if not analysis_client.mqtt_connected:
                             logger.warning("MQTT客户端未连接，但会继续任务创建，等待客户端连接后会自动处理")
                     
-                    # 调用MQTT客户端处理任务 - 不等待响应，只获取任务ID
-                    response = await analysis_client.analyze_stream(
-                        model_code=model.code,
-                        stream_url=stream.url,
-                        task_name=f"{task.name}-{subtask.id}",
-                        callback_url=system_callback,
-                        callback_urls=user_callback_url,
-                        enable_callback=subtask.enable_callback,
-                        save_result=task.save_result,
-                        config=subtask.config,
-                        task_id=subtask.analysis_task_id,
-                        analysis_type=subtask.analysis_type
-                    )
-                    
-                    if response.get('success', False):
-                        data = response.get('data', {})
-                        analysis_task_id = data.get('task_id')
-                        
-                        if analysis_task_id:
-                            # 先记录任务，状态为已创建但未运行
-                            # 保存分析任务ID
-                            subtask.analysis_task_id = analysis_task_id
-                            subtask.status = 0  # 未启动状态，等待客户端响应
-                            subtask.error_message = "任务已创建，等待MQTT节点接收"
-                            
-                            # 记录MQTT节点ID - 简化处理，不直接使用node对象
-                            mqtt_node_id = data.get('mqtt_node_id')
-                            if mqtt_node_id:
-                                # 这里不再需要复杂的会话处理，直接使用ID
-                                subtask.mqtt_node_id = mqtt_node_id
-                                logger.info(f"任务关联到MQTT节点ID={mqtt_node_id}")
-                            
-                            # 记录成功创建的任务
-                            result = (analysis_task_id, None)  # node_id为None，表示使用MQTT
-                            logger.info(f"成功创建MQTT任务：{analysis_task_id}，等待MQTT节点接收后运行")
-                            success_count += 1
-                        else:
-                            logger.error(f"MQTT响应缺少任务ID: {response}")
-                            error_msg = "MQTT响应缺少任务ID"
-                            subtask.error_message = f"启动MQTT分析服务失败: {error_msg}"
-                            failed_subtasks.append((subtask.id, error_msg))
-                            continue
+                    # 确保分析任务ID为纯数字格式
+                    if not subtask.analysis_task_id:
+                        # 生成分析任务ID: 使用主任务ID
+                        analysis_task_id = str(task_id)
+                        subtask.analysis_task_id = analysis_task_id
+                        logger.info(f"为子任务 {subtask.id} 设置分析任务ID为主任务ID: {analysis_task_id}")
                     else:
-                        error_msg = response.get('message', '未知错误')
-                        logger.error(f"MQTT任务启动失败: {error_msg}")
-                        subtask.error_message = f"启动MQTT分析服务失败: {error_msg}"
-                        failed_subtasks.append((subtask.id, error_msg))
+                        analysis_task_id = subtask.analysis_task_id
+                    
+                    # MQTT模式下，不使用analyze_stream方法创建新任务，而是直接发送消息
+                    # 构建发送到MQTT节点的任务配置
+                    task_config = {
+                        "source": {
+                            "type": "stream",
+                            "urls": [stream.url]  # 确保正确传递stream_url
+                        },
+                        "config": {
+                            "model_code": model.code,
+                            "analysis_type": subtask.analysis_type,
+                            **(subtask.config or {})
+                        },
+                        "result_config": {
+                            "save_result": task.save_result,
+                            "callback_urls": user_callback_url.split(",") if user_callback_url else [],
+                            "callback_url": system_callback,
+                            "enable_callback": subtask.enable_callback
+                        }
+                    }
+                    
+                    # 尝试从现有MQTT节点表中获取可用节点
+                    from models.database import MQTTNode
+                    mqtt_nodes = db.query(MQTTNode).filter(
+                        MQTTNode.status == "online",
+                        MQTTNode.is_active == True,
+                        MQTTNode.task_count < MQTTNode.max_tasks
+                    ).order_by(MQTTNode.task_count).all()
+                    
+                    mqtt_node = mqtt_nodes[0] if mqtt_nodes else None
+                    
+                    if mqtt_node:
+                        # 更新子任务信息，关联到MQTT节点而不是普通节点
+                        subtask.mqtt_node_id = mqtt_node.id
+                        subtask.node_id = None  # 确保不设置node_id
+                        
+                        # 发送任务消息（不等待响应）
+                        logger.info(f"直接发送MQTT任务: 子任务={subtask.id}, 主任务={task_id}, 节点={mqtt_node.mac_address}")
+                        success = await analysis_client.mqtt_client.send_task_to_node(
+                            mac_address=mqtt_node.mac_address,
+                            task_id=str(task_id),
+                            subtask_id=str(subtask.id),
+                            config=task_config,
+                            wait_for_response=False
+                        )
+                        
+                        if isinstance(success, tuple):
+                            success = success[0]  # 如果返回元组，取第一个元素作为成功标志
+                        
+                        # 在MQTT模式下，只要消息发出就认为成功，不需要等待响应
+                        subtask.status = 1  # 设置为运行中状态(1)
+                        subtask.started_at = datetime.now()
+                        # 更新错误消息
+                        if subtask.error_message == "任务已创建，等待MQTT节点接收" or not subtask.error_message:
+                            subtask.error_message = None  # 清除等待消息
+                        
+                        # 更新节点任务计数
+                        mqtt_node.task_count += 1
+                        mqtt_node.stream_task_count += 1
+                        
+                        logger.info(f"MQTT任务已发送: 子任务={subtask.id}, MAC={mqtt_node.mac_address}, 等待节点处理")
+                        result = (analysis_task_id, None)  # node_id为None，表示使用MQTT
+                        success_count += 1
+                    else:
+                        logger.warning(f"未找到可用的MQTT节点，任务将保持待启动状态")
+                        subtask.error_message = "未找到可用的MQTT节点，任务无法启动"
+                        failed_subtasks.append((subtask.id, "未找到可用的MQTT节点"))
                         continue
                 else:
                     # 使用HTTP分析服务
@@ -502,7 +532,7 @@ async def start_task(
                 # 根据通信模式设置不同的节点ID
                 if comm_mode == "mqtt":
                     subtask.node_id = None  # HTTP节点ID
-                    subtask.mqtt_node_id = mqtt_node_id  # MQTT节点ID
+                    subtask.mqtt_node_id = mqtt_node.id  # MQTT节点ID
                 else:
                     subtask.node_id = node_id  # HTTP节点ID
                     subtask.mqtt_node_id = None  # MQTT节点ID
@@ -529,6 +559,11 @@ async def start_task(
     
     # 更新任务统计信息
     task.active_subtasks = success_count
+    
+    # 记录修正信息，确保active_subtasks不会超过total_subtasks
+    if task.active_subtasks > task.total_subtasks:
+        logger.warning(f"任务 {task_id} 活跃子任务数 {task.active_subtasks} 超过总子任务数 {task.total_subtasks}，强制修正")
+        task.active_subtasks = task.total_subtasks
     
     # 生成详细的错误信息
     if failed_subtasks:
@@ -667,70 +702,85 @@ def update_task_status_from_subtasks(
     db: Session,
     task_id: int
 ) -> Tuple[bool, str]:
-    """根据子任务状态更新任务状态（三态模型：未启动、运行中、停止）"""
-    task = db.query(Task).filter(Task.id == task_id).first()
-    if not task:
-        return False, "任务不存在"
+    """
+    根据子任务状态更新主任务状态
     
-    # 获取所有子任务状态
-    subtask_stats = db.execute(text("""
-        SELECT 
-            COUNT(*) as total,
-            SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) as running,
-            SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) as not_started,
-            SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) as stopped
-        FROM sub_tasks
-        WHERE task_id = :task_id
-    """), {"task_id": task_id}).fetchone()
-    
-    total = subtask_stats[0] or 0
-    running = subtask_stats[1] or 0
-    not_started = subtask_stats[2] or 0
-    stopped = subtask_stats[3] or 0
-    
-    # 更新任务统计信息
-    task.active_subtasks = running
-    task.total_subtasks = total
-    
-    # 根据子任务状态更新任务状态 - 三态模型
-    if running > 0:
-        # 只要有运行中的子任务，主任务就是运行中
-        task.status = 1  # 运行中状态(1)
+    Args:
+        db: 数据库会话
+        task_id: 任务ID
+    """
+    try:
+        # 获取任务
+        task = db.query(Task).options(joinedload(Task.sub_tasks)).filter(Task.id == task_id).first()
+        if not task:
+            return False, "任务不存在"
         
-        # 检查是否有子任务停止，记录原因
-        if stopped > 0:
-            task.error_message = f"部分子任务已停止 ({stopped}/{total})"
-    elif total == not_started:
-        # 所有子任务都未启动
-        task.status = 0  # 未启动状态(0)
-        task.error_message = None  # 清除错误消息
-    else:
-        # 没有运行中的子任务，且不是全部未启动，则标记为停止
-        task.status = 2  # 已停止状态(2)
+        # 获取子任务统计信息
+        subtasks = task.sub_tasks
+        total_subtasks = len(subtasks)
         
-        # 区分不同的停止原因
-        if stopped == total:
-            # 所有子任务都已停止
-            # 检查是否所有子任务都是因用户停止
-            user_stopped_count = db.query(SubTask).filter(
-                SubTask.task_id == task_id,
-                SubTask.status == 2,
-                SubTask.error_message == "子任务由用户手动停止"
-            ).count()
-            
-            if user_stopped_count == total:
-                task.error_message = "任务由用户手动停止"
-                task.completed_at = datetime.now()
-            else:
-                task.error_message = "所有子任务已停止"
-                task.completed_at = datetime.now()
+        # 检查子任务数量
+        if total_subtasks == 0:
+            # 没有子任务，主任务状态为未启动(0)
+            task.status = 0
+            task.active_subtasks = 0
+            task.total_subtasks = 0
+            db.commit()
+            return True, "任务没有子任务"
+        
+        # 当前子任务状态计数
+        running_count = 0  # 运行中的子任务数
+        completed_count = 0  # 已完成的子任务数
+        error_count = 0  # 出错的子任务数
+        stopped_count = 0  # 已停止的子任务数
+        
+        # 统计子任务状态
+        for subtask in subtasks:
+            if subtask.status == 1:  # 运行中
+                running_count += 1
+            elif subtask.status == 2:  # 已停止
+                stopped_count += 1
+            elif subtask.status == 3:  # 已完成
+                completed_count += 1
+            elif subtask.status == 4:  # 出错
+                error_count += 1
+        
+        # 更新主任务状态
+        task.total_subtasks = total_subtasks
+        
+        # 修正active_subtasks为实际运行中的子任务数量
+        task.active_subtasks = running_count
+        
+        # 确保active_subtasks不会超过total_subtasks
+        if task.active_subtasks > task.total_subtasks:
+            logger.warning(f"任务 {task_id} 活跃子任务数 {task.active_subtasks} 超过总子任务数 {task.total_subtasks}，强制修正")
+            task.active_subtasks = task.total_subtasks
+        
+        # 根据子任务状态确定主任务状态
+        if running_count > 0:
+            # 只要有运行中的子任务，主任务状态为运行中(1)
+            task.status = 1
+        elif completed_count == total_subtasks:
+            # 所有子任务都完成，主任务状态为已完成(3)
+            task.status = 3
+            task.completed_at = datetime.now()
+        elif error_count > 0 and running_count == 0:
+            # 有错误子任务且没有运行中的子任务，主任务状态为出错(4)
+            task.status = 4
+        elif stopped_count > 0 and running_count == 0:
+            # 有停止的子任务且没有运行中的子任务，主任务状态为已停止(2)
+            task.status = 2
         else:
-            # 部分子任务已停止，部分未启动
-            task.error_message = f"部分子任务未启动 ({not_started}/{total})"
-    
-    db.commit()
-    
-    return True, f"任务状态已更新: {task.status}"
+            # 其他情况，主任务状态不变
+            pass
+        
+        # 更新任务状态
+        db.commit()
+        
+        return True, f"已更新任务状态: status={task.status}, active={task.active_subtasks}, total={task.total_subtasks}"
+    except Exception as e:
+        db.rollback()
+        return False, f"更新任务状态失败: {str(e)}"
 
 def normalize_task_status(status: int) -> int:
     """

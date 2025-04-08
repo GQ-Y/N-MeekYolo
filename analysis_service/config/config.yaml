@@ -7,6 +7,23 @@ SERVICES:
   host: "0.0.0.0"
   port: 8002
 
+# 通信模式配置
+COMMUNICATION:
+  mode: "mqtt"  # http 或 mqtt，决定使用哪种通信方式
+
+# MQTT配置
+MQTT:
+  broker_host: "mqtt.yingzhu.net"
+  broker_port: 1883
+  username: "yolo"
+  password: "yolo"
+  topic_prefix: "meek/"  # 注意：标准格式为 meek/
+  qos: 1
+  keepalive: 60
+  reconnect_interval: 5  # 断线重连间隔(秒)
+  node_id: ""  # 节点ID，留空自动使用MAC地址
+  service_type: "analysis"  # 节点类型
+
 # Redis配置
 REDIS:
   host: "localhost"
@@ -40,7 +57,7 @@ STORAGE:
   base_dir: "data"
   model_dir: "models"
   temp_dir: "temp"
-  max_size: 10737418240  # 1GB
+  max_size: 10737418240  # 10GB
 
 # 输出配置
 OUTPUT:
@@ -58,7 +75,7 @@ TASK_QUEUE:
   cleanup_interval: 3600  # 清理间隔(秒) 
 
 DEBUG:
-  enabled: false  # 设置为 true 开启调试模式
+  enabled: true  # 设置为 true 开启调试模式
   log_level: "DEBUG"  # 日志级别：DEBUG, INFO, WARNING, ERROR, CRITICAL
   log_file: "logs/debug.log"  # 日志文件路径
   log_rotation: "1 day"  # 日志轮转周期

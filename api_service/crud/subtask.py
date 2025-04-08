@@ -28,7 +28,8 @@ class SubTaskCRUD:
         enable_callback: bool = False,
         callback_url: str = None,
         roi_type: int = 0,
-        analysis_type: str = "detection"
+        analysis_type: str = "detection",
+        name: str = None
     ) -> SubTask:
         """
         创建子任务
@@ -46,11 +47,41 @@ class SubTaskCRUD:
             callback_url: 回调URL
             roi_type: ROI类型
             analysis_type: 分析类型
+            name: 子任务名称
             
         Returns:
             SubTask: 创建的子任务对象
         """
         try:
+            # 查询主任务名称
+            from models.database import Task
+            task = db.query(Task).filter(Task.id == task_id).first()
+            task_name = task.name if task else None
+            
+            # 查询模型名称
+            from models.database import Model
+            model = db.query(Model).filter(Model.id == model_id).first()
+            model_name = model.name if model else None
+            
+            # 查询流名称
+            stream_name = None
+            if stream_id:
+                from models.database import Stream
+                stream = db.query(Stream).filter(Stream.id == stream_id).first()
+                stream_name = stream.name if stream else None
+            
+            # 如果未提供名称，则自动生成
+            if not name:
+                # 优先使用流名称+模型名称
+                if stream_name and model_name:
+                    name = f"{stream_name}-{model_name}"
+                # 其次使用主任务名称+模型名称
+                elif task_name and model_name:
+                    name = f"{task_name}-{model_name}"
+                # 最后使用默认前缀+任务ID
+                else:
+                    name = f"子任务-{task_id}-{model_id}"
+            
             subtask = SubTask(
                 task_id=task_id,
                 model_id=model_id,
@@ -62,7 +93,8 @@ class SubTaskCRUD:
                 enable_callback=enable_callback,
                 callback_url=callback_url,
                 roi_type=roi_type,
-                analysis_type=analysis_type
+                analysis_type=analysis_type,
+                name=name  # 添加名称字段
             )
             
             # 如果是运行中状态，设置开始时间
@@ -73,7 +105,7 @@ class SubTaskCRUD:
             db.commit()
             db.refresh(subtask)
             
-            logger.info(f"创建子任务成功: ID={subtask.id}, task_id={task_id}")
+            logger.info(f"创建子任务成功: ID={subtask.id}, task_id={task_id}, name={name}")
             return subtask
             
         except Exception as e:

@@ -196,6 +196,7 @@ async def startup_event():
     """应用启动时的初始化"""
     show_service_banner("analysis_service")
     logger.info("Starting Analysis Service...")
+    
     if settings.DEBUG:
         logger.info("分析服务启动...")
         logger.info(f"环境: {settings.ENVIRONMENT}")
@@ -203,9 +204,38 @@ async def startup_event():
         logger.info(f"版本: {settings.VERSION}")
         logger.info(f"注册的路由: {[route.path for route in app.routes]}")
     
+    # 根据配置初始化通信模式
+    if settings.COMMUNICATION.mode.lower() == "mqtt":
+        logger.info("使用MQTT通信模式，正在初始化MQTT客户端...")
+        try:
+            from services.mqtt_client import get_mqtt_client
+            mqtt_client = get_mqtt_client()
+            if mqtt_client.start():
+                logger.info("MQTT客户端启动成功")
+            else:
+                logger.error("MQTT客户端启动失败")
+        except Exception as e:
+            logger.error(f"MQTT客户端初始化失败: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+    else:
+        logger.info(f"使用HTTP通信模式")
+    
 @app.on_event("shutdown")
 async def shutdown_event():
     """关闭事件"""
+    # 关闭MQTT客户端
+    if settings.COMMUNICATION.mode.lower() == "mqtt":
+        try:
+            from services.mqtt_client import get_mqtt_client
+            mqtt_client = get_mqtt_client()
+            if mqtt_client.stop():
+                logger.info("MQTT客户端已关闭")
+            else:
+                logger.warning("MQTT客户端关闭失败")
+        except Exception as e:
+            logger.error(f"关闭MQTT客户端失败: {str(e)}")
+    
     if settings.DEBUG:
         logger.info("分析服务关闭...")
 

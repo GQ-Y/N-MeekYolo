@@ -291,15 +291,18 @@ class NodeHealthChecker:
                             "urls": urls
                         }
                     
-                    # 如果任务ID不存在，使用组合ID
+                    # 如果任务ID不存在，使用纯数字ID
                     if not subtask.analysis_task_id:
-                        subtask.analysis_task_id = f"{subtask.task_id}-{subtask.id}"
-                        logger.info(f"为子任务 {subtask.id} 生成分析任务ID: {subtask.analysis_task_id}")
+                        # 生成纯数字ID: 主任务ID + (子任务ID+1000) 确保是纯数字格式
+                        subtask.analysis_task_id = str(subtask.id + 1000)
+                        logger.info(f"为子任务 {subtask.id} 生成纯数字分析任务ID: {subtask.analysis_task_id}")
                     
                     # 重要：更新节点关联 - 使用当前数据库会话中的节点ID
                     subtask.mqtt_node_id = node.id  # 这里node已经在当前会话中
                     subtask.node_id = None  # 显式清除HTTP节点ID
-                    subtask.error_message = "任务已创建，等待MQTT节点接收"
+                    # 注意：我们只关联节点，不更新子任务状态（状态仍然为0/未启动）
+                    # 子任务状态将根据MQTT消息由MQTT客户端更新
+                    subtask.error_message = "任务已分配MQTT节点，等待节点接收"
                     
                     # 提前更新数据库，确保任务记录创建
                     db.flush()

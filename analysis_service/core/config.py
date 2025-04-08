@@ -33,6 +33,23 @@ class AnalysisServiceConfig(BaseSettings):
     CORS_ALLOW_METHODS: List[str] = ["*"]
     CORS_ALLOW_HEADERS: List[str] = ["*"]
     
+    # 通信模式配置
+    class CommunicationConfig(BaseModel):
+        mode: str = "http"  # http 或 mqtt
+    
+    # MQTT配置
+    class MQTTConfig(BaseModel):
+        broker_host: str = "mqtt.yingzhu.net"
+        broker_port: int = 1883
+        username: str = "yolo"
+        password: str = "yolo"
+        topic_prefix: str = "meek/"
+        qos: int = 1
+        keepalive: int = 60
+        reconnect_interval: int = 5
+        node_id: str = ""  # 节点ID，留空自动使用MAC地址
+        service_type: str = "analysis"  # 节点类型
+    
     # Redis配置
     class RedisConfig(BaseModel):
         host: str = "localhost"
@@ -123,6 +140,8 @@ class AnalysisServiceConfig(BaseSettings):
     SERVICES: ServicesConfig = ServicesConfig()
     REDIS: RedisConfig = RedisConfig()
     TASK_QUEUE: TaskQueueConfig = TaskQueueConfig()
+    COMMUNICATION: CommunicationConfig = CommunicationConfig()
+    MQTT: MQTTConfig = MQTTConfig()
     
     model_config = {
         "env_file": ".env",

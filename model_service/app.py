@@ -29,7 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 创建限速器
-limiter = Limiter(key_func=get_remote_address, default_limits=["5/minute"])
+limiter = Limiter(key_func=get_remote_address, default_limits=["20/minute"])
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -101,7 +101,7 @@ app.include_router(
 )
 
 @app.get("/health")
-@limiter.limit("5/minute")
+@limiter.limit("200/minute")
 async def health_check(request: Request):
     """健康检查"""
     # 获取CPU使用率

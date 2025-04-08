@@ -109,6 +109,14 @@ async def startup_event():
     """应用启动时的事件处理"""
     logger.info("API服务启动...")
     
+    # 初始化数据库
+    try:
+        from core.init_db import init_db
+        init_db()
+        logger.info("数据库初始化完成")
+    except Exception as e:
+        logger.error(f"数据库初始化失败: {e}")
+    
     # 读取配置
     comm_mode = settings.config.get('COMMUNICATION', {}).get('mode', 'http')
     logger.info(f"通信模式: {comm_mode}")

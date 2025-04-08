@@ -250,6 +250,10 @@ class MQTTClient:
             elif topic == f"{self.topic_prefix}node_config_reply":
                 self._handle_config_reply(payload)
             
+            # 处理心跳消息（特殊处理）
+            elif "/status" in topic and isinstance(payload, dict) and payload.get('type') == 'heartbeat':
+                self._handle_heartbeat(topic, payload)
+            
             # 处理节点状态更新
             elif "/status" in topic:
                 self._handle_node_status(topic, payload)
@@ -422,29 +426,30 @@ class MQTTClient:
         处理节点断开连接
         """
         try:
-            logger.info(f"处理节点断开连接: MAC={mac_address}")
+            logger.info(f"处理节点断开连接：MAC={mac_address}")
             
-            # 更新数据库中的节点状态
+            # 更新数据库中的节点记录
             db = SessionLocal()
             try:
                 # 查找节点
                 node = db.query(MQTTNode).filter(MQTTNode.mac_address == mac_address).first()
                 
                 if node:
+                    logger.info(f"更新节点状态为离线：MAC={mac_address}")
                     # 更新节点状态
                     node.status = 'offline'
-                    db.commit()
-                    logger.info(f"节点 {mac_address} 已标记为离线")
+                    node.last_active = datetime.now()
                     
-                    # 处理该节点上运行的任务
+                    # 重要：处理该节点的所有任务 - 转移到其他节点
                     self._handle_node_offline(db, mac_address)
+                    
+                    db.commit()
                 else:
-                    logger.warning(f"未找到节点记录: MAC={mac_address}")
+                    logger.warning(f"未找到离线节点：MAC={mac_address}")
             finally:
                 db.close()
-                
         except Exception as e:
-            logger.error(f"处理节点断开连接失败: {e}")
+            logger.error(f"处理节点断开连接失败：{e}")
             logger.error(traceback.format_exc())
     
     def _handle_config_reply(self, payload: Dict[str, Any]):
@@ -457,7 +462,7 @@ class MQTTClient:
             if not isinstance(payload, dict):
                 logger.error(f"配置回复消息格式错误: {payload}")
                 return
-                
+            
             message_id = payload.get('message_id')
             message_uuid = payload.get('message_uuid')
             status = payload.get('status')
@@ -534,17 +539,17 @@ class MQTTClient:
     
     def _handle_node_status(self, topic: str, payload: Dict[str, Any]):
         """
-        处理节点状态更新消息
+        处理节点状态更新消息，包括心跳消息和资源更新
         """
         try:
-            logger.info(f"接收到节点状态更新消息 - 主题: {topic}")
+            logger.debug(f"接收到节点状态更新消息 - 主题: {topic}")
             
             # 从主题中提取MAC地址
             parts = topic.split('/')
             if len(parts) < 3:
                 logger.error(f"无效的状态主题格式: {topic}")
                 return
-                
+            
             mac_address = parts[1]  # {topic_prefix}/{mac_address}/status
             
             if not isinstance(payload, dict):
@@ -554,29 +559,76 @@ class MQTTClient:
             # 提取节点状态信息
             status = payload.get('status', 'unknown')
             timestamp = payload.get('timestamp', int(time.time()))
-            load = payload.get('load', {})
             
-            # 更新内存中的节点信息
-            if mac_address in self.nodes:
-                self.nodes[mac_address].update({
-                    'status': status,
-                    'load': load,
-                    'updated_at': timestamp
-                })
+            # 检查是否是心跳消息
+            is_heartbeat = payload.get('type') == 'heartbeat'
+            
+            # 如果是心跳消息，使用心跳消息中的MAC地址
+            if is_heartbeat and payload.get('mac_address'):
+                mac_address = payload.get('mac_address')
+                logger.debug(f"从心跳消息中提取MAC地址: {mac_address}")
             
             # 更新数据库中的节点信息
             db = SessionLocal()
             try:
                 node = db.query(MQTTNode).filter(MQTTNode.mac_address == mac_address).first()
+                
                 if node:
-                    node.status = status
-                    node.cpu_usage = load.get('cpu')
-                    node.memory_usage = load.get('memory')
-                    node.gpu_usage = load.get('gpu')
-                    node.task_count = load.get('running_tasks', 0)
+                    # 更新基本状态
+                    node.status = status if status != 'unknown' else 'online'
                     node.last_active = datetime.now()
+                    
+                    # 如果是心跳消息，更新更多详细信息
+                    if is_heartbeat:
+                        node.cpu_usage = payload.get('cpu_usage', node.cpu_usage)
+                        node.memory_usage = payload.get('memory_usage', node.memory_usage)
+                        node.gpu_usage = payload.get('gpu_usage', node.gpu_usage)
+                        node.task_count = payload.get('task_count', node.task_count)
+                        node.max_tasks = payload.get('max_tasks', node.max_tasks)
+                        node.is_active = payload.get('is_active', node.is_active)
+                        
+                        # 更新客户端ID和服务类型
+                        if payload.get('client_id'):
+                            node.client_id = payload.get('client_id')
+                        if payload.get('service_type'):
+                            node.service_type = payload.get('service_type')
+                            
+                        logger.debug(f"心跳消息更新节点 {mac_address}: CPU={node.cpu_usage}, MEM={node.memory_usage}, 任务数={node.task_count}/{node.max_tasks}")
+                    else:
+                        # 处理非心跳状态消息
+                        load = payload.get('load', {})
+                        node.cpu_usage = load.get('cpu', node.cpu_usage)
+                        node.memory_usage = load.get('memory', node.memory_usage)
+                        node.gpu_usage = load.get('gpu', node.gpu_usage)
+                        node.task_count = load.get('running_tasks', node.task_count)
+                    
                     db.commit()
-                    logger.info(f"节点 {mac_address} 状态已更新: {status}")
+                    logger.debug(f"节点 {mac_address} 状态已更新: {status}")
+                else:
+                    # 如果节点不存在，尝试创建新节点（仅心跳消息包含足够信息时）
+                    if is_heartbeat and payload.get('client_id') and payload.get('service_type'):
+                        logger.info(f"收到未知节点 {mac_address} 的心跳，尝试创建节点记录")
+                        
+                        node = MQTTNode(
+                            node_id = payload.get('node_id', payload.get('client_id')),
+                            mac_address = mac_address,
+                            client_id = payload.get('client_id'),
+                            service_type = payload.get('service_type'),
+                            status = 'online',
+                            last_active = datetime.now(),
+                            cpu_usage = payload.get('cpu_usage', 0),
+                            memory_usage = payload.get('memory_usage', 0),
+                            gpu_usage = payload.get('gpu_usage', 0),
+                            task_count = payload.get('task_count', 0),
+                            max_tasks = payload.get('max_tasks', 4),
+                            is_active = payload.get('is_active', True)
+                        )
+                        
+                        db.add(node)
+                        db.commit()
+                        logger.info(f"为心跳消息创建了新的节点记录: MAC={mac_address}")
+                    else:
+                        logger.warning(f"收到未知节点 {mac_address} 的状态更新，但缺少创建节点的必要信息")
             finally:
                 db.close()
         except Exception as e:
@@ -588,7 +640,7 @@ class MQTTClient:
         处理任务结果消息
         """
         try:
-            logger.info(f"接收到任务结果消息 - 主题: {topic}")
+            logger.info(f"接收到任务结果消息 - 主题: {topic}, 内容: {json.dumps(payload, ensure_ascii=False)[:200]}...")
             
             if not isinstance(payload, dict):
                 logger.error(f"任务结果消息格式错误: {payload}")
@@ -609,6 +661,15 @@ class MQTTClient:
                 'result': payload.get('result'),
                 'timestamp': payload.get('timestamp', int(time.time()))
             }
+            
+            # 任务结果到达时，也检查是否有未响应的命令
+            # 这是为了处理节点直接返回结果而没有回复配置消息的情况
+            for uuid, cmd_response in list(self.command_responses.items()):
+                cmd_data = cmd_response.get('data', {})
+                if cmd_data.get('task_id') == task_id and cmd_data.get('subtask_id') == subtask_id:
+                    logger.info(f"根据任务结果自动更新命令响应: {uuid}")
+                    # 不删除响应，只更新状态为成功
+                    cmd_response['status'] = 'success'
             
             # 更新数据库中的子任务状态
             db = SessionLocal()
@@ -636,6 +697,14 @@ class MQTTClient:
                         subtask.analysis_task_id = subtask_id
                 
                 if subtask:
+                    # 如果还没有关联MQTT节点，从结果消息中获取mac_address并关联节点
+                    if subtask.mqtt_node_id is None and 'mac_address' in payload:
+                        mac_address = payload.get('mac_address')
+                        mqtt_node = db.query(MQTTNode).filter(MQTTNode.mac_address == mac_address).first()
+                        if mqtt_node:
+                            logger.info(f"从任务结果中关联子任务到MQTT节点: {mac_address}")
+                            subtask.mqtt_node_id = mqtt_node.id
+                
                     # 根据状态更新子任务
                     if status == 'completed':
                         subtask.status = 2  # 已完成
@@ -643,8 +712,8 @@ class MQTTClient:
                     elif status == 'failed':
                         subtask.status = 3  # 失败
                         subtask.error_message = payload.get('message', '任务执行失败')
-                    elif status == 'running':
-                        # 如果状态是运行中，但子任务状态是未启动(0)，则更新为运行中(1)
+                    elif status == 'running' or status == 'success':  # 注意这里增加了对'success'的处理
+                        # 状态是运行中或成功，但子任务状态是未启动(0)，则更新为运行中(1)
                         if subtask.status == 0:
                             logger.info(f"子任务 {subtask_id} 从未启动状态改为运行中状态")
                         subtask.status = 1  # 运行中
@@ -666,12 +735,16 @@ class MQTTClient:
             logger.error(f"处理任务结果失败: {e}")
             logger.error(traceback.format_exc())
     
-    def _handle_node_offline(self, db: Session, mac_address: str):
+    async def _handle_node_offline(self, db: Session, mac_address: str):
         """
-        处理节点离线情况，重新分配该节点的任务
+        处理节点离线情况，自动转移该节点的任务到其他节点
+        
+        Args:
+            db: 数据库会话
+            mac_address: 节点MAC地址
         """
         try:
-            logger.info(f"处理节点 {mac_address} 离线情况...")
+            logger.info(f"处理节点 {mac_address} 离线，开始任务自动转移流程...")
             
             # 查找节点
             node = db.query(MQTTNode).filter(MQTTNode.mac_address == mac_address).first()
@@ -686,28 +759,144 @@ class MQTTClient:
             ).all()
             
             if not running_subtasks:
-                logger.info(f"节点 {mac_address} 没有运行中的子任务")
+                logger.info(f"节点 {mac_address} 没有运行中的子任务，无需转移")
                 return
                 
-            logger.info(f"节点 {mac_address} 有 {len(running_subtasks)} 个运行中的子任务需要重新分配")
+            logger.info(f"节点 {mac_address} 有 {len(running_subtasks)} 个运行中的子任务需要转移")
             
-            # 将子任务状态重置为未启动状态，等待健康检查器重新分配
-            for subtask in running_subtasks:
-                subtask.status = 0  # 未启动
-                subtask.mqtt_node_id = None  # 清除节点关联
-                subtask.started_at = None
-                subtask.error_message = f"节点离线，等待重新分配"
+            # 查找可用的其他在线节点
+            available_nodes = db.query(MQTTNode).filter(
+                MQTTNode.status == "online",
+                MQTTNode.is_active == True,
+                MQTTNode.mac_address != mac_address,  # 排除当前离线节点
+                MQTTNode.task_count < MQTTNode.max_tasks
+            ).order_by(MQTTNode.task_count).all()
+            
+            if not available_nodes:
+                logger.warning(f"没有可用的在线节点，所有子任务将重置为未启动状态等待后续分配")
+                # 将子任务重置为未启动状态，等待有节点在线时再分配
+                for subtask in running_subtasks:
+                    subtask.status = 0  # 未启动
+                    subtask.mqtt_node_id = None  # 清除节点关联
+                    subtask.started_at = None
+                    subtask.error_message = f"节点 {mac_address} 离线，等待重新分配"
+                    
+                    # 同时更新关联的主任务active_subtasks计数
+                    task = subtask.task
+                    if task and task.active_subtasks > 0:
+                        task.active_subtasks -= 1
                 
-                # 同时更新关联的主任务active_subtasks计数
-                task = subtask.task
-                if task and task.active_subtasks > 0:
-                    task.active_subtasks -= 1
+                db.commit()
+                logger.info(f"已重置 {len(running_subtasks)} 个子任务为未启动状态")
+                return
+            
+            # 开始任务转移
+            transferred_count = 0
+            failed_count = 0
+            
+            for subtask in running_subtasks:
+                try:
+                    # 获取子任务关联的主任务信息
+                    task = subtask.task
+                    if not task:
+                        logger.warning(f"子任务 {subtask.id} 没有关联的主任务，跳过转移")
+                        continue
+                    
+                    # 获取子任务使用的模型和流信息
+                    model = subtask.model
+                    stream = subtask.stream
+                    
+                    if not model or not stream:
+                        logger.warning(f"子任务 {subtask.id} 缺少模型或流信息，跳过转移")
+                        continue
+                    
+                    # 使用轮询方式选择节点
+                    target_node = available_nodes[transferred_count % len(available_nodes)]
+                    
+                    logger.info(f"准备将子任务 {subtask.id} 从节点 {mac_address} 转移到节点 {target_node.mac_address}")
+                    
+                    # 构建任务配置
+                    task_config = {
+                        "source": {
+                            "type": "stream",
+                            "urls": [stream.url]
+                        },
+                        "config": {
+                            "model_code": model.code,
+                            "analysis_type": subtask.analysis_type,
+                            **(subtask.config or {})
+                        },
+                        "result_config": {
+                            "save_result": task.save_result,
+                            "callback_urls": subtask.callback_url.split(",") if subtask.callback_url else [],
+                            "callback_url": subtask.callback_url,
+                            "enable_callback": subtask.enable_callback
+                        }
+                    }
+                    
+                    # 发送任务消息到新节点
+                    success = await self.send_task_to_node(
+                        mac_address=target_node.mac_address,
+                        task_id=str(task.id),
+                        subtask_id=str(subtask.id),
+                        config=task_config,
+                        wait_for_response=False
+                    )
+                    
+                    if isinstance(success, tuple):
+                        success = success[0]  # 如果返回元组，取第一个元素作为成功标志
+                    
+                    if success:
+                        # 更新子任务信息
+                        subtask.mqtt_node_id = target_node.id
+                        subtask.status = 1  # 保持运行中状态
+                        subtask.error_message = f"已从节点 {mac_address} 自动转移到节点 {target_node.mac_address}"
+                        
+                        # 更新目标节点任务计数
+                        target_node.task_count += 1
+                        target_node.stream_task_count += 1
+                        
+                        transferred_count += 1
+                        logger.info(f"成功将子任务 {subtask.id} 转移到节点 {target_node.mac_address}")
+                    else:
+                        # 转移失败，重置子任务状态
+                        subtask.status = 0  # 未启动
+                        subtask.mqtt_node_id = None
+                        subtask.started_at = None
+                        subtask.error_message = f"从节点 {mac_address} 转移失败，等待重新分配"
+                        
+                        # 更新主任务active_subtasks计数
+                        if task.active_subtasks > 0:
+                            task.active_subtasks -= 1
+                        
+                        failed_count += 1
+                
+                except Exception as e:
+                    logger.error(f"转移子任务 {subtask.id} 时出错: {e}")
+                    logger.error(traceback.format_exc())
+                    
+                    # 转移出错，重置子任务状态
+                    subtask.status = 0  # 未启动
+                    subtask.mqtt_node_id = None
+                    subtask.started_at = None
+                    subtask.error_message = f"从节点 {mac_address} 转移出错: {str(e)}"
+                    
+                    # 更新主任务active_subtasks计数
+                    task = subtask.task
+                    if task and task.active_subtasks > 0:
+                        task.active_subtasks -= 1
+                    
+                    failed_count += 1
+            
+            # 更新离线节点的任务计数
+            node.task_count = max(0, node.task_count - (transferred_count + failed_count))
+            node.stream_task_count = max(0, node.stream_task_count - (transferred_count + failed_count))
             
             db.commit()
-            logger.info(f"节点 {mac_address} 的任务已重置为未启动状态")
+            logger.info(f"节点 {mac_address} 的任务转移完成: 成功={transferred_count}, 失败={failed_count}")
             
         except Exception as e:
-            logger.error(f"处理节点离线失败: {e}")
+            logger.error(f"处理节点离线任务转移失败: {e}")
             logger.error(traceback.format_exc())
     
     def _handle_task_failure(self, payload: Dict[str, Any]):
@@ -743,34 +932,74 @@ class MQTTClient:
                     logger.warning(f"未找到失败的子任务: subtask_id={subtask_id}")
             finally:
                 db.close()
-                
         except Exception as e:
             logger.error(f"处理任务失败情况出错: {e}")
             logger.error(traceback.format_exc())
     
     async def get_available_mqtt_node(self) -> Optional[MQTTNode]:
         """
-        获取可用的MQTT节点 - 简单地按负载选择在线节点
+        获取可用的MQTT节点 - 综合考虑多项指标进行负载均衡
         """
         db = SessionLocal()
         try:
             # 查询所有在线节点
             nodes = db.query(MQTTNode).filter(
                 MQTTNode.status == "online",
-                MQTTNode.task_count < MQTTNode.max_tasks
+                MQTTNode.task_count < MQTTNode.max_tasks,
+                MQTTNode.is_active == True
             ).all()
             
             if not nodes:
                 logger.warning("没有在线或可用的MQTT节点")
                 return None
             
-            # 简单地按任务数排序
-            nodes.sort(key=lambda n: n.task_count)
+            # 使用加权得分系统选择最佳节点
+            best_node = None
+            best_score = float('inf')  # 分数越低越好
             
-            # 返回任务数最少的节点
-            selected_node = nodes[0]
-            logger.info(f"选择节点: ID={selected_node.id}, MAC={selected_node.mac_address}, 任务数={selected_node.task_count}")
-            return selected_node
+            for node in nodes:
+                # 计算相对任务负载（当前任务数/最大任务数）
+                task_load_ratio = node.task_count / node.max_tasks if node.max_tasks > 0 else 1.0
+                
+                # 考虑CPU和内存使用率
+                cpu_weight = 0.3
+                memory_weight = 0.2
+                task_weight = 0.5
+                
+                # 如果节点支持GPU，也考虑GPU使用率
+                gpu_score = 0
+                if node.gpu_usage is not None:
+                    cpu_weight = 0.2
+                    memory_weight = 0.15
+                    task_weight = 0.4
+                    gpu_weight = 0.25
+                    gpu_score = node.gpu_usage * gpu_weight
+                
+                # 计算节点总得分 (值越低越好)
+                score = (
+                    (node.cpu_usage or 0) * cpu_weight + 
+                    (node.memory_usage or 0) * memory_weight + 
+                    task_load_ratio * task_weight +
+                    gpu_score
+                )
+                
+                # 如果这是最佳节点
+                if score < best_score:
+                    best_score = score
+                    best_node = node
+            
+            if best_node:
+                logger.info(f"选择节点: ID={best_node.id}, MAC={best_node.mac_address}, "
+                           f"任务数={best_node.task_count}/{best_node.max_tasks}, "
+                           f"CPU={best_node.cpu_usage}%, MEM={best_node.memory_usage}%, "
+                           f"得分={best_score:.2f}")
+                return best_node
+            else:
+                # 如果加权算法未能找到节点，回退到简单的按任务数排序
+                nodes.sort(key=lambda n: n.task_count)
+                selected_node = nodes[0]
+                logger.info(f"使用备选算法选择节点: ID={selected_node.id}, MAC={selected_node.mac_address}, 任务数={selected_node.task_count}/{selected_node.max_tasks}")
+                return selected_node
         except Exception as e:
             logger.error(f"获取可用MQTT节点失败: {e}")
             logger.error(traceback.format_exc())
@@ -796,7 +1025,7 @@ class MQTTClient:
         if not self.connected:
             logger.error("MQTT客户端未连接")
             return False, {"error": "MQTT客户端未连接"}
-            
+        
         # 生成消息ID和UUID
         message_id = int(time.time())
         message_uuid = str(uuid.uuid4()).replace("-", "")[:16]
@@ -820,42 +1049,134 @@ class MQTTClient:
             }
         }
         
+        # 检查节点是否存在/活跃
+        db = SessionLocal()
+        try:
+            # 检查节点是否存在于数据库中
+            mqtt_node = db.query(MQTTNode).filter(MQTTNode.mac_address == mac_address).first()
+            if not mqtt_node:
+                logger.warning(f"尝试向不存在的节点 {mac_address} 发送任务，检查该节点是否已在系统中注册")
+            elif mqtt_node.status != 'online':
+                logger.warning(f"尝试向离线节点 {mac_address} 发送任务，当前状态: {mqtt_node.status}")
+            elif not mqtt_node.is_active:
+                logger.warning(f"尝试向非活跃节点 {mac_address} 发送任务")
+            else:
+                logger.info(f"节点 {mac_address} 处于在线状态，可接收任务")
+        except Exception as e:
+            logger.error(f"检查节点状态时出错: {e}")
+        finally:
+            db.close()
+        
         # 发布消息
         topic = f"{self.topic_prefix}{mac_address}/request_setting"
-        logger.info(f"向节点 {mac_address} 发送任务: {task_id}/{subtask_id}")
+        logger.info(f"向节点 {mac_address} 发送任务: {task_id}/{subtask_id}，主题: {topic}")
         
-        result = self.client.publish(
-            topic,
-            json.dumps(payload),
-            qos=self.config.get('qos', 2)
-        )
+        # 清除可能存在的旧响应
+        if message_uuid in self.command_responses:
+            del self.command_responses[message_uuid]
         
-        if result.rc != 0:
-            logger.error(f"发布任务消息失败: {result.rc}")
-            return False, {"error": f"发布消息失败: {result.rc}"}
+        # 发布前记录一下所有当前的响应，便于诊断
+        logger.debug(f"当前响应缓存中有 {len(self.command_responses)} 个条目")
+        
+        # 预先创建响应对象，用于存储可能来自其他主题的响应
+        self.command_responses[message_uuid] = {
+            'status': 'pending',
+            'data': {
+                'cmd_type': 'start_task',
+                'task_id': task_id,
+                'subtask_id': subtask_id,
+                'mac_address': mac_address
+            },
+            'timestamp': int(time.time())
+        }
+        
+        # 添加重试逻辑
+        max_retries = 3
+        for retry in range(max_retries):
+            result = self.client.publish(
+                topic,
+                json.dumps(payload),
+                qos=self.config.get('qos', 2)
+            )
             
-        # 如果不等待响应，直接返回成功
-        if not wait_for_response:
-            logger.info(f"已发送任务消息到节点 {mac_address}，不等待响应")
-            return True, {"success": True, "message": "消息已发送，不等待响应"}
+            if result.rc != 0:
+                logger.error(f"发布任务消息失败: {result.rc}，尝试重试 {retry+1}/{max_retries}")
+                if retry == max_retries - 1:
+                    return False, {"error": f"发布消息失败: {result.rc}，已尝试 {max_retries} 次"}
+                await asyncio.sleep(1)  # 等待1秒后重试
+                continue
             
-        # 等待响应
-        for _ in range(30):  # 最多等待3秒
-            if message_uuid in self.command_responses:
-                response = self.command_responses[message_uuid]
-                status = response.get("status", "error")
-                
-                if status == "success":
-                    logger.info(f"节点 {mac_address} 成功接受任务: {task_id}/{subtask_id}")
-                    return True, response
-                else:
-                    logger.warning(f"节点 {mac_address} 拒绝任务: {task_id}/{subtask_id}, 原因: {response.get('data', {}).get('message')}")
-                    return False, response
+            logger.info(f"消息已发布到主题 {topic}，消息ID: {message_id}, UUID: {message_uuid}")
+            
+            # 如果不等待响应，直接返回成功
+            if not wait_for_response:
+                logger.info(f"已发送任务消息到节点 {mac_address}，不等待响应")
+                # 即使不等待响应，也先尝试检查结果主题中是否已有相关消息
+                result_key = f"{task_id}_{subtask_id}"
+                if result_key in self.task_results:
+                    logger.info(f"发现任务结果缓存中已有相关消息: {result_key}")
+                    return True, {"success": True, "message": "任务已开始执行，发现结果缓存"}
+                return True, {"success": True, "message": "消息已发送，不等待响应"}
+            
+            # 等待响应，增加等待时间
+            wait_time = 10  # 增加到10秒
+            wait_steps = wait_time * 10  # 每步0.1秒，共wait_time秒
+            
+            for step in range(wait_steps):
+                # 首先检查命令响应
+                if message_uuid in self.command_responses:
+                    response = self.command_responses[message_uuid]
+                    status = response.get("status", "pending")
                     
-            await asyncio.sleep(0.1)
+                    if status == "success":
+                        logger.info(f"节点 {mac_address} 成功接受任务: {task_id}/{subtask_id}")
+                        return True, response
+                    elif status != "pending":  # 如果状态已更新且不是成功
+                        error_msg = response.get('data', {}).get('message', '未知错误')
+                        logger.warning(f"节点 {mac_address} 拒绝任务: {task_id}/{subtask_id}, 原因: {error_msg}")
+                        return False, response
+                
+                # 其次，检查结果消息
+                result_key = f"{task_id}_{subtask_id}"
+                if result_key in self.task_results:
+                    logger.info(f"通过结果消息确认任务已启动: {task_id}/{subtask_id}")
+                    # 更新命令响应状态
+                    self.command_responses[message_uuid]['status'] = 'success'
+                    return True, {"success": True, "message": "任务已开始执行，发现结果消息"}
+                
+                # 每秒打印一次等待状态
+                if step % 10 == 0:
+                    logger.debug(f"等待节点 {mac_address} 响应中... {step//10}/{wait_time}秒")
+                
+                await asyncio.sleep(0.1)
             
-        logger.warning(f"等待节点 {mac_address} 响应超时")
-        return False, {"error": "节点响应超时"}
+            # 如果最后一次重试也超时
+            if retry == max_retries - 1:
+                logger.warning(f"等待节点 {mac_address} 响应超时，已等待 {wait_time} 秒")
+                # 再次检查节点状态
+                try:
+                    db = SessionLocal()
+                    mqtt_node = db.query(MQTTNode).filter(MQTTNode.mac_address == mac_address).first()
+                    if mqtt_node:
+                        logger.info(f"节点 {mac_address} 当前状态: {mqtt_node.status}, 最后活跃时间: {mqtt_node.last_active}")
+                    db.close()
+                except Exception as e:
+                    logger.error(f"检查节点状态时出错: {e}")
+                
+                # 最后一次尝试，检查是否有结果消息
+                result_key = f"{task_id}_{subtask_id}"
+                if result_key in self.task_results:
+                    logger.info(f"超时后通过结果消息确认任务已启动: {task_id}/{subtask_id}")
+                    # 更新命令响应状态
+                    self.command_responses[message_uuid]['status'] = 'success'
+                    return True, {"success": True, "message": "任务已开始执行，发现结果消息"}
+                
+                return False, {"error": "节点响应超时"}
+            
+            logger.warning(f"等待节点 {mac_address} 响应超时，重试 {retry+1}/{max_retries}")
+        
+        logger.error(f"向节点 {mac_address} 发送任务失败，已尝试 {max_retries} 次")
+        return False, {"error": "节点响应超时，已达到最大重试次数"}
     
     def register_handler(self, topic_pattern: str, handler: Callable):
         """
@@ -868,7 +1189,7 @@ class MQTTClient:
         if topic_pattern not in self.topic_handlers:
             self.topic_handlers[topic_pattern] = []
         self.topic_handlers[topic_pattern].append(handler)
-        
+    
     def unregister_handler(self, topic_pattern: str, handler: Callable) -> bool:
         """
         取消注册主题处理函数

@@ -8,8 +8,9 @@ import httpx
 import asyncio
 from sqlalchemy import and_
 from sqlalchemy.orm import Session, joinedload
+import traceback
 
-from models.database import Node, Task, SubTask
+from models.database import Node, Task, SubTask, MQTTNode, Stream
 from models.responses import NodeCreate, NodeUpdate
 from shared.utils.logger import setup_logger
 
@@ -588,8 +589,13 @@ class NodeCRUD:
         
         算法：
         1. 过滤出在线的分析服务节点
-        2. 计算每个节点的负载百分比（当前任务数/最大任务数）
-        3. 按权重和负载百分比排序，返回负载最低且权重最高的节点
+        2. 综合考虑多项指标：
+           - CPU使用率
+           - 内存使用率
+           - GPU使用率（如果有）
+           - 任务负载（当前任务/最大任务）
+           - 节点权重
+        3. 计算综合得分，返回得分最高的节点
         
         参数:
         - db: 数据库会话
@@ -609,37 +615,78 @@ class NodeCRUD:
         if not nodes:
             return None
             
-        # 计算每个节点的负载情况
+        # 计算每个节点的综合得分
         available_nodes = []
         for node in nodes:
+            # 计算当前任务总数
             total_tasks = node.image_task_count + node.video_task_count + node.stream_task_count
-            # 如果节点已满，跳过
+            
+            # 如果节点任务已满，跳过
             if total_tasks >= node.max_tasks:
                 continue
+            
+            # 计算任务负载比例
+            task_load_ratio = total_tasks / node.max_tasks if node.max_tasks > 0 else 1.0
+            
+            # 资源权重配置
+            cpu_weight = 0.25  # CPU权重
+            memory_weight = 0.15  # 内存权重
+            task_weight = 0.40  # 任务负载权重
+            node_weight = 0.20  # 节点权重因子
+            
+            # 计算基础资源得分（值越低越好）
+            resource_score = (
+                (node.cpu_usage or 0) * cpu_weight + 
+                (node.memory_usage or 0) * memory_weight
+            )
+            
+            # 如果是GPU节点，考虑GPU使用率
+            if node.compute_type == "gpu" and node.gpu_memory_usage is not None:
+                # 为GPU节点调整权重
+                gpu_weight = 0.25
+                cpu_weight = 0.15
+                memory_weight = 0.10
+                task_weight = 0.30 
+                node_weight = 0.20
                 
-            # 计算负载百分比
-            load_percentage = total_tasks / node.max_tasks if node.max_tasks > 0 else 1.0
+                # 添加GPU得分
+                resource_score += node.gpu_memory_usage * gpu_weight
             
-            # 计算加权分数（权重越高，负载越低，分数越高）
-            # 权重因子在0.1-1之间，负载因子在0-1之间
-            weight_factor = min(1.0, max(0.1, node.weight / 10))  # 将权重归一化到0.1-1
-            load_factor = 1.0 - load_percentage
+            # 任务负载得分
+            task_score = task_load_ratio * task_weight
             
-            # 最终分数
-            score = weight_factor * load_factor
+            # 节点权重因子（权重越高分数越低，表示优先级越高）
+            weight_factor = 1.0 - (min(1.0, max(0.1, node.weight / 10)) * node_weight)
+            
+            # 综合得分 (值越低越好)
+            final_score = resource_score + task_score + weight_factor
+            
+            # 剩余可用槽位数
+            free_slots = node.max_tasks - total_tasks
             
             available_nodes.append({
                 "node": node,
-                "score": score,
+                "score": final_score,
                 "total_tasks": total_tasks,
-                "free_slots": node.max_tasks - total_tasks
+                "free_slots": free_slots,
+                "cpu_usage": node.cpu_usage,
+                "memory_usage": node.memory_usage,
+                "gpu_usage": node.gpu_memory_usage
             })
         
         if not available_nodes:
             return None
             
-        # 按分数降序排序
-        available_nodes.sort(key=lambda x: x["score"], reverse=True)
+        # 按得分升序排序（分数越低越好）
+        available_nodes.sort(key=lambda x: x["score"])
+        
+        # 记录选择的节点信息
+        best_node = available_nodes[0]["node"]
+        best_score = available_nodes[0]["score"]
+        logger.info(f"选择节点ID={best_node.id}, IP={best_node.ip}:{best_node.port}, "
+                   f"任务={available_nodes[0]['total_tasks']}/{best_node.max_tasks}, "
+                   f"CPU={best_node.cpu_usage}%, MEM={best_node.memory_usage}%, "
+                   f"GPU={best_node.gpu_memory_usage}%, 得分={best_score:.2f}")
         
         # 返回得分最高的节点
-        return available_nodes[0]["node"]
+        return best_node

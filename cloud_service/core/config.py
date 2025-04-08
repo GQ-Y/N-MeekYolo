@@ -47,7 +47,7 @@ class CloudServiceConfig(BaseSettings):
     class SecurityConfig(BaseModel):
         allowed_hosts: List[str] = ["*"]
         api_key_header: str = "X-API-Key"
-        rate_limit: str = "5/minute"
+        rate_limit: str = "200/minute"
         ssl_enabled: bool = False
         ssl_cert_file: Optional[str] = None
         ssl_key_file: Optional[str] = None
