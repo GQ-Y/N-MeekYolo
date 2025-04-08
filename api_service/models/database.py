@@ -231,6 +231,7 @@ class SubTask(Base):
     enable_callback = Column(Boolean, default=False, nullable=False, comment="是否启用回调")
     callback_url = Column(String(255), nullable=True, comment="回调URL")
     node_id = Column(Integer, ForeignKey('nodes.id', ondelete='SET NULL'), nullable=True, comment="节点ID")
+    mqtt_node_id = Column(Integer, ForeignKey('mqtt_nodes.id', ondelete='SET NULL'), nullable=True, comment="MQTT节点ID")
     roi_type = Column(Integer, default=0, nullable=False, comment="ROI类型: 0-无ROI, 1-矩形, 2-多边形, 3-线段")
     analysis_type = Column(String(50), default="detection", nullable=False, comment="分析类型: detection, tracking, counting等")
     
@@ -244,8 +245,9 @@ class SubTask(Base):
         Index('idx_subtask_task_id', 'task_id'),
         Index('idx_subtask_stream_id', 'stream_id'),
         Index('idx_subtask_model_id', 'model_id'),
-        Index('idx_subtask_status', 'status'),
         Index('idx_subtask_node_id', 'node_id'),
+        Index('idx_subtask_mqtt_node_id', 'mqtt_node_id'),
+        Index('idx_subtask_status', 'status'),
     )
 
 class Node(Base):
@@ -296,6 +298,7 @@ class MQTTNode(Base):
     
     id = Column(Integer, primary_key=True, autoincrement=True, comment="节点ID")
     node_id = Column(String(100), nullable=False, unique=True, comment="MQTT节点ID")
+    mac_address = Column(String(50), nullable=False, unique=True, index=True, comment="节点MAC地址")
     client_id = Column(String(100), nullable=False, comment="MQTT客户端ID")
     service_type = Column(String(50), nullable=False, comment="服务类型")
     status = Column(String(20), nullable=False, default="offline", comment="节点状态")
@@ -318,5 +321,15 @@ class MQTTNode(Base):
     node_metadata = Column(JSON, nullable=True, comment="元数据")
     remark = Column(String(255), nullable=True, comment="备注")
     
+    # 关联子任务
+    sub_tasks = relationship('SubTask', backref='mqtt_node', foreign_keys='SubTask.mqtt_node_id')
+    
+    __table_args__ = (
+        Index('idx_mqttnode_node_id', 'node_id'),
+        Index('idx_mqttnode_mac_address', 'mac_address'),
+        Index('idx_mqttnode_status', 'status'),
+        Index('idx_mqttnode_is_active', 'is_active'),
+    )
+    
     def __repr__(self):
-        return f"<MQTTNode(id={self.id}, node_id='{self.node_id}', status='{self.status}')>"
+        return f"<MQTTNode {self.node_id} - {self.mac_address}>"

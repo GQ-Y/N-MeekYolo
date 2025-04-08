@@ -78,8 +78,8 @@ class NodeHealthChecker:
         """
         执行MQTT节点健康检查
         
-        在MQTT模式下，无需主动发起HTTP请求检查节点健康，
-        而是依赖MQTT的连接状态和节点发布的状态消息。
+        在MQTT模式下依赖MQTT的连接状态和节点发布的状态消息,
+        但增加了基于最后活跃时间的超时离线检测和任务重新分配机制
         """
         db = SessionLocal()
         try:
@@ -112,7 +112,7 @@ class NodeHealthChecker:
             updated_nodes = []
             
             for node in nodes:
-                logger.info(f"------- 检查MQTT节点 {node.id} ({node.node_id}) -------")
+                logger.info(f"------- 检查MQTT节点 {node.id} ({node.mac_address}) -------")
                 logger.info(f"节点 {node.id} 原状态: {node.status}")
                 
                 # 如果节点处于在线状态，检查最后活跃时间是否超时
@@ -121,7 +121,7 @@ class NodeHealthChecker:
                     time_diff = (now - node.last_active).total_seconds()
                     
                     if time_diff > timeout_seconds:
-                        logger.warning(f"MQTT节点 {node.id} ({node.node_id}) 超时 {time_diff:.0f}秒未活跃，标记为离线")
+                        logger.warning(f"MQTT节点 {node.id} ({node.mac_address}) 超时 {time_diff:.0f}秒未活跃，标记为离线")
                         node.status = "offline"
                         updated_nodes.append(node)
                 
@@ -133,10 +133,14 @@ class NodeHealthChecker:
                 logger.info(f"更新 {len(updated_nodes)} 个超时离线的MQTT节点状态")
                 db.commit()
                 logger.info("节点状态更新成功")
+                
+                # 处理离线节点的任务重新分配
+                for node in updated_nodes:
+                    await self._handle_mqtt_node_offline(db, node)
             else:
                 logger.info("没有超时离线的MQTT节点")
             
-            # 处理节点分配
+            # 处理待分配的任务
             await self._handle_mqtt_task_allocation(db)
             
             logger.info("所有MQTT节点状态正常")
@@ -149,10 +153,48 @@ class NodeHealthChecker:
         finally:
             db.close()
 
+    async def _handle_mqtt_node_offline(self, db: Session, node: MQTTNode):
+        """处理MQTT节点离线情况，重置该节点上运行的任务"""
+        try:
+            logger.info(f"处理离线MQTT节点 {node.id} ({node.mac_address}) 的任务...")
+            
+            # 查找该节点上运行的子任务
+            running_subtasks = db.query(SubTask).filter(
+                SubTask.mqtt_node_id == node.id,
+                SubTask.status == 1  # 运行中
+            ).all()
+            
+            if not running_subtasks:
+                logger.info(f"节点 {node.mac_address} 没有运行中的子任务")
+                return
+                
+            logger.info(f"节点 {node.mac_address} 有 {len(running_subtasks)} 个运行中的子任务需要重置")
+            
+            # 重置节点上的子任务
+            for subtask in running_subtasks:
+                subtask.status = 0  # 未启动
+                subtask.mqtt_node_id = None  # 清除节点关联
+                subtask.started_at = None
+                subtask.error_message = f"节点离线，等待重新分配"
+                
+                # 更新关联的主任务active_subtasks计数
+                task = subtask.task
+                if task and task.active_subtasks > 0:
+                    task.active_subtasks -= 1
+            
+            db.commit()
+            logger.info(f"节点 {node.mac_address} 的所有任务已重置")
+            
+        except Exception as e:
+            logger.error(f"处理MQTT节点离线任务重置失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
     async def _handle_mqtt_task_allocation(self, db: Session):
-        """在MQTT模式下处理任务分配"""
+        """在MQTT模式下处理未分配任务的重新分配"""
         try:
             logger.info("处理MQTT模式下的任务分配...")
+            
             # 获取所有活跃的MQTT节点
             active_nodes = db.query(MQTTNode).filter(
                 MQTTNode.status == "online",
@@ -163,18 +205,122 @@ class NodeHealthChecker:
                 logger.warning("没有在线的MQTT节点，无法分配任务")
                 return
             
-            logger.info(f"发现 {len(active_nodes)} 个在线MQTT节点")
+            # 过滤出可用节点（任务数小于最大任务数）
+            available_nodes = [n for n in active_nodes if n.task_count < n.max_tasks]
+            
+            if not available_nodes:
+                logger.warning("没有可用的MQTT节点（所有节点都已达到最大任务数）")
+                return
+                
+            logger.info(f"发现 {len(available_nodes)} 个可用的MQTT节点")
             
             # 获取所有未启动状态的子任务
-            # 这里可以根据实际情况实现任务分配逻辑
-            # 由于MQTT模式下通常使用发布/订阅模式，任务分配方式可能与HTTP模式不同
+            unstarted_subtasks = db.query(SubTask).filter(
+                SubTask.status == 0,  # 未启动
+                SubTask.mqtt_node_id == None  # 未分配MQTT节点
+            ).join(
+                Task, SubTask.task_id == Task.id
+            ).filter(
+                Task.status == 1  # 主任务处于运行中状态
+            ).order_by(
+                SubTask.task_id,
+                SubTask.id
+            ).all()
             
-            # 示例:
-            # 1. 获取所有待分配的任务
-            # 2. 按照节点的负载均衡策略选择合适的节点
-            # 3. 发布任务到MQTT，等待节点认领
+            if not unstarted_subtasks:
+                logger.info("没有待分配的子任务")
+                return
+                
+            logger.info(f"发现 {len(unstarted_subtasks)} 个待分配的子任务")
             
-            logger.info("MQTT模式下暂不实现自动任务分配，等待节点通过MQTT主动认领任务")
+            # 为任务分配节点
+            from services.analysis_client import AnalysisClient
+            from core.config import settings
+            
+            # 初始化分析客户端
+            analysis_client = AnalysisClient(settings.config)
+            
+            tasks_started = 0
+            
+            for subtask in unstarted_subtasks:
+                try:
+                    # 按负载选择节点（任务数最少的节点）
+                    available_nodes.sort(key=lambda n: n.task_count)
+                    node = available_nodes[0]
+                    
+                    logger.info(f"为子任务 {subtask.id} 分配节点 {node.mac_address}")
+                    
+                    # 构建任务配置
+                    task_config = {
+                        "source": {},
+                        "config": subtask.config or {},
+                        "save_result": subtask.task.save_result if subtask.task else False
+                    }
+                    
+                    # 根据分析类型设置源数据
+                    if subtask.stream_id:
+                        # 视频流任务
+                        stream = subtask.stream
+                        if stream:
+                            task_config["source"] = {
+                                "type": "stream",
+                                "urls": [stream.url]
+                            }
+                    else:
+                        # 假设是图像任务（从配置中提取）
+                        urls = subtask.config.get("image_urls", []) if subtask.config else []
+                        task_config["source"] = {
+                            "type": "image",
+                            "urls": urls
+                        }
+                    
+                    # 向节点发送任务
+                    success, response = await analysis_client.mqtt_client.send_task_to_node(
+                        mac_address=node.mac_address,
+                        task_id=str(subtask.task_id),
+                        subtask_id=subtask.analysis_task_id or f"{subtask.task_id}-{subtask.id}",
+                        config=task_config
+                    )
+                    
+                    if success:
+                        # 更新子任务状态
+                        subtask.status = 1  # 运行中
+                        subtask.mqtt_node_id = node.id
+                        subtask.started_at = datetime.now()
+                        subtask.error_message = None
+                        
+                        # 更新主任务状态
+                        if subtask.task:
+                            subtask.task.active_subtasks += 1
+                        
+                        # 更新节点任务计数
+                        node.task_count += 1
+                        
+                        tasks_started += 1
+                        logger.info(f"子任务 {subtask.id} 已成功分配到节点 {node.mac_address}")
+                    else:
+                        logger.warning(f"子任务 {subtask.id} 分配失败: {response.get('error', '未知错误')}")
+                        # 标记错误信息，但保持未启动状态
+                        subtask.error_message = f"任务分配失败: {response.get('error', '未知错误')}"
+                    
+                    # 如果节点任务数达到上限，从可用节点列表中移除
+                    if node.task_count >= node.max_tasks:
+                        available_nodes.remove(node)
+                        if not available_nodes:
+                            logger.info("没有更多可用节点，停止分配")
+                            break
+                
+                except Exception as e:
+                    logger.error(f"分配子任务 {subtask.id} 失败: {e}")
+                    subtask.error_message = f"任务分配过程出错: {str(e)}"
+                    import traceback
+                    logger.error(traceback.format_exc())
+            
+            db.commit()
+            logger.info(f"共成功分配 {tasks_started} 个子任务")
+            
+            # 关闭分析客户端
+            await analysis_client.close()
             
         except Exception as e:
             logger.error(f"处理MQTT任务分配出错: {str(e)}")

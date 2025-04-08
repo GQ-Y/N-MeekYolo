@@ -8,6 +8,7 @@ from .mqtt_client import MQTTClient
 from crud.node import NodeCRUD
 from core.database import SessionLocal
 from models.database import Node
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,23 @@ class AnalysisClient:
             # 使用MQTT通信
             logger.info(f"使用MQTT模式发送图片分析请求: task_id={task_id}")
             
+            # 获取可用MQTT节点
+            mqtt_node = await self.mqtt_client.get_available_mqtt_node()
+            if not mqtt_node:
+                return {
+                    "requestId": task_id,
+                    "path": "/api/v1/analyze/image",
+                    "success": False,
+                    "message": "未找到可用的MQTT分析节点",
+                    "code": 500,
+                    "data": None,
+                    "timestamp": int(time.time())
+                }
+            
+            # 生成子任务ID
+            subtask_id = f"{task_id}-1"
+            
+            # 构建任务配置
             task_config = {
                 "source": {
                     "type": "image",
@@ -131,37 +149,80 @@ class AnalysisClient:
                     "model_code": model_code,
                     **(config or {})
                 },
-                "result_config": {
-                    "save_result": save_result,
-                    "callback_urls": callback_urls.split(",") if callback_urls else [],
-                    "enable_callback": enable_callback
-                }
+                "save_result": save_result
             }
             
-            success = self.mqtt_client.publish_task_request(task_id, "image_analysis", task_config)
+            # 向选定的节点发送任务
+            success, response = await self.mqtt_client.send_task_to_node(
+                mac_address=mqtt_node.mac_address,
+                task_id=task_id,
+                subtask_id=subtask_id,
+                config=task_config
+            )
             
-            if success:
+            # 更新数据库中的子任务状态
+            db = SessionLocal()
+            try:
+                # 先创建主任务
+                from crud.task import TaskCRUD
+                task = TaskCRUD.create_task(
+                    db=db,
+                    name=data["task_name"],
+                    save_result=save_result
+                )
+                
+                # 创建子任务并关联MQTT节点
+                from crud.subtask import SubTaskCRUD
+                subtask = SubTaskCRUD.create_subtask(
+                    db=db,
+                    task_id=task.id,
+                    model_id=1,  # 假设默认模型ID为1
+                    stream_id=None,
+                    config=config,
+                    analysis_task_id=subtask_id,
+                    mqtt_node_id=mqtt_node.id if success else None,
+                    status=1 if success else 0  # 成功则状态为运行中，失败则为未启动
+                )
+                
+                if success:
+                    # 更新主任务状态
+                    task.status = 1  # 运行中
+                    task.started_at = datetime.now()
+                    task.active_subtasks = 1
+                    task.total_subtasks = 1
+                    
+                    # 更新MQTT节点任务计数
+                    mqtt_node.task_count += 1
+                    mqtt_node.image_task_count += 1
+                
+                db.commit()
+                
                 return {
                     "requestId": task_id,
                     "path": "/api/v1/analyze/image",
-                    "success": True,
-                    "message": "任务已提交",
-                    "code": 200,
+                    "success": success,
+                    "message": "任务已提交" if success else f"任务提交失败: {response.get('error', '未知错误')}",
+                    "code": 200 if success else 500,
                     "data": {
-                        "task_id": task_id
+                        "task_id": str(task.id),
+                        "subtask_id": subtask.id
                     },
                     "timestamp": int(time.time())
                 }
-            else:
+            except Exception as e:
+                logger.error(f"保存任务到数据库失败: {e}")
+                db.rollback()
                 return {
                     "requestId": task_id,
                     "path": "/api/v1/analyze/image",
                     "success": False,
-                    "message": "MQTT消息发送失败",
+                    "message": f"保存任务到数据库失败: {str(e)}",
                     "code": 500,
                     "data": None,
                     "timestamp": int(time.time())
                 }
+            finally:
+                db.close()
         else:
             # 使用HTTP通信
             logger.info(f"使用HTTP模式发送图片分析请求: task_id={task_id}")

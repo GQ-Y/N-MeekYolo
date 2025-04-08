@@ -41,7 +41,8 @@ def create_task(
         name=task_data.name,
         save_result=task_data.save_result,
         status=0,  # 未启动状态(0)
-        total_subtasks=0  # 初始化为0，稍后根据实际创建的子任务更新
+        total_subtasks=0,  # 初始化为0，稍后根据实际创建的子任务更新
+        active_subtasks=0
     )
     
     db.add(task)
@@ -660,4 +661,48 @@ def normalize_task_status(status: int) -> int:
             return 0
     except (TypeError, ValueError):
         logger.warning(f"无法将状态 {status} 转换为整数，默认规范化为未启动(0)")
-        return 0 
+        return 0
+
+class TaskCRUD:
+    """
+    TaskCRUD 类，作为适配器包装现有函数
+    用于兼容导入 TaskCRUD 的代码
+    """
+    
+    @staticmethod
+    def create_task(db: Session, name: str = None, save_result: bool = False, **kwargs) -> Task:
+        """
+        创建任务的静态方法
+        
+        Args:
+            db: 数据库会话
+            name: 任务名称
+            save_result: 是否保存结果
+            
+        Returns:
+            Task: 创建的任务对象
+        """
+        # 创建一个简单的任务
+        task = Task(
+            name=name,
+            save_result=save_result,
+            status=0,  # 未启动状态
+            total_subtasks=0,
+            active_subtasks=0
+        )
+        
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+        return task
+    
+    @staticmethod
+    def update_task_status(db: Session, task_id: int) -> None:
+        """
+        根据子任务状态更新主任务状态
+        
+        Args:
+            db: 数据库会话
+            task_id: 任务ID
+        """
+        update_task_status_from_subtasks(db, task_id) 
