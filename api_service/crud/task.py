@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 import logging
-from models.database import Task, Stream, Model, Callback, Node, SubTask
+from models.database import Task, Stream, Model, Callback, Node, SubTask, MQTTNode
 from models.requests import TaskCreate, TaskUpdate, TaskStreamConfig, TaskModelConfig
 from crud.node import NodeCRUD
 from sqlalchemy.sql import text
@@ -448,10 +448,12 @@ async def start_task(
                             subtask.status = 0  # 未启动状态，等待客户端响应
                             subtask.error_message = "任务已创建，等待MQTT节点接收"
                             
-                            # 可选择性获取MQTT节点，但不阻止任务创建
-                            mqtt_node = await analysis_client.mqtt_client.get_available_mqtt_node()
-                            mqtt_node_id = mqtt_node.id if mqtt_node else None
-                            subtask.mqtt_node_id = mqtt_node_id
+                            # 记录MQTT节点ID - 简化处理，不直接使用node对象
+                            mqtt_node_id = data.get('mqtt_node_id')
+                            if mqtt_node_id:
+                                # 这里不再需要复杂的会话处理，直接使用ID
+                                subtask.mqtt_node_id = mqtt_node_id
+                                logger.info(f"任务关联到MQTT节点ID={mqtt_node_id}")
                             
                             # 记录成功创建的任务
                             result = (analysis_task_id, None)  # node_id为None，表示使用MQTT

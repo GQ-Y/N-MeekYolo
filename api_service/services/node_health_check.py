@@ -1,20 +1,22 @@
 """节点健康检查服务"""
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import text
 from crud.node import NodeCRUD
-from models.database import Node, MQTTNode
+from models.database import Node, MQTTNode, Task, SubTask
 from core.database import SessionLocal
 from shared.utils.logger import setup_logger
 import httpx
-from models.database import Task, SubTask
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import joinedload
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import yaml
+from crud.task import TaskCRUD, update_task_status_from_subtasks
+import traceback
+import time
 
 # 配置日志
 logger = setup_logger(__name__)
@@ -201,21 +203,14 @@ class NodeHealthChecker:
             # 获取所有活跃的MQTT节点
             active_nodes = db.query(MQTTNode).filter(
                 MQTTNode.status == "online",
-                MQTTNode.is_active == True
-            ).all()
+                MQTTNode.task_count < MQTTNode.max_tasks
+            ).order_by(MQTTNode.task_count).all()  # 直接按任务数排序
             
             if not active_nodes:
                 logger.warning("没有在线的MQTT节点，无法分配任务")
                 return
             
-            # 过滤出可用节点（任务数小于最大任务数）
-            available_nodes = [n for n in active_nodes if n.task_count < n.max_tasks]
-            
-            if not available_nodes:
-                logger.warning("没有可用的MQTT节点（所有节点都已达到最大任务数）")
-                return
-                
-            logger.info(f"发现 {len(available_nodes)} 个可用的MQTT节点")
+            logger.info(f"发现 {len(active_nodes)} 个可用的MQTT节点")
             
             # 获取所有未启动状态的子任务
             unstarted_subtasks = db.query(SubTask).filter(
@@ -233,7 +228,7 @@ class NodeHealthChecker:
             if not unstarted_subtasks:
                 logger.info("没有待分配的子任务")
                 return
-                
+            
             logger.info(f"发现 {len(unstarted_subtasks)} 个待分配的子任务")
             
             # 使用应用级别的MQTT客户端而不是创建新的
@@ -242,44 +237,33 @@ class NodeHealthChecker:
             
             mqtt_client = None
             try:
-                if not hasattr(fastapi_app.state, "analysis_client") or not fastapi_app.state.analysis_client:
-                    logger.warning("无法获取应用程序状态中的analysis_client，尝试创建临时客户端")
-                    # 创建临时客户端
-                    from services.mqtt_client import MQTTClient
-                    from core.config import settings
-                    mqtt_client = MQTTClient(settings.config.get('MQTT', {}))
-                    if mqtt_client:
-                        logger.info("创建临时MQTT客户端")
-                        connected = mqtt_client.connect()
-                        if not connected:
-                            logger.warning("临时MQTT客户端连接失败，但仍会创建任务记录等待连接恢复")
-                else:
+                if hasattr(fastapi_app.state, "analysis_client") and fastapi_app.state.analysis_client:
                     analysis_client = fastapi_app.state.analysis_client
                     mqtt_client = analysis_client.mqtt_client
-                    
-                    # 检查MQTT客户端连接状态（使用mqtt_connected属性）
-                    if not analysis_client.mqtt_connected:
-                        logger.warning("应用程序中的MQTT客户端未连接，尝试重新连接")
-                        # 尝试重新连接
-                        mqtt_client.connect()
-                        # 重新检查连接状态（使用is_connected()方法）
-                        if mqtt_client.is_connected():
-                            logger.info("MQTT客户端重连成功")
-                        else:
-                            logger.warning("MQTT客户端重连失败，但仍会创建任务记录等待连接恢复")
+                
+                if not mqtt_client:
+                    logger.warning("无法获取MQTT客户端，任务分配将延迟到下一次健康检查")
+                    return
             except Exception as e:
                 logger.error(f"获取MQTT客户端时出错: {str(e)}")
                 logger.error(traceback.format_exc())
-                # 继续执行，使用其他方式尝试分配
+                return
             
-            # 无论连接状态如何，都尝试处理任务
             tasks_started = 0
+            
+            # 简单的循环分配：为每个未启动的子任务分配一个节点
+            node_index = 0  # 初始节点索引
             
             for subtask in unstarted_subtasks:
                 try:
-                    # 按负载选择节点（任务数最少的节点）
-                    available_nodes.sort(key=lambda n: n.task_count)
-                    node = available_nodes[0]
+                    # 检查是否还有可用节点
+                    if not active_nodes:
+                        logger.info("没有更多可用节点，停止分配")
+                        break
+                    
+                    # 选择下一个节点 (简单的循环分配)
+                    node = active_nodes[node_index % len(active_nodes)]
+                    node_index += 1
                     
                     logger.info(f"为子任务 {subtask.id} 分配MQTT节点 {node.mac_address}")
                     
@@ -307,73 +291,55 @@ class NodeHealthChecker:
                             "urls": urls
                         }
                     
-                    # 向节点发送任务
-                    success = False
-                    response = {"error": "MQTT客户端未初始化"}
+                    # 如果任务ID不存在，使用组合ID
+                    if not subtask.analysis_task_id:
+                        subtask.analysis_task_id = f"{subtask.task_id}-{subtask.id}"
+                        logger.info(f"为子任务 {subtask.id} 生成分析任务ID: {subtask.analysis_task_id}")
                     
-                    if mqtt_client:
-                        try:
-                            # 如果任务ID不存在，使用组合ID
-                            if not subtask.analysis_task_id:
-                                subtask.analysis_task_id = f"{subtask.task_id}-{subtask.id}"
-                                logger.info(f"为子任务 {subtask.id} 生成分析任务ID: {subtask.analysis_task_id}")
-                                
-                            # 记录任务关联信息，但状态保持为未启动(0)
-                            subtask.mqtt_node_id = node.id
-                            subtask.node_id = None  # 显式清除HTTP节点ID
-                            subtask.error_message = "任务已创建，等待MQTT节点接收"
-                            
-                            # 提前更新数据库，确保任务记录创建
-                            db.flush()
-                            
-                            # 发送任务到节点，不等待响应
-                            await mqtt_client.send_task_to_node(
-                                mac_address=node.mac_address,
-                                task_id=str(subtask.task_id),
-                                subtask_id=subtask.analysis_task_id,
-                                config=task_config,
-                                wait_for_response=False
-                            )
-                            
-                            # 记录任务已发送，但不立即更改状态
-                            success = True
-                            logger.info(f"子任务 {subtask.id} 已发送到MQTT节点 {node.mac_address}，等待节点响应")
-                            
-                            # 更新节点任务计数（预分配）
-                            node.task_count += 1
-                            tasks_started += 1
-                            
-                        except Exception as e:
-                            logger.error(f"发送任务到节点时出错: {e}")
-                            success = False
-                            response = {"error": f"发送任务异常: {str(e)}"}
+                    # 重要：更新节点关联 - 使用当前数据库会话中的节点ID
+                    subtask.mqtt_node_id = node.id  # 这里node已经在当前会话中
+                    subtask.node_id = None  # 显式清除HTTP节点ID
+                    subtask.error_message = "任务已创建，等待MQTT节点接收"
                     
-                    if not success:
-                        logger.warning(f"子任务 {subtask.id} 分配失败: {response.get('error', '未知错误')}")
-                        # 标记错误信息，但保持未启动状态
-                        subtask.error_message = f"任务分配失败: {response.get('error', '未知错误')}"
+                    # 提前更新数据库，确保任务记录创建
+                    db.flush()
                     
-                    # 如果节点任务数达到上限，从可用节点列表中移除
-                    if node.task_count >= node.max_tasks:
-                        available_nodes.remove(node)
-                        if not available_nodes:
-                            logger.info("没有更多可用节点，停止分配")
-                            break
+                    # 向节点发送任务，不等待响应
+                    try:
+                        await mqtt_client.send_task_to_node(
+                            mac_address=node.mac_address,
+                            task_id=str(subtask.task_id),
+                            subtask_id=subtask.analysis_task_id,
+                            config=task_config,
+                            wait_for_response=False
+                        )
+                        
+                        # 更新节点任务计数
+                        node.task_count += 1
+                        tasks_started += 1
+                        
+                        logger.info(f"子任务 {subtask.id} 已发送到MQTT节点 {node.mac_address}，等待节点响应")
+                        
+                        # 如果节点任务数达到上限，从可用节点列表中移除
+                        if node.task_count >= node.max_tasks:
+                            active_nodes.remove(node)
+                            logger.info(f"节点 {node.mac_address} 已达到最大任务数，从可用列表中移除")
+                    
+                    except Exception as e:
+                        logger.error(f"发送任务到节点时出错: {e}")
+                        subtask.error_message = f"发送任务异常: {str(e)}"
+                        logger.error(traceback.format_exc())
                 
                 except Exception as e:
                     logger.error(f"分配子任务 {subtask.id} 失败: {e}")
                     subtask.error_message = f"任务分配过程出错: {str(e)}"
-                    import traceback
                     logger.error(traceback.format_exc())
             
             db.commit()
             logger.info(f"共成功分配 {tasks_started} 个子任务到MQTT节点")
             
-            # 不关闭MQTT客户端，因为它是应用级别的
-            
         except Exception as e:
             logger.error(f"处理MQTT任务分配出错: {str(e)}")
-            import traceback
             logger.error(traceback.format_exc())
 
     async def check_nodes_health(self):
