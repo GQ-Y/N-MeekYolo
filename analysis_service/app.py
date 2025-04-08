@@ -197,10 +197,10 @@ async def startup_event():
     show_service_banner("analysis_service")
     logger.info("Starting Analysis Service...")
     
-    if settings.DEBUG:
+    if settings.DEBUG.enabled:
         logger.info("分析服务启动...")
         logger.info(f"环境: {settings.ENVIRONMENT}")
-        logger.info(f"调试模式: {settings.DEBUG}")
+        logger.info(f"调试模式: {settings.DEBUG.enabled}")
         logger.info(f"版本: {settings.VERSION}")
         logger.info(f"注册的路由: {[route.path for route in app.routes]}")
     
@@ -209,9 +209,32 @@ async def startup_event():
         logger.info("使用MQTT通信模式，正在初始化MQTT客户端...")
         try:
             from services.mqtt_client import get_mqtt_client
+            from services.analyzer import create_analyzer_service
+            
+            # 记录MQTT配置信息
+            mqtt_config = {
+                "broker_host": settings.MQTT.broker_host,
+                "broker_port": settings.MQTT.broker_port,
+                "username": settings.MQTT.username,
+                "password": "******" if settings.MQTT.password else None,
+                "topic_prefix": settings.MQTT.topic_prefix
+            }
+            logger.info(f"MQTT配置: {mqtt_config}")
+            
+            # 使用工厂函数初始化分析服务
+            analyzer_service = create_analyzer_service("mqtt")
+            app.state.analyzer_service = analyzer_service
+            
+            # 再次获取MQTT客户端，确保是同一个实例
             mqtt_client = get_mqtt_client()
             if mqtt_client.start():
                 logger.info("MQTT客户端启动成功")
+                
+                # 打印订阅的主题信息
+                logger.info(f"MQTT客户端节点ID: {mqtt_client.node_id}")
+                logger.info(f"MQTT客户端MAC地址: {mqtt_client.mac_address}")
+                request_setting_topic = f"{mqtt_client.topic_prefix}{mqtt_client.node_id}/request_setting"
+                logger.info(f"订阅的请求主题: {request_setting_topic}")
             else:
                 logger.error("MQTT客户端启动失败")
         except Exception as e:

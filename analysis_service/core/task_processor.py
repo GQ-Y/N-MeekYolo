@@ -1,503 +1,661 @@
 """
 任务处理器
-负责执行分析任务并处理结果
+处理分析任务，包括图像分析、视频分析和流分析
 """
-import asyncio
-import json
-import httpx
 import os
-from typing import Optional, Dict, Any, Set
-import logging
-from datetime import datetime, timedelta
-from analysis_service.core.task_queue import TaskQueue, TaskStatus
-from analysis_service.core.detector import YOLODetector
-from analysis_service.core.config import settings
-import shutil
-from concurrent.futures import ThreadPoolExecutor
+import cv2
+import time
+import uuid
+import base64
+import asyncio
+import threading
+from typing import Dict, Any, List, Optional, Callable, Union
 
-logger = logging.getLogger(__name__)
+from core.task_manager import TaskManager
+from core.detector import YOLODetector
+from shared.utils.logger import setup_logger
+from core.config import settings
+
+logger = setup_logger(__name__)
 
 class TaskProcessor:
-    """任务处理器"""
+    """任务处理器，处理分析任务"""
+    
     def __init__(self):
-        self.task_queue = TaskQueue()
-        self.detector = YOLODetector()
-        self.is_running = False
-        self.results_dir = settings.STORAGE.results_dir
+        """初始化任务处理器"""
+        self.task_manager = TaskManager.get_instance()
+        self.detectors = {}  # 存储已加载的检测器
+        self.active_tasks = {}  # 存储活动任务的线程或协程
         
-        # 并发控制
-        self.max_concurrent_tasks = settings.TASK_QUEUE.max_concurrent
-        self.running_tasks: Set[str] = set()
-        self.task_semaphore = asyncio.Semaphore(self.max_concurrent_tasks)
+        logger.info("任务处理器已初始化")
         
-        # CPU密集型任务线程池
-        self.thread_pool = ThreadPoolExecutor(
-            max_workers=settings.TASK_QUEUE.max_workers,
-            thread_name_prefix="TaskWorker"
-        )
+    def get_detector(self, model_code: str) -> YOLODetector:
+        """
+        获取或创建检测器
         
-        # 确保结果目录存在
-        os.makedirs(self.results_dir, exist_ok=True)
-        
-    async def start(self):
-        """启动处理器"""
-        if self.is_running:
-            return
+        Args:
+            model_code: 模型代码
             
-        self.is_running = True
-        logger.info(f"任务处理器启动，最大并发数: {self.max_concurrent_tasks}")
-        
-        # 启动任务处理循环
-        asyncio.create_task(self._process_loop())
-        # 启动清理任务
-        asyncio.create_task(self.task_queue.start_cleanup_task())
-        # 启动监控任务
-        asyncio.create_task(self._monitor_tasks())
-        
-    async def stop(self):
-        """停止处理器"""
-        self.is_running = False
-        logger.info("任务处理器停止")
-        
-        # 等待所有运行中的任务完成
-        if self.running_tasks:
-            logger.info(f"等待 {len(self.running_tasks)} 个运行中的任务完成")
+        Returns:
+            YOLODetector: 检测器实例
+        """
+        if model_code not in self.detectors:
             try:
-                await asyncio.wait_for(self._wait_running_tasks(), timeout=30)
-            except asyncio.TimeoutError:
-                logger.warning("等待任务完成超时")
-        
-        # 关闭线程池
-        self.thread_pool.shutdown(wait=True)
-        
-        # 取消所有运行中的任务
-        running_tasks = await self.task_queue.get_running_tasks()
-        for task_id in running_tasks:
-            await self.task_queue.cancel_task(task_id, "处理器停止")
-            
-    async def _wait_running_tasks(self):
-        """等待所有运行中的任务完成"""
-        while self.running_tasks:
-            await asyncio.sleep(1)
-        
-    async def _process_loop(self):
-        """任务处理循环"""
-        while self.is_running:
-            try:
-                # 检查是否可以接受新任务
-                if len(self.running_tasks) >= self.max_concurrent_tasks:
-                    await asyncio.sleep(1)
-                    continue
-                    
-                # 获取下一个任务
-                task_data = await self.task_queue.get_next_task()
-                if not task_data:
-                    await asyncio.sleep(1)
-                    continue
-                    
-                # 使用信号量控制并发
-                async with self.task_semaphore:
-                    # 处理任务
-                    task_id = task_data['id']
-                    self.running_tasks.add(task_id)
-                    asyncio.create_task(self._handle_task_wrapper(task_data))
-                
+                logger.info(f"加载检测模型: {model_code}")
+                self.detectors[model_code] = YOLODetector(model_code)
             except Exception as e:
-                logger.error(f"任务处理循环异常: {str(e)}")
-                await asyncio.sleep(1)
+                logger.error(f"加载模型失败: {model_code}, 错误: {str(e)}", exc_info=True)
+                raise ValueError(f"加载模型失败: {model_code}, 错误: {str(e)}")
                 
-    async def _handle_task_wrapper(self, task_data: Dict[str, Any]):
-        """任务处理包装器，确保任务状态正确更新"""
-        task_id = task_data['id']
-        try:
-            await self._handle_task(task_data)
-        except Exception as e:
-            logger.error(f"任务处理异常: {task_id}, 错误: {str(e)}")
-        finally:
-            self.running_tasks.remove(task_id)
-            
-    async def _monitor_tasks(self):
-        """监控任务执行状态"""
-        while self.is_running:
-            try:
-                # 检查运行中的任务状态
-                for task_id in list(self.running_tasks):
-                    task_data = await self.task_queue.get_task(task_id)
-                    if not task_data:
-                        self.running_tasks.remove(task_id)
-                        continue
-                        
-                    # 检查任务是否超时
-                    if self._is_task_timeout(task_data):
-                        logger.warning(f"任务执行超时: {task_id}")
-                        await self.task_queue.fail_task(
-                            task_id,
-                            "任务执行超时",
-                            task_data
-                        )
-                        self.running_tasks.remove(task_id)
-                        
-                # 更新任务处理器状态
-                await self._update_processor_status()
-                
-                await asyncio.sleep(settings.TASK_QUEUE.monitor_interval)
-                
-            except Exception as e:
-                logger.error(f"任务监控异常: {str(e)}")
-                await asyncio.sleep(5)
-                
-    def _is_task_timeout(self, task_data: Dict[str, Any]) -> bool:
-        """检查任务是否超时"""
-        if not task_data.get('start_time'):
-            return False
-            
-        start_time = datetime.fromisoformat(task_data['start_time'])
-        timeout = task_data.get('timeout') or settings.TASK_QUEUE.default_timeout
-        return (datetime.now() - start_time).total_seconds() > timeout
+        return self.detectors[model_code]
         
-    async def _update_processor_status(self):
-        """更新处理器状态"""
-        try:
-            status = {
-                'running_tasks': len(self.running_tasks),
-                'max_concurrent': self.max_concurrent_tasks,
-                'is_running': self.is_running,
-                'updated_at': datetime.now().isoformat()
-            }
-            await self.task_queue.update_processor_status(status)
-        except Exception as e:
-            logger.error(f"更新处理器状态失败: {str(e)}")
-            
-    async def _handle_task(self, task_data: Dict[str, Any]):
-        """处理单个任务"""
-        task_id = task_data['id']
-        start_time = None
-        result_path = None
+    def process_image(self, task_id: str) -> Dict[str, Any]:
+        """
+        处理图像分析任务
         
-        try:
-            # 更新任务开始时间
-            start_time = datetime.now()
-            task_data['start_time'] = start_time.isoformat()
-            await self.task_queue.update_task_status(
-                task_id,
-                TaskStatus.PROCESSING,
-                task_data
-            )
+        Args:
+            task_id: 任务ID
             
-            logger.info(f"开始处理任务: {task_id}, 任务名称: {task_data.get('task_name', '未命名')}")
+        Returns:
+            Dict: 处理结果
+        """
+        try:
+            # 获取任务信息
+            task = self.task_manager.get_task(task_id)
+            if not task:
+                return {"success": False, "error": f"任务不存在: {task_id}"}
+                
+            # 更新任务状态
+            self.task_manager.update_task_status(task_id, "processing")
             
             # 获取任务参数
-            analysis_type = task_data.get('analysis_type')
-            model_code = task_data.get('model_code')
-            config = task_data.get('config', {})
+            params = task.get("params", {})
+            image_path = params.get("image_path")
+            model_code = params.get("model_code")
+            conf_threshold = params.get("conf_threshold", 0.25)
+            save_result = params.get("save_result", True)
+            include_image = params.get("include_image", False)
             
-            # 验证必要参数
-            if not model_code:
-                raise ValueError("模型代码不能为空")
+            # 检查参数
+            if not image_path or not model_code:
+                self.task_manager.update_task_status(task_id, "failed", {"error": "缺少必要参数"})
+                return {"success": False, "error": "缺少必要参数"}
                 
-            # 执行分析
-            result = await self._execute_analysis(analysis_type, task_data)
-            
-            # 处理结果
-            if result:
-                # 是否需要保存结果
-                if task_data.get('save_result'):
-                    result_path = await self._save_result(task_id, result, task_data)
-                    task_data['result_path'] = result_path
-                    
-                # 推送结果
-                if task_data.get('enable_callback'):
-                    await self._send_callback(task_data, result)
+            # 检查文件是否存在
+            if not os.path.exists(image_path):
+                self.task_manager.update_task_status(task_id, "failed", {"error": f"图像文件不存在: {image_path}"})
+                return {"success": False, "error": f"图像文件不存在: {image_path}"}
                 
-                # 更新任务完成状态
-                stop_time = datetime.now()
-                task_data['stop_time'] = stop_time.isoformat()
-                task_data['duration'] = (stop_time - start_time).total_seconds()
-                
-                await self.task_queue.complete_task(task_id, result, task_data)
-                logger.info(f"任务处理完成: {task_id}, 耗时: {task_data['duration']}秒")
-            else:
-                raise Exception("分析结果为空")
-                
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"任务处理失败: {task_id}, 错误: {error_msg}")
+            # 获取检测器
+            detector = self.get_detector(model_code)
             
-            # 更新失败状态
-            if start_time:
-                task_data['stop_time'] = datetime.now().isoformat()
-                task_data['duration'] = (datetime.now() - start_time).total_seconds()
-            task_data['error_message'] = error_msg
-            
-            await self.task_queue.fail_task(task_id, error_msg, task_data)
-            
-    async def _execute_analysis(self, analysis_type: str, task_data: Dict[str, Any]) -> Optional[Dict]:
-        """执行分析"""
-        try:
-            config = task_data.get('config', {})
-            
-            # 提取通用配置
-            roi = config.get('roi')  # 感兴趣区域
-            categories = config.get('categories')  # 目标类别
-            confidence = config.get('confidence', 0.5)  # 置信度阈值
-            
-            # 更新任务进度
-            await self._update_task_progress(task_data['id'], "开始执行分析", 0)
-            
-            # 使用线程池执行CPU密集型分析任务
-            loop = asyncio.get_event_loop()
-            if analysis_type == 'image':
-                result = await loop.run_in_executor(
-                    self.thread_pool,
-                    self._run_image_analysis,
-                    task_data, roi, categories, confidence
-                )
-            elif analysis_type == 'video':
-                result = await loop.run_in_executor(
-                    self.thread_pool,
-                    self._run_video_analysis,
-                    task_data, roi, categories, confidence
-                )
-            elif analysis_type == 'stream':
-                result = await loop.run_in_executor(
-                    self.thread_pool,
-                    self._run_stream_analysis,
-                    task_data, roi, categories, confidence
-                )
-            else:
-                raise ValueError(f"不支持的分析类型: {analysis_type}")
-                
-            # 更新任务进度
-            await self._update_task_progress(task_data['id'], "分析完成", 100)
-            
-            return result
-                
-        except Exception as e:
-            logger.error(f"执行分析失败: {str(e)}")
-            raise
-            
-    def _run_image_analysis(self, task_data: Dict, roi: Dict, categories: list, confidence: float) -> Dict:
-        """在线程池中执行图片分析"""
-        image_url = task_data.get('stream_url')
-        if not image_url:
-            raise ValueError("图片URL不能为空")
-            
-        analysis_params = {
-            'roi': roi,
-            'categories': categories,
-            'confidence': confidence,
-            'model_code': task_data.get('model_code'),
-            **task_data.get('config', {})
-        }
-            
-        result = self.detector.analyze_image_sync(image_url, analysis_params)
-        
-        return {
-            'type': 'image',
-            'url': image_url,
-            'result': result,
-            'config': analysis_params,
-            'model_code': task_data.get('model_code'),
-            'timestamp': datetime.now().isoformat()
-        }
-        
-    def _run_video_analysis(self, task_data: Dict, roi: Dict, categories: list, confidence: float) -> Dict:
-        """在线程池中执行视频分析"""
-        video_url = task_data.get('stream_url')
-        if not video_url:
-            raise ValueError("视频URL不能为空")
-            
-        analysis_params = {
-            'roi': roi,
-            'categories': categories,
-            'confidence': confidence,
-            'model_code': task_data.get('model_code'),
-            'output_url': task_data.get('output_url'),
-            **task_data.get('config', {})
-        }
-            
-        result = self.detector.analyze_video_sync(video_url, analysis_params)
-        
-        return {
-            'type': 'video',
-            'url': video_url,
-            'result': result,
-            'config': analysis_params,
-            'model_code': task_data.get('model_code'),
-            'output_url': task_data.get('output_url'),
-            'timestamp': datetime.now().isoformat()
-        }
-        
-    def _run_stream_analysis(self, task_data: Dict, roi: Dict, categories: list, confidence: float) -> Dict:
-        """在线程池中执行流分析"""
-        stream_url = task_data.get('stream_url')
-        if not stream_url:
-            raise ValueError("流URL不能为空")
-            
-        analysis_params = {
-            'roi': roi,
-            'categories': categories,
-            'confidence': confidence,
-            'model_code': task_data.get('model_code'),
-            'output_url': task_data.get('output_url'),
-            **task_data.get('config', {})
-        }
-            
-        result = self.detector.analyze_stream_sync(stream_url, analysis_params)
-        
-        return {
-            'type': 'stream',
-            'url': stream_url,
-            'result': result,
-            'config': analysis_params,
-            'model_code': task_data.get('model_code'),
-            'output_url': task_data.get('output_url'),
-            'timestamp': datetime.now().isoformat()
-        }
-        
-    async def _update_task_progress(self, task_id: str, message: str, progress: int):
-        """更新任务进度"""
-        try:
-            await self.task_queue.update_task_progress(task_id, {
-                'message': message,
-                'progress': progress,
-                'timestamp': datetime.now().isoformat()
-            })
-        except Exception as e:
-            logger.warning(f"更新任务进度失败: {task_id}, 错误: {str(e)}")
-            
-    async def _send_callback(self, task_data: Dict[str, Any], result: Dict):
-        """发送回调"""
-        callback_urls = task_data.get('callback_urls', '').split(',')
-        if not callback_urls:
-            return
-            
-        for url in callback_urls:
-            if not url.strip():
-                continue
-                
+            # 读取图像
             try:
-                async with httpx.AsyncClient() as client:
-                    callback_data = {
-                        'task_id': task_data['id'],
-                        'task_name': task_data.get('task_name'),
-                        'model_code': task_data.get('model_code'),
-                        'analysis_type': task_data.get('analysis_type'),
-                        'status': TaskStatus.COMPLETED,
-                        'result': result,
-                        'start_time': task_data.get('start_time'),
-                        'stop_time': task_data.get('stop_time'),
-                        'duration': task_data.get('duration'),
-                        'timestamp': datetime.now().isoformat()
-                    }
-                    
-                    response = await client.post(
-                        url.strip(),
-                        json=callback_data,
-                        timeout=10.0
-                    )
-                    
-                    if response.status_code != 200:
-                        logger.warning(f"回调请求失败: {url}, 状态码: {response.status_code}")
-                        
+                image = cv2.imread(image_path)
+                if image is None:
+                    self.task_manager.update_task_status(task_id, "failed", {"error": f"无法读取图像: {image_path}"})
+                    return {"success": False, "error": f"无法读取图像: {image_path}"}
             except Exception as e:
-                logger.error(f"发送回调失败: {url}, 错误: {str(e)}")
-                # 继续处理下一个回调地址
-                continue
+                self.task_manager.update_task_status(task_id, "failed", {"error": f"读取图像错误: {str(e)}"})
+                return {"success": False, "error": f"读取图像错误: {str(e)}"}
+                
+            # 执行检测
+            try:
+                logger.info(f"执行图像检测: {image_path}, 模型: {model_code}")
+                result = detector.detect(image, conf_threshold)
+                detections = result.get("detections", [])
+                logger.info(f"检测完成，发现 {len(detections)} 个目标")
+                
+                # 绘制检测结果
+                result_image = detector.draw_detections(image, detections)
+                
+                # 保存结果
+                result_data = {
+                    "detections": detections,
+                    "filename": os.path.basename(image_path),
+                    "image_path": image_path,
+                    "model_code": model_code,
+                    "conf_threshold": conf_threshold
+                }
+                
+                if save_result:
+                    # 保存检测结果图像
+                    output_dir = f"{settings.OUTPUT.save_dir}/images"
+                    os.makedirs(output_dir, exist_ok=True)
+                    
+                    result_filename = f"{os.path.splitext(os.path.basename(image_path))[0]}_result.jpg"
+                    result_path = f"{output_dir}/{result_filename}"
+                    
+                    cv2.imwrite(result_path, result_image)
+                    result_data["result_path"] = result_path
+                    logger.info(f"已保存检测结果图像: {result_path}")
+                
+                # 如果需要，添加图像的base64编码
+                if include_image:
+                    _, buffer = cv2.imencode('.jpg', result_image)
+                    result_data["image_base64"] = base64.b64encode(buffer).decode('utf-8')
+                
+                # 更新任务状态
+                self.task_manager.update_task_status(task_id, "completed", result_data)
+                
+                # 返回结果
+                return {
+                    "success": True,
+                    "task_id": task_id,
+                    "detections": detections,
+                    "filename": os.path.basename(image_path),
+                    "image_base64": result_data.get("image_base64") if include_image else None,
+                    "result_path": result_data.get("result_path") if save_result else None
+                }
+                
+            except Exception as e:
+                logger.error(f"图像检测失败: {str(e)}", exc_info=True)
+                self.task_manager.update_task_status(task_id, "failed", {"error": f"图像检测失败: {str(e)}"})
+                return {"success": False, "error": f"图像检测失败: {str(e)}"}
+                
+        except Exception as e:
+            logger.error(f"处理图像分析任务失败: {str(e)}", exc_info=True)
+            self.task_manager.update_task_status(task_id, "failed", {"error": f"处理任务失败: {str(e)}"})
+            return {"success": False, "error": f"处理任务失败: {str(e)}"}
             
-    async def _save_result(self, task_id: str, result: Dict, task_data: Dict) -> str:
-        """保存分析结果"""
+    def start_video_analysis(self, task_id: str) -> Dict[str, Any]:
+        """
+        启动视频分析任务
+        
+        Args:
+            task_id: 任务ID
+            
+        Returns:
+            Dict: 启动结果
+        """
         try:
-            # 生成结果目录路径
-            date_str = datetime.now().strftime("%Y%m%d")
-            task_dir = os.path.join(self.results_dir, date_str, task_id)
-            os.makedirs(task_dir, exist_ok=True)
+            # 获取任务信息
+            task = self.task_manager.get_task(task_id)
+            if not task:
+                return {"success": False, "error": f"任务不存在: {task_id}"}
+                
+            # 更新任务状态
+            self.task_manager.update_task_status(task_id, "pending")
             
-            # 保存结果元数据
-            meta_data = {
-                'task_id': task_id,
-                'task_name': task_data.get('task_name'),
-                'model_code': task_data.get('model_code'),
-                'analysis_type': task_data.get('analysis_type'),
-                'config': task_data.get('config'),
-                'stream_url': task_data.get('stream_url'),
-                'start_time': task_data.get('start_time'),
-                'stop_time': task_data.get('stop_time'),
-                'duration': task_data.get('duration'),
-                'created_at': datetime.now().isoformat()
+            # 获取任务参数
+            params = task.get("params", {})
+            video_path = params.get("video_path")
+            model_code = params.get("model_code")
+            
+            # 检查参数
+            if not video_path or not model_code:
+                self.task_manager.update_task_status(task_id, "failed", {"error": "缺少必要参数"})
+                return {"success": False, "error": "缺少必要参数"}
+                
+            # 检查文件是否存在
+            if not os.path.exists(video_path):
+                self.task_manager.update_task_status(task_id, "failed", {"error": f"视频文件不存在: {video_path}"})
+                return {"success": False, "error": f"视频文件不存在: {video_path}"}
+                
+            # 启动后台线程处理视频
+            thread = threading.Thread(
+                target=self._process_video,
+                args=(task_id,),
+                daemon=True
+            )
+            self.active_tasks[task_id] = thread
+            thread.start()
+            
+            return {
+                "success": True,
+                "task_id": task_id,
+                "message": "已启动视频分析任务"
             }
             
-            meta_path = os.path.join(task_dir, 'meta.json')
-            with open(meta_path, 'w', encoding='utf-8') as f:
-                json.dump(meta_data, f, ensure_ascii=False, indent=2)
-                
-            # 保存分析结果
-            result_path = os.path.join(task_dir, 'result.json')
-            with open(result_path, 'w', encoding='utf-8') as f:
-                json.dump(result, f, ensure_ascii=False, indent=2)
-                
-            # 如果有输出文件，保存文件路径信息
-            if task_data.get('output_url'):
-                output_meta = {
-                    'output_url': task_data['output_url'],
-                    'created_at': datetime.now().isoformat()
-                }
-                output_path = os.path.join(task_dir, 'output.json')
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    json.dump(output_meta, f, ensure_ascii=False, indent=2)
-                    
-            logger.info(f"分析结果已保存: {task_dir}")
-            return task_dir
-            
         except Exception as e:
-            logger.error(f"保存分析结果失败: {str(e)}")
-            raise
+            logger.error(f"启动视频分析任务失败: {str(e)}", exc_info=True)
+            self.task_manager.update_task_status(task_id, "failed", {"error": f"启动任务失败: {str(e)}"})
+            return {"success": False, "error": f"启动任务失败: {str(e)}"}
             
-    async def _get_result(self, task_id: str) -> Optional[Dict]:
-        """获取分析结果"""
+    def _process_video(self, task_id: str):
+        """
+        处理视频分析任务
+        
+        Args:
+            task_id: 任务ID
+        """
+        task = self.task_manager.get_task(task_id)
+        if not task:
+            logger.error(f"处理视频任务失败: 任务不存在 {task_id}")
+            return
+            
+        params = task.get("params", {})
+        video_path = params.get("video_path")
+        model_code = params.get("model_code")
+        conf_threshold = params.get("conf_threshold", 0.25)
+        save_result = params.get("save_result", True)
+        
         try:
-            # 先从Redis缓存获取
-            result = await self.task_queue.get_result(task_id)
-            if result:
-                return result
-                
-            # 如果缓存中没有，尝试从文件系统获取
-            task_data = await self.task_queue.get_task(task_id)
-            if not task_data or not task_data.get('result_path'):
-                return None
-                
-            result_path = os.path.join(task_data['result_path'], 'result.json')
-            if not os.path.exists(result_path):
-                return None
-                
-            with open(result_path, 'r', encoding='utf-8') as f:
-                result = json.load(f)
-                
-            return result
+            # 更新任务状态
+            self.task_manager.update_task_status(task_id, "processing")
             
-        except Exception as e:
-            logger.error(f"获取分析结果失败: {str(e)}")
-            return None
+            # 获取检测器
+            detector = self.get_detector(model_code)
             
-    async def _cleanup_old_results(self):
-        """清理过期的结果文件"""
-        try:
-            # 获取保留天数配置
-            retention_days = settings.STORAGE.result_retention_days
-            if retention_days <= 0:
+            # 打开视频文件
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                self.task_manager.update_task_status(task_id, "failed", {"error": f"无法打开视频: {video_path}"})
                 return
                 
-            # 计算过期日期
-            expire_date = datetime.now() - timedelta(days=retention_days)
-            expire_date_str = expire_date.strftime("%Y%m%d")
+            # 获取视频信息
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             
-            # 遍历结果目录
-            for date_dir in os.listdir(self.results_dir):
-                if date_dir <= expire_date_str:
-                    dir_path = os.path.join(self.results_dir, date_dir)
-                    if os.path.isdir(dir_path):
-                        shutil.rmtree(dir_path)
-                        logger.info(f"已清理过期结果目录: {dir_path}")
-                        
+            # 创建输出目录
+            output_dir = f"{settings.OUTPUT.save_dir}/videos"
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # 设置输出视频
+            result_filename = f"{os.path.splitext(os.path.basename(video_path))[0]}_result.mp4"
+            result_path = f"{output_dir}/{result_filename}"
+            
+            # 输出帧图像的目录
+            frames_dir = f"{output_dir}/{os.path.splitext(os.path.basename(video_path))[0]}_frames"
+            if save_result:
+                os.makedirs(frames_dir, exist_ok=True)
+            
+            # 创建视频写入器
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = None
+            if save_result:
+                out = cv2.VideoWriter(result_path, fourcc, fps, (width, height))
+            
+            # 处理视频帧
+            frame_count = 0
+            all_detections = []
+            
+            logger.info(f"开始处理视频: {video_path}, 总帧数: {total_frames}, 帧率: {fps}")
+            
+            start_time = time.time()
+            
+            while True:
+                # 检查任务是否被取消
+                if self.task_manager.get_task_status(task_id) == "stopping":
+                    logger.info(f"视频分析任务被取消: {task_id}")
+                    break
+                    
+                # 读取帧
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                    
+                # 每10帧更新一次进度
+                if frame_count % 10 == 0:
+                    progress = frame_count / total_frames * 100 if total_frames > 0 else 0
+                    self.task_manager.update_task_progress(task_id, progress)
+                    logger.debug(f"视频分析进度: {progress:.2f}%, 帧: {frame_count}/{total_frames}")
+                
+                # 执行检测
+                result = detector.detect(frame, conf_threshold)
+                detections = result.get("detections", [])
+                
+                # 为每个检测添加帧信息
+                for det in detections:
+                    det["frame"] = frame_count
+                    
+                all_detections.extend(detections)
+                
+                # 绘制检测结果
+                result_frame = detector.draw_detections(frame, detections)
+                
+                # 保存结果
+                if save_result:
+                    # 保存关键帧（每秒一帧或有检测结果的帧）
+                    if len(detections) > 0 or frame_count % int(fps) == 0:
+                        frame_filename = f"{frames_dir}/frame_{frame_count:06d}.jpg"
+                        cv2.imwrite(frame_filename, result_frame)
+                    
+                    # 写入视频
+                    out.write(result_frame)
+                
+                frame_count += 1
+            
+            # 处理完成
+            elapsed_time = time.time() - start_time
+            
+            # 释放资源
+            cap.release()
+            if out:
+                out.release()
+            
+            # 更新任务状态为完成
+            if self.task_manager.get_task_status(task_id) != "stopping":
+                result_data = {
+                    "detections": all_detections,
+                    "total_frames": frame_count,
+                    "processed_frames": frame_count,
+                    "duration": elapsed_time,
+                    "fps": frame_count / elapsed_time if elapsed_time > 0 else 0,
+                    "video_path": video_path,
+                    "model_code": model_code,
+                    "conf_threshold": conf_threshold
+                }
+                
+                if save_result:
+                    result_data["result_path"] = result_path
+                    result_data["frames_dir"] = frames_dir
+                
+                self.task_manager.update_task_status(task_id, "completed", result_data)
+                logger.info(f"视频分析任务完成: {task_id}, 处理帧数: {frame_count}, 耗时: {elapsed_time:.2f}秒")
+            else:
+                self.task_manager.update_task_status(task_id, "stopped")
+                logger.info(f"视频分析任务已停止: {task_id}")
+            
         except Exception as e:
-            logger.error(f"清理过期结果失败: {str(e)}") 
+            logger.error(f"处理视频失败: {str(e)}", exc_info=True)
+            self.task_manager.update_task_status(task_id, "failed", {"error": f"处理视频失败: {str(e)}"})
+            
+        finally:
+            # 从活动任务中移除
+            if task_id in self.active_tasks:
+                del self.active_tasks[task_id]
+                
+    def start_stream_analysis(self, task_id: str) -> Dict[str, Any]:
+        """
+        启动流分析任务
+        
+        Args:
+            task_id: 任务ID
+            
+        Returns:
+            Dict: 启动结果
+        """
+        try:
+            # 获取任务信息
+            task = self.task_manager.get_task(task_id)
+            if not task:
+                return {"success": False, "error": f"任务不存在: {task_id}"}
+                
+            # 更新任务状态
+            self.task_manager.update_task_status(task_id, "pending")
+            
+            # 获取任务参数
+            params = task.get("params", {})
+            stream_url = params.get("stream_url")
+            model_code = params.get("model_code")
+            
+            # 检查参数
+            if not stream_url or not model_code:
+                self.task_manager.update_task_status(task_id, "failed", {"error": "缺少必要参数"})
+                return {"success": False, "error": "缺少必要参数"}
+                
+            # 启动后台线程处理流
+            thread = threading.Thread(
+                target=self._process_stream,
+                args=(task_id,),
+                daemon=True
+            )
+            self.active_tasks[task_id] = thread
+            thread.start()
+            
+            return {
+                "success": True,
+                "task_id": task_id,
+                "message": "已启动流分析任务"
+            }
+            
+        except Exception as e:
+            logger.error(f"启动流分析任务失败: {str(e)}", exc_info=True)
+            self.task_manager.update_task_status(task_id, "failed", {"error": f"启动任务失败: {str(e)}"})
+            return {"success": False, "error": f"启动任务失败: {str(e)}"}
+            
+    def _process_stream(self, task_id: str):
+        """
+        处理流分析任务
+        
+        Args:
+            task_id: 任务ID
+        """
+        task = self.task_manager.get_task(task_id)
+        if not task:
+            logger.error(f"处理流任务失败: 任务不存在 {task_id}")
+            return
+            
+        params = task.get("params", {})
+        stream_url = params.get("stream_url")
+        model_code = params.get("model_code")
+        conf_threshold = params.get("conf_threshold", 0.25)
+        save_interval = params.get("save_interval", 10)  # 保存图像的间隔（秒）
+        max_duration = params.get("max_duration", 3600)  # 最大持续时间（秒）
+        
+        try:
+            # 更新任务状态
+            self.task_manager.update_task_status(task_id, "processing")
+            
+            # 获取检测器
+            detector = self.get_detector(model_code)
+            
+            # 打开视频流
+            cap = cv2.VideoCapture(stream_url)
+            if not cap.isOpened():
+                self.task_manager.update_task_status(task_id, "failed", {"error": f"无法打开流: {stream_url}"})
+                return
+                
+            # 创建输出目录
+            output_dir = f"{settings.OUTPUT.save_dir}/streams"
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # 输出帧图像的目录
+            stream_id = uuid.uuid4().hex[:8]
+            frames_dir = f"{output_dir}/stream_{stream_id}"
+            os.makedirs(frames_dir, exist_ok=True)
+            
+            # 处理视频帧
+            frame_count = 0
+            latest_detections = []
+            latest_frame = None
+            latest_frame_time = 0
+            last_save_time = time.time()
+            start_time = time.time()
+            
+            logger.info(f"开始处理流: {stream_url}")
+            
+            while True:
+                # 检查任务是否被取消
+                if self.task_manager.get_task_status(task_id) == "stopping":
+                    logger.info(f"流分析任务被取消: {task_id}")
+                    break
+                    
+                # 检查是否超过最大持续时间
+                if time.time() - start_time > max_duration:
+                    logger.info(f"流分析任务达到最大持续时间: {task_id}")
+                    break
+                    
+                # 读取帧
+                ret, frame = cap.read()
+                if not ret:
+                    logger.warning(f"无法读取流帧，尝试重新连接: {stream_url}")
+                    # 重新连接流
+                    cap.release()
+                    time.sleep(1)
+                    cap = cv2.VideoCapture(stream_url)
+                    if not cap.isOpened():
+                        logger.error(f"无法重新连接流: {stream_url}")
+                        break
+                    continue
+                
+                # 执行检测
+                result = detector.detect(frame, conf_threshold)
+                detections = result.get("detections", [])
+                
+                # 更新最新检测结果和帧
+                latest_detections = detections
+                latest_frame = detector.draw_detections(frame, detections)
+                latest_frame_time = time.time()
+                
+                # 每10帧更新一次任务数据
+                if frame_count % 10 == 0:
+                    self.task_manager.update_task_data(task_id, {
+                        "frame_count": frame_count,
+                        "latest_detection_count": len(latest_detections),
+                        "running_time": time.time() - start_time
+                    })
+                
+                # 定期保存检测结果图像
+                current_time = time.time()
+                if current_time - last_save_time >= save_interval:
+                    # 保存检测结果图像
+                    timestamp = int(current_time)
+                    frame_filename = f"{frames_dir}/frame_{timestamp}.jpg"
+                    cv2.imwrite(frame_filename, latest_frame)
+                    
+                    # 更新任务数据
+                    self.task_manager.update_task_data(task_id, {
+                        "latest_frame": frame_filename,
+                        "latest_detections": latest_detections,
+                        "latest_frame_time": timestamp
+                    })
+                    
+                    logger.debug(f"已保存流检测结果: {frame_filename}, 检测数量: {len(latest_detections)}")
+                    last_save_time = current_time
+                
+                frame_count += 1
+            
+            # 处理完成
+            elapsed_time = time.time() - start_time
+            
+            # 保存最后一帧
+            if latest_frame is not None:
+                final_frame_path = f"{frames_dir}/final_frame.jpg"
+                cv2.imwrite(final_frame_path, latest_frame)
+            
+            # 释放资源
+            cap.release()
+            
+            # 更新任务状态
+            if self.task_manager.get_task_status(task_id) != "stopping":
+                result_data = {
+                    "total_frames": frame_count,
+                    "latest_detections": latest_detections,
+                    "duration": elapsed_time,
+                    "frames_dir": frames_dir,
+                    "stream_url": stream_url,
+                    "model_code": model_code,
+                    "conf_threshold": conf_threshold
+                }
+                
+                if latest_frame is not None:
+                    result_data["final_frame"] = final_frame_path
+                
+                self.task_manager.update_task_status(task_id, "completed", result_data)
+                logger.info(f"流分析任务完成: {task_id}, 处理帧数: {frame_count}, 耗时: {elapsed_time:.2f}秒")
+            else:
+                self.task_manager.update_task_status(task_id, "stopped")
+                logger.info(f"流分析任务已停止: {task_id}")
+            
+        except Exception as e:
+            logger.error(f"处理流失败: {str(e)}", exc_info=True)
+            self.task_manager.update_task_status(task_id, "failed", {"error": f"处理流失败: {str(e)}"})
+            
+        finally:
+            # 从活动任务中移除
+            if task_id in self.active_tasks:
+                del self.active_tasks[task_id]
+                
+    def stop_task(self, task_id: str) -> Dict[str, Any]:
+        """
+        停止任务
+        
+        Args:
+            task_id: 任务ID
+            
+        Returns:
+            Dict: 停止结果
+        """
+        try:
+            # 获取任务信息
+            task = self.task_manager.get_task(task_id)
+            if not task:
+                return {"success": False, "error": f"任务不存在: {task_id}"}
+                
+            # 获取任务状态
+            status = task.get("status")
+            
+            # 如果任务已经完成或失败，无需停止
+            if status in ["completed", "failed", "stopped"]:
+                return {
+                    "success": True,
+                    "task_id": task_id,
+                    "message": f"任务已经处于 {status} 状态，无需停止"
+                }
+                
+            # 更新任务状态为正在停止
+            self.task_manager.update_task_status(task_id, "stopping")
+            logger.info(f"正在停止任务: {task_id}")
+            
+            # 等待任务停止（由处理线程自行停止）
+            return {
+                "success": True,
+                "task_id": task_id,
+                "message": "正在停止任务"
+            }
+            
+        except Exception as e:
+            logger.error(f"停止任务失败: {str(e)}", exc_info=True)
+            return {"success": False, "error": f"停止任务失败: {str(e)}"}
+            
+    def get_task_status(self, task_id: str) -> Dict[str, Any]:
+        """
+        获取任务状态
+        
+        Args:
+            task_id: 任务ID
+            
+        Returns:
+            Dict: 任务状态
+        """
+        try:
+            # 获取任务信息
+            task = self.task_manager.get_task(task_id)
+            if not task:
+                return {"success": False, "error": f"任务不存在: {task_id}"}
+                
+            return {
+                "success": True,
+                "task_id": task_id,
+                "status": task.get("status"),
+                "progress": task.get("progress", 0),
+                "created_at": task.get("created_at"),
+                "updated_at": task.get("updated_at"),
+                "result": task.get("result")
+            }
+            
+        except Exception as e:
+            logger.error(f"获取任务状态失败: {str(e)}", exc_info=True)
+            return {"success": False, "error": f"获取任务状态失败: {str(e)}"}
+            
+    def get_tasks(self, protocol: Optional[str] = None) -> Dict[str, Any]:
+        """
+        获取任务列表
+        
+        Args:
+            protocol: 协议过滤
+            
+        Returns:
+            Dict: 任务列表
+        """
+        try:
+            # 获取所有任务
+            tasks = self.task_manager.get_all_tasks()
+            
+            # 如果指定了协议，过滤任务
+            if protocol:
+                filtered_tasks = {
+                    task_id: task for task_id, task in tasks.items()
+                    if task.get("protocol") == protocol
+                }
+                return {"success": True, "tasks": filtered_tasks}
+            
+            return {"success": True, "tasks": tasks}
+            
+        except Exception as e:
+            logger.error(f"获取任务列表失败: {str(e)}", exc_info=True)
+            return {"success": False, "error": f"获取任务列表失败: {str(e)}"} 

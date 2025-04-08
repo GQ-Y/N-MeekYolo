@@ -16,7 +16,7 @@ class ResourceMonitor:
         self.memory_threshold = 0.95
         self.gpu_memory_threshold = 0.95
         self.disk_threshold = 0.95
-        self.max_tasks = 10  # 最大任务数
+        self.max_tasks = 100  # 最大任务数
         self._running_tasks = 0
         self._waiting_tasks = 0
         
