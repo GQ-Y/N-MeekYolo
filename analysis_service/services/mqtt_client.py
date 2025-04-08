@@ -44,6 +44,8 @@ def get_mqtt_client() -> 'MQTTClient':
             if _MQTT_CLIENT_INSTANCE is None:
                 # 从配置加载MQTT设置
                 client_id = f"analysis_node_{socket.gethostname()}_{uuid.uuid4().hex[:6]}"
+                # 使用socket.gethostname()作为device_id
+                device_id = socket.gethostname()
                 broker_host = settings.MQTT.broker_host
                 broker_port = settings.MQTT.broker_port
                 username = settings.MQTT.username
@@ -53,48 +55,45 @@ def get_mqtt_client() -> 'MQTTClient':
                 logger.info(f"创建MQTT客户端实例: {client_id}")
                 
                 _MQTT_CLIENT_INSTANCE = MQTTClient(
+                    device_id=device_id,  # 提供device_id参数
                     client_id=client_id,
                     broker_host=broker_host,
                     broker_port=broker_port,
                     username=username,
                     password=password,
-                    topic_prefix=topic_prefix
+                    topic_prefix=topic_prefix,  # 作为关键字参数传递
                 )
     
     return _MQTT_CLIENT_INSTANCE
 
 class MQTTClient:
-    """MQTT客户端，负责与API服务通信"""
-    
-    def __init__(self, client_id: str, broker_host: str, broker_port: int,
-                username: Optional[str] = None, password: Optional[str] = None,
-                topic_prefix: str = "meek-yolo"):
+    """MQTT客户端类，处理与MQTT服务器的通信"""
+
+    def __init__(self, device_id, broker_host, broker_port=1883, username=None, password=None,
+                 command_topic=None, response_topic=None, status_topic=None, client_id=None,
+                 **kwargs):
         """
         初始化MQTT客户端
         
         Args:
-            client_id: 客户端ID
+            device_id: 设备ID
             broker_host: MQTT代理服务器地址
             broker_port: MQTT代理服务器端口
-            username: 用户名（可选）
-            password: 密码（可选）
-            topic_prefix: 主题前缀
+            username: MQTT用户名
+            password: MQTT密码
+            command_topic: 命令主题
+            response_topic: 响应主题
+            status_topic: 状态主题
+            client_id: 客户端ID，如果不提供则使用设备ID
         """
-        self.client_id = client_id
+        self.device_id = device_id
         self.broker_host = broker_host
         self.broker_port = broker_port
         self.username = username
         self.password = password
-        self.topic_prefix = topic_prefix
         
-        # 状态标志
-        self.is_connected = False
-        self.is_running = False
-        self.reconnect_delay = 1  # 重连延迟（秒）
-        self.max_reconnect_delay = 60  # 最大重连延迟（秒）
-        
-        # 创建MQTT客户端
-        self.client = mqtt.Client(client_id=client_id)
+        # 设置客户端ID
+        self.client_id = client_id or f"meek-device-{device_id}"
         
         # 获取MAC地址
         self.mac_address = self._get_mac_address()
@@ -103,13 +102,42 @@ class MQTTClient:
         # 使用MAC地址作为节点ID
         self.node_id = self.mac_address
         
-        # 检查是否固定MAC地址为6A:C4:09:90:EF:DA的工作节点，如果不是，打印警告
-        if self.mac_address.lower() != "6a:c4:09:90:ef:da":
-            logger.warning(f"当前MAC地址 {self.mac_address} 与API服务设置的MQTT节点MAC地址 6A:C4:09:90:EF:DA 不匹配")
-            logger.warning("这可能导致无法接收到API服务发送的任务消息")
+        # 从kwargs获取topic_prefix或使用默认值
+        self.topic_prefix = kwargs.get("topic_prefix", "meek/")
         
-        # 任务处理器
+        # 设置主题 - 使用node_id（MAC地址）而不是device_id
+        self.command_topic = command_topic or f"meek/device/{self.node_id}/command"
+        self.response_topic = response_topic or f"meek/device/{self.node_id}/response"
+        self.status_topic = status_topic or f"meek/device/{self.node_id}/status"
+        
+        # 创建MQTT客户端
+        self.client = mqtt.Client(client_id=self.client_id, protocol=mqtt.MQTTv311, clean_session=True)
+        
+        # 设置回调函数
+        self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
+        self.client.on_message = self._on_message
+        
+        # 设置用户名和密码
+        if self.username and self.password:
+            self.client.username_pw_set(self.username, self.password)
+            
+        # 初始化任务处理器字典
         self.task_handlers = {}
+        
+        # 连接标志
+        self.connected = False
+        
+        logger.info(f"MQTT客户端已初始化: 设备ID={device_id}, 代理={broker_host}:{broker_port}")
+        logger.info(f"命令主题: {self.command_topic}")
+        logger.info(f"响应主题: {self.response_topic}")
+        logger.info(f"状态主题: {self.status_topic}")
+        
+        # 状态标志
+        self.is_connected = False
+        self.is_running = False
+        self.reconnect_delay = 1  # 重连延迟（秒）
+        self.max_reconnect_delay = 60  # 最大重连延迟（秒）
         
         # 活跃任务
         self.active_tasks = {}
@@ -117,13 +145,6 @@ class MQTTClient:
         
         # 停止事件
         self.stop_event = threading.Event()
-        
-        # 注册回调
-        self.client.on_connect = self._on_connect
-        self.client.on_disconnect = self._on_disconnect
-        self.client.on_message = self._on_message
-        
-        logger.info(f"MQTT客户端已初始化: {client_id}, 节点ID: {self.node_id}")
         
     def _get_mac_address(self) -> str:
         """
@@ -135,13 +156,15 @@ class MQTTClient:
         try:
             mac = uuid.getnode()
             mac_str = ':'.join(['{:02x}'.format((mac >> elements) & 0xff) for elements in range(0, 8*6, 8)][::-1])
+            # 转换为大写形式
+            mac_str = mac_str.upper()
             return mac_str
         except Exception as e:
             logger.error(f"获取MAC地址失败: {str(e)}")
-            # 使用随机生成的MAC地址
+            # 使用随机生成的MAC地址，并转为大写
             import random
             mac = [random.randint(0x00, 0xff) for _ in range(6)]
-            mac_str = ':'.join(['{:02x}'.format(x) for x in mac])
+            mac_str = ':'.join(['{:02x}'.format(x) for x in mac]).upper()
             return mac_str
             
     def start(self) -> bool:
@@ -228,11 +251,6 @@ class MQTTClient:
         self.client.on_message = self._on_message
         self.client.on_disconnect = self._on_disconnect
         
-        # 设置认证
-        if self.username and self.password:
-            logger.info(f"使用认证: {self.username}")
-            self.client.username_pw_set(self.username, self.password)
-            
         # 设置遗嘱消息
         if self.topic_prefix and self.client_id:
             will_topic = f"{self.topic_prefix}connection"
@@ -377,17 +395,10 @@ class MQTTClient:
         result = self.client.subscribe(request_setting_topic, qos=2)
         logger.info(f"已订阅节点配置主题: {request_setting_topic}, 结果: {result}")
         
-        # 测试订阅通配符主题，确保能收到消息
-        wildcard_topic = f"{self.topic_prefix}+/request_setting"
-        result = self.client.subscribe(wildcard_topic, qos=2)
-        logger.info(f"已订阅通配符主题: {wildcard_topic}, 结果: {result}")
-        
-        # 特殊处理：同时订阅固定MAC地址(6A:C4:09:90:EF:DA)的主题，确保能接收来自API服务的消息
-        fixed_mac = "6A:C4:09:90:EF:DA"
-        if self.mac_address.upper() != fixed_mac:
-            fixed_topic = f"{self.topic_prefix}{fixed_mac}/request_setting"
-            result = self.client.subscribe(fixed_topic, qos=2)
-            logger.info(f"已订阅固定MAC地址主题: {fixed_topic}, 结果: {result}")
+        # 订阅连接状态主题
+        connection_topic = f"{self.topic_prefix}connection"
+        result = self.client.subscribe(connection_topic, qos=1)
+        logger.info(f"已订阅连接状态主题: {connection_topic}, 结果: {result}")
         
         # 订阅系统广播主题
         broadcast_topic = f"{self.topic_prefix}system/broadcast"
@@ -400,9 +411,7 @@ class MQTTClient:
         logger.info(f"主题前缀: {self.topic_prefix}")
         logger.info("已订阅的主题列表:")
         logger.info(f" - {request_setting_topic}")
-        logger.info(f" - {wildcard_topic}")
-        if self.mac_address.upper() != fixed_mac:
-            logger.info(f" - {fixed_topic}")
+        logger.info(f" - {connection_topic}")
         logger.info(f" - {broadcast_topic}")
         
     def _on_message(self, client, userdata, msg):
@@ -427,6 +436,15 @@ class MQTTClient:
             except json.JSONDecodeError:
                 logger.error(f"解析MQTT消息失败，非JSON格式: {payload[:100]}...")
                 return
+            
+            # 检查是否为request_setting主题
+            if "/request_setting" in topic:
+                logger.info("=" * 80)
+                logger.info(f"接收到request_setting主题消息: {topic}")
+                logger.info(f"完整原始消息内容: {payload}")
+                logger.info("JSON格式化消息内容:")
+                logger.info(json.dumps(data, ensure_ascii=False, indent=2))
+                logger.info("=" * 80)
                 
             # 处理不同主题的消息
             # 1. 处理自己的请求主题
@@ -434,52 +452,34 @@ class MQTTClient:
                 logger.info(f"接收到自己节点的配置请求: {topic}")
                 self._handle_request_setting(data)
             
-            # 2. 处理固定MAC地址的请求主题 - 虽然不是发给自己的，但我们也处理
-            elif topic.startswith(f"{self.topic_prefix}6A:C4:09:90:EF:DA/request_setting"):
-                logger.info(f"接收到固定MAC地址节点的配置请求，模拟该节点处理: {topic}")
-                # 处理消息时临时将自己的node_id设为固定MAC地址
-                original_node_id = self.node_id
-                self.node_id = "6A:C4:09:90:EF:DA"
-                try:
-                    self._handle_request_setting(data)
-                finally:
-                    # 恢复原始node_id
-                    self.node_id = original_node_id
-                
-            # 3. 处理通配符匹配到的请求主题
-            elif topic.endswith("/request_setting"):
-                logger.info(f"接收到通配符匹配的配置请求: {topic}")
+            # 2. 处理任何节点的request_setting主题 - 我们都尝试处理
+            elif "/request_setting" in topic:
+                logger.info(f"接收到其他节点的配置请求: {topic}")
                 # 尝试从主题中提取MAC地址
                 parts = topic.split('/')
                 if len(parts) > 1:
                     target_node = parts[-2]  # 倒数第二个部分应该是MAC地址
                     logger.info(f"目标节点: {target_node}")
                     
-                    # 如果目标节点不是自己，但我们也处理
-                    if target_node != self.node_id:
-                        logger.info(f"消息不是发给自己的，但我们也处理")
-                        # 临时将自己的node_id设为目标节点
-                        original_node_id = self.node_id
-                        self.node_id = target_node
-                        try:
-                            self._handle_request_setting(data)
-                        finally:
-                            # 恢复原始node_id
-                            self.node_id = original_node_id
-                    else:
-                        # 消息是发给自己的
+                    # 临时将自己的node_id设为目标节点
+                    original_node_id = self.node_id
+                    self.node_id = target_node
+                    try:
                         self._handle_request_setting(data)
+                    finally:
+                        # 恢复原始node_id
+                        self.node_id = original_node_id
                 else:
                     logger.warning(f"无法从主题中提取节点ID: {topic}")
                     # 尝试处理消息
                     self._handle_request_setting(data)
                 
-            # 4. 处理系统广播消息
+            # 3. 处理系统广播消息
             elif topic == f"{self.topic_prefix}system/broadcast":
                 # 处理系统广播消息
                 self._handle_broadcast(data)
             
-            # 5. 其他未处理的主题
+            # 4. 其他未处理的主题
             else:
                 logger.info(f"未处理的消息主题: {topic}")
                 
@@ -587,11 +587,11 @@ class MQTTClient:
         # 处理不同类型的命令
         if cmd_type == "start_task":
             # 启动任务命令
-            self._handle_start_task_cmd(cmd_data, message_id, message_uuid, confirmation_topic)
+            self._handle_start_task_cmd(data, message_id, message_uuid, confirmation_topic)
             
         elif cmd_type == "stop_task":
             # 停止任务命令
-            self._handle_stop_task_cmd(cmd_data, message_id, message_uuid, confirmation_topic)
+            self._handle_stop_task_cmd(data, message_id, message_uuid, confirmation_topic)
             
         else:
             logger.warning(f"未知的任务命令类型: {cmd_type}")
@@ -682,7 +682,7 @@ class MQTTClient:
         
     def _handle_start_task_cmd(self, data, message_id, message_uuid, confirmation_topic):
         """
-        处理启动任务命令
+        处理开始任务命令
         
         Args:
             data: 命令数据
@@ -690,113 +690,107 @@ class MQTTClient:
             message_uuid: 消息UUID
             confirmation_topic: 确认主题
         """
-        # 提取任务信息
-        task_id = data.get("task_id")
-        subtask_id = data.get("subtask_id")
-        source = data.get("source", {})
-        config = data.get("config", {})
-        result_config = data.get("result_config", {})
+        logger.info(f"处理开始任务命令: {data}")
         
-        # 打印详细的任务信息
-        logger.info("=" * 50)
-        logger.info(f"启动任务: task_id={task_id}, subtask_id={subtask_id}")
-        logger.info(f"数据源类型: {source.get('type', '未指定')}")
-        if source.get("urls"):
-            logger.info(f"流URL: {source.get('urls')}")
-        if source.get("url"):
-            logger.info(f"流URL (url字段): {source.get('url')}")
-        logger.info(f"模型代码: {config.get('model_code', '未指定')}")
-        logger.info(f"分析类型: {config.get('analysis_type', '未指定')}")
-        logger.info(f"结果配置: {json.dumps(result_config, ensure_ascii=False)}")
-        logger.info("=" * 50)
+        # 提取任务信息 - 修正：从data["data"]中获取数据，而不是直接从data中获取
+        cmd_data = data.get("data", {})
+        task_id = cmd_data.get("task_id")
+        subtask_id = cmd_data.get("subtask_id")
+        source = cmd_data.get("source", {})
+        source_type = source.get("type")
+        config = cmd_data.get("config", {})
+        result_config = cmd_data.get("result_config", {})
         
-        # 任务类型，根据source类型来确定
-        source_type = source.get("type", "")
-        task_type = source_type  # 默认使用source类型作为任务类型
+        # 记录详细任务信息
+        logger.info(f"任务ID: {task_id}")
+        logger.info(f"子任务ID: {subtask_id}")
+        logger.info(f"源类型: {source_type}")
+        logger.info(f"源配置: {source}")
+        logger.info(f"任务配置: {config}")
+        logger.info(f"结果配置: {result_config}")
         
-        # 验证必要字段
-        if not task_id or not subtask_id or not source_type:
-            logger.error("无效的启动任务命令，缺少必要字段")
-            error_data = {
-                "cmd_type": "start_task",
-                "error_code": "ERR_001",
-                "error_type": "INVALID_PARAMS",
-                "message": "缺少必要字段: task_id、subtask_id或source.type"
-            }
-            self._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error", data=error_data)
-            return
+        # 记录模型代码和分析类型
+        model_code = config.get("model_code", "")
+        analysis_type = config.get("analysis_type", "")
+        logger.info(f"模型代码: {model_code}")
+        logger.info(f"分析类型: {analysis_type}")
+        
+        # 检查必要的信息是否存在
+        if not task_id:
+            error_msg = "缺少任务ID"
+            logger.error(error_msg)
+            if confirmation_topic:
+                self._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error", 
+                                     data={"error_message": error_msg})
+            return False
             
-        logger.info(f"收到启动任务命令: {task_id}/{subtask_id}, 类型: {source_type}")
-        
-        # 检查任务类型
-        if task_type not in self.task_handlers:
-            logger.error(f"不支持的任务类型: {task_type}")
-            logger.error(f"已注册的任务类型: {list(self.task_handlers.keys())}")
-            error_data = {
-                "cmd_type": "start_task",
-                "task_id": task_id,
-                "subtask_id": subtask_id,
-                "error_code": "ERR_002",
-                "error_type": "UNSUPPORTED_TYPE",
-                "message": f"不支持的任务类型: {task_type}"
-            }
-            self._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error", data=error_data)
-            return
+        if not subtask_id:
+            error_msg = "缺少子任务ID"
+            logger.error(error_msg)
+            if confirmation_topic:
+                self._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error", 
+                                     data={"error_message": error_msg})
+            return False
             
-        # 检查任务是否已存在
-        task_key = f"{task_id}_{subtask_id}"
-        with self.active_tasks_lock:
-            if task_key in self.active_tasks:
-                logger.warning(f"任务已存在: {task_id}/{subtask_id}")
-                error_data = {
-                    "cmd_type": "start_task",
-                    "task_id": task_id,
-                    "subtask_id": subtask_id,
-                    "error_code": "ERR_003",
-                    "error_type": "TASK_EXISTS",
-                    "message": "任务已存在"
-                }
-                self._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error", data=error_data)
-                return
-                
-        # 创建停止检查函数
-        def should_stop():
-            with self.active_tasks_lock:
-                return task_key not in self.active_tasks or self.stop_event.is_set()
-                
-        # 记录活跃任务
-        with self.active_tasks_lock:
-            self.active_tasks[task_key] = {
-                "start_time": time.time(),
-                "source": source,
-                "config": config,
-                "result_config": result_config
-            }
+        if not source_type:
+            error_msg = "缺少源类型"
+            logger.error(error_msg)
+            if confirmation_topic:
+                self._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error", 
+                                     data={"error_message": error_msg})
+            return False
             
-        # 发送接受任务的响应
-        success_data = {
-            "cmd_type": "start_task",
-            "task_id": task_id,
-            "subtask_id": subtask_id,
-            "message": "任务已成功启动",
-            "timestamp": int(time.time())
-        }
-        self._send_cmd_reply(message_id, message_uuid, confirmation_topic, "success", data=success_data)
-        logger.info(f"已接受任务: {task_id}/{subtask_id}")
+        # 处理不同类型的源
+        url = ""
+        if source_type in ["image", "video", "stream"]:
+            # 获取URL
+            url = source.get("url", "")
+            if not url and "urls" in source and source["urls"]:
+                url = source["urls"][0]
+            
+        # 记录URL信息
+        logger.info(f"解析后的URL: {url}")
         
-        # 发送任务状态：正在处理
-        self._send_task_status(task_id, subtask_id, "processing")
+        # 检查任务类型是否支持
+        logger.info(f"当前已注册的任务处理器: {list(self.task_handlers.keys())}")
         
-        # 启动任务线程
-        logger.info(f"启动任务执行线程: task_id={task_id}, subtask_id={subtask_id}, 类型={task_type}")
-        task_thread = threading.Thread(
-            target=self._run_task,
-            args=(task_id, subtask_id, task_type, source, config, should_stop),
-            daemon=True
-        )
-        task_thread.start()
-        logger.info(f"任务线程已启动: task_id={task_id}, subtask_id={subtask_id}")
+        if source_type in self.task_handlers:
+            # 使用源类型作为任务类型
+            handler = self.task_handlers[source_type]
+            logger.info(f"使用{source_type}处理器处理任务")
+        elif analysis_type and analysis_type in self.task_handlers:
+            # 如果源类型没有对应的处理器，尝试使用分析类型
+            handler = self.task_handlers[analysis_type]
+            logger.info(f"使用{analysis_type}处理器处理任务")
+        else:
+            # 尝试使用默认处理器
+            if "detection" in self.task_handlers and source_type == "stream":
+                handler = self.task_handlers["detection"]
+                logger.info("使用默认detection处理器处理流任务")
+            else:
+                # 无法找到合适的处理器
+                available_handlers = list(self.task_handlers.keys())
+                error_msg = f"不支持的任务类型: {source_type}, 分析类型: {analysis_type}. 已注册的任务类型: {available_handlers}"
+                logger.error(error_msg)
+                if confirmation_topic:
+                    self._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error", 
+                                      data={"error_message": error_msg, "task_id": task_id, "subtask_id": subtask_id})
+                return False
         
+        # 执行任务
+        try:
+            success = handler(task_id, subtask_id, source, config, result_config, 
+                             message_id, message_uuid, confirmation_topic)
+            return success
+        except Exception as e:
+            error_msg = f"执行任务时出错: {str(e)}"
+            logger.error(error_msg)
+            logger.exception(e)
+            if confirmation_topic:
+                self._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error", 
+                                   data={"error_message": error_msg, "task_id": task_id, "subtask_id": subtask_id})
+            return False
+    
     def _handle_stop_task_cmd(self, data, message_id, message_uuid, confirmation_topic):
         """
         处理停止任务命令
@@ -807,9 +801,10 @@ class MQTTClient:
             message_uuid: 消息UUID
             confirmation_topic: 确认主题
         """
-        # 提取任务信息
-        task_id = data.get("task_id")
-        subtask_id = data.get("subtask_id")
+        # 提取任务信息 - 修正：从data["data"]中获取数据，而不是直接从data中获取
+        cmd_data = data.get("data", {})
+        task_id = cmd_data.get("task_id")
+        subtask_id = cmd_data.get("subtask_id")
         
         # 验证必要字段
         if not task_id or not subtask_id:

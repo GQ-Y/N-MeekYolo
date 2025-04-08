@@ -5,6 +5,7 @@
 import os
 import sys
 import logging
+import socket
 from typing import Dict, Any, List, Optional, Union
 
 # 添加父级目录到sys.path以允许导入core模块
@@ -33,7 +34,7 @@ def create_analyzer_service(service_mode: str = None) -> BaseAnalyzerService:
     """
     # 如果未指定服务模式，从配置中读取
     if service_mode is None:
-        service_mode = settings.SERVICES.mode.lower()
+        service_mode = settings.COMMUNICATION.mode.lower()
     else:
         service_mode = service_mode.lower()
     
@@ -41,7 +42,17 @@ def create_analyzer_service(service_mode: str = None) -> BaseAnalyzerService:
     
     # 根据服务模式创建对应的服务实例
     if service_mode == "mqtt":
-        return MQTTAnalyzerService()
+        # 使用MQTT配置创建MQTT分析服务
+        device_id = settings.MQTT.node_id if settings.MQTT.node_id else socket.gethostname()
+        mqtt_config = {
+            "host": settings.MQTT.broker_host,
+            "port": settings.MQTT.broker_port,
+            "username": settings.MQTT.username,
+            "password": settings.MQTT.password,
+            "topic_prefix": settings.MQTT.topic_prefix
+        }
+        logger.info(f"MQTT配置: 设备ID={device_id}, 代理={mqtt_config['host']}:{mqtt_config['port']}, 前缀={mqtt_config['topic_prefix']}")
+        return MQTTAnalyzerService(device_id=device_id, mqtt_config=mqtt_config)
     else:
         # 默认使用HTTP模式
         return HTTPAnalyzerService()

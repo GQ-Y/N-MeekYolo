@@ -225,18 +225,21 @@ async def startup_event():
             analyzer_service = create_analyzer_service("mqtt")
             app.state.analyzer_service = analyzer_service
             
-            # 再次获取MQTT客户端，确保是同一个实例
-            mqtt_client = get_mqtt_client()
-            if mqtt_client.start():
-                logger.info("MQTT客户端启动成功")
+            # 确保MQTT分析服务连接并注册处理器
+            # 这一步非常关键，确保任务处理器正确注册到MQTT客户端
+            connect_result = await analyzer_service.connect()
+            if connect_result:
+                logger.info("MQTT分析服务已连接并注册处理器")
                 
-                # 打印订阅的主题信息
-                logger.info(f"MQTT客户端节点ID: {mqtt_client.node_id}")
-                logger.info(f"MQTT客户端MAC地址: {mqtt_client.mac_address}")
-                request_setting_topic = f"{mqtt_client.topic_prefix}{mqtt_client.node_id}/request_setting"
-                logger.info(f"订阅的请求主题: {request_setting_topic}")
+                # 获取MQTT客户端实例以验证处理器是否已注册
+                mqtt_client = analyzer_service.mqtt_client
+                handler_types = list(mqtt_client.task_handlers.keys())
+                logger.info(f"已注册的任务处理器类型: {handler_types}")
+                
+                if not handler_types:
+                    logger.error("未找到已注册的任务处理器，MQTT任务处理将无法正常工作!")
             else:
-                logger.error("MQTT客户端启动失败")
+                logger.error("MQTT分析服务连接失败，任务处理器可能未注册!")
         except Exception as e:
             logger.error(f"MQTT客户端初始化失败: {str(e)}")
             import traceback
@@ -250,12 +253,14 @@ async def shutdown_event():
     # 关闭MQTT客户端
     if settings.COMMUNICATION.mode.lower() == "mqtt":
         try:
-            from services.mqtt_client import get_mqtt_client
-            mqtt_client = get_mqtt_client()
-            if mqtt_client.stop():
-                logger.info("MQTT客户端已关闭")
+            if hasattr(app.state, "analyzer_service") and hasattr(app.state.analyzer_service, "mqtt_client"):
+                mqtt_client = app.state.analyzer_service.mqtt_client
+                if mqtt_client.stop():
+                    logger.info("MQTT客户端已关闭")
+                else:
+                    logger.warning("MQTT客户端关闭失败")
             else:
-                logger.warning("MQTT客户端关闭失败")
+                logger.warning("未找到MQTT客户端实例，无法正常关闭")
         except Exception as e:
             logger.error(f"关闭MQTT客户端失败: {str(e)}")
     
