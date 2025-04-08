@@ -20,7 +20,7 @@ MQTT:
   username: yolo                 # MQTT用户名
   password: yolo                 # MQTT密码
   client_id: api_service         # MQTT客户端ID前缀，会追加随机字符
-  topic_prefix: yolo/            # MQTT主题前缀
+  topic_prefix: meek/            # MQTT主题前缀
   keepalive: 60                  # 保活时间(秒)
   qos: 1                         # QoS等级
 

@@ -389,18 +389,100 @@ async def start_task(
                 logger.info(f"子任务参数: 模型={model.code}, 流URL={stream.url}")
                 logger.info(f"子任务配置: {subtask.config}")
                 
-                result = await analysis_service.analyze_stream(
-                    model_code=model.code,
-                    stream_url=stream.url,
-                    task_name=f"{task.name}-{subtask.id}",
-                    callback_url=system_callback, # 系统回调
-                    callback_urls=user_callback_url, # 用户配置的回调
-                    enable_callback=subtask.enable_callback,
-                    save_result=task.save_result,
-                    config=subtask.config,
-                    analysis_task_id=subtask.analysis_task_id, # 可能的已有任务ID
-                    analysis_type=subtask.analysis_type
-                )
+                # 获取当前通信模式
+                from core.config import settings as config_settings
+                import yaml
+                comm_mode = "http"  # 默认值
+                try:
+                    with open("config/config.yaml", "r", encoding="utf-8") as f:
+                        config = yaml.safe_load(f)
+                        comm_mode = config.get('COMMUNICATION', {}).get('mode', 'http')
+                        logger.info(f"当前通信模式: {comm_mode}")
+                except Exception as e:
+                    logger.error(f"读取配置文件失败，使用默认HTTP模式: {e}")
+                
+                # 根据通信模式使用不同的客户端
+                result = None
+                if comm_mode == "mqtt":
+                    # 使用应用级别的MQTT客户端而不是创建新的
+                    from fastapi import FastAPI
+                    from app import app as fastapi_app
+                    
+                    if not hasattr(fastapi_app.state, "analysis_client") or not fastapi_app.state.analysis_client:
+                        logger.error("无法获取应用程序状态中的analysis_client，无法启动任务")
+                        error_msg = "MQTT客户端不可用，任务无法启动"
+                        failed_subtasks.append((subtask.id, error_msg))
+                        continue
+                    
+                    analysis_client = fastapi_app.state.analysis_client
+                    
+                    # 确保MQTT客户端已连接
+                    if not analysis_client.mqtt_connected:
+                        logger.warning("应用程序中的MQTT客户端未连接，尝试重新连接")
+                        analysis_client.mqtt_client.connect()
+                        if not analysis_client.mqtt_connected:
+                            logger.warning("MQTT客户端未连接，但会继续任务创建，等待客户端连接后会自动处理")
+                    
+                    # 调用MQTT客户端处理任务 - 不等待响应，只获取任务ID
+                    response = await analysis_client.analyze_stream(
+                        model_code=model.code,
+                        stream_url=stream.url,
+                        task_name=f"{task.name}-{subtask.id}",
+                        callback_url=system_callback,
+                        callback_urls=user_callback_url,
+                        enable_callback=subtask.enable_callback,
+                        save_result=task.save_result,
+                        config=subtask.config,
+                        task_id=subtask.analysis_task_id,
+                        analysis_type=subtask.analysis_type
+                    )
+                    
+                    if response.get('success', False):
+                        data = response.get('data', {})
+                        analysis_task_id = data.get('task_id')
+                        
+                        if analysis_task_id:
+                            # 先记录任务，状态为已创建但未运行
+                            # 保存分析任务ID
+                            subtask.analysis_task_id = analysis_task_id
+                            subtask.status = 0  # 未启动状态，等待客户端响应
+                            subtask.error_message = "任务已创建，等待MQTT节点接收"
+                            
+                            # 可选择性获取MQTT节点，但不阻止任务创建
+                            mqtt_node = await analysis_client.mqtt_client.get_available_mqtt_node()
+                            mqtt_node_id = mqtt_node.id if mqtt_node else None
+                            subtask.mqtt_node_id = mqtt_node_id
+                            
+                            # 记录成功创建的任务
+                            result = (analysis_task_id, None)  # node_id为None，表示使用MQTT
+                            logger.info(f"成功创建MQTT任务：{analysis_task_id}，等待MQTT节点接收后运行")
+                            success_count += 1
+                        else:
+                            logger.error(f"MQTT响应缺少任务ID: {response}")
+                            error_msg = "MQTT响应缺少任务ID"
+                            subtask.error_message = f"启动MQTT分析服务失败: {error_msg}"
+                            failed_subtasks.append((subtask.id, error_msg))
+                            continue
+                    else:
+                        error_msg = response.get('message', '未知错误')
+                        logger.error(f"MQTT任务启动失败: {error_msg}")
+                        subtask.error_message = f"启动MQTT分析服务失败: {error_msg}"
+                        failed_subtasks.append((subtask.id, error_msg))
+                        continue
+                else:
+                    # 使用HTTP分析服务
+                    result = await analysis_service.analyze_stream(
+                        model_code=model.code,
+                        stream_url=stream.url,
+                        task_name=f"{task.name}-{subtask.id}",
+                        callback_url=system_callback,
+                        callback_urls=user_callback_url,
+                        enable_callback=subtask.enable_callback,
+                        save_result=task.save_result,
+                        config=subtask.config,
+                        analysis_task_id=subtask.analysis_task_id,
+                        analysis_type=subtask.analysis_type
+                    )
                 
                 if not result:
                     error_msg = "未找到可用的分析节点"
@@ -414,13 +496,20 @@ async def start_task(
                 
                 # 保存分析任务ID和节点ID
                 subtask.analysis_task_id = analysis_task_id
-                subtask.node_id = node_id
+                
+                # 根据通信模式设置不同的节点ID
+                if comm_mode == "mqtt":
+                    subtask.node_id = None  # HTTP节点ID
+                    subtask.mqtt_node_id = mqtt_node_id  # MQTT节点ID
+                else:
+                    subtask.node_id = node_id  # HTTP节点ID
+                    subtask.mqtt_node_id = None  # MQTT节点ID
                 
                 # 只有在确认启动成功后，才将状态设为运行中(1)
                 subtask.status = 1  # 运行中状态(1)
                 subtask.started_at = datetime.now()
                 
-                logger.info(f"子任务 {subtask.id} 启动成功，分析任务ID: {analysis_task_id}，节点ID: {node_id}")
+                logger.info(f"子任务 {subtask.id} 启动成功，分析任务ID: {analysis_task_id}，节点ID: {node_id if comm_mode != 'mqtt' else 'MQTT模式'}")
                 success_count += 1
                 
             except Exception as e:

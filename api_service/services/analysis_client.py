@@ -9,6 +9,8 @@ from crud.node import NodeCRUD
 from core.database import SessionLocal
 from models.database import Node
 from datetime import datetime
+import yaml
+import traceback
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +36,31 @@ class AnalysisClient:
         # 初始化MQTT客户端
         if self.mode == 'mqtt' or self.mode == 'both':
             self.mqtt_client = MQTTClient(config.get('MQTT', {}))
-            self.mqtt_connected = self.mqtt_client.connect()
+            self._mqtt_connected = self.mqtt_client.connect()
         else:
             self.mqtt_client = None
-            self.mqtt_connected = False
+            self._mqtt_connected = False
             
         logger.info(f"分析服务客户端初始化完成，通信模式: {self.mode}")
+    
+    @property
+    def mqtt_connected(self):
+        """获取MQTT连接状态"""
+        # 优先检查客户端本身是否连接
+        if self.mqtt_client:
+            # 优先使用客户端的is_connected方法（如果可用）
+            if hasattr(self.mqtt_client, "is_connected") and callable(getattr(self.mqtt_client, "is_connected")):
+                is_connected = self.mqtt_client.is_connected()
+                # 如果状态与缓存不一致，更新缓存
+                if is_connected != self._mqtt_connected:
+                    logger.info(f"更新MQTT连接状态缓存: {self._mqtt_connected} -> {is_connected}")
+                    self._mqtt_connected = is_connected
+                return is_connected
+            # 否则使用mqtt_client.connected属性
+            elif hasattr(self.mqtt_client, "connected"):
+                return self.mqtt_client.connected
+        # 如果无法检查，返回缓存状态
+        return self._mqtt_connected
     
     async def _get_available_node(self, task_type: str = "image") -> Tuple[Optional[int], Optional[str]]:
         """
@@ -303,6 +324,13 @@ class AnalysisClient:
             # 使用MQTT通信
             logger.info(f"使用MQTT模式发送视频分析请求: task_id={task_id}")
             
+            # 获取可用的MQTT节点
+            mqtt_node = await self.mqtt_client.get_available_mqtt_node()
+            if not mqtt_node:
+                logger.warning("未找到可用的MQTT节点，将直接创建任务")
+                # 不提前返回，继续尝试创建任务
+            
+            # 构建任务配置
             task_config = {
                 "source": {
                     "type": "video",
@@ -319,14 +347,31 @@ class AnalysisClient:
                 }
             }
             
-            success = self.mqtt_client.publish_task_request(task_id, "video_analysis", task_config)
+            # 如果找到节点，尝试通过MQTT发送任务
+            success = False
+            response = {"error": "未初始化"}
+            
+            if mqtt_node:
+                # 使用正确的方法发送任务
+                success, response = await self.mqtt_client.send_task_to_node(
+                    mac_address=mqtt_node.mac_address,
+                    task_id=task_id,
+                    subtask_id=f"{task_id}-1",  # 生成子任务ID
+                    config=task_config
+                )
+            else:
+                # 即使没有找到MQTT节点，也创建一个任务（稍后可以通过健康检查重新分配）
+                logger.warning(f"没有可用的MQTT节点，创建任务 {task_id} 但不分配节点")
+                # 自己处理成功状态和响应
+                success = True
+                response = {}
             
             if success:
                 return {
                     "requestId": task_id,
                     "path": "/api/v1/analyze/video",
                     "success": True,
-                    "message": "任务已提交",
+                    "message": "任务已提交" + (" (未分配节点)" if not mqtt_node else ""),
                     "code": 200,
                     "data": {
                         "task_id": task_id
@@ -338,7 +383,7 @@ class AnalysisClient:
                     "requestId": task_id,
                     "path": "/api/v1/analyze/video",
                     "success": False,
-                    "message": "MQTT消息发送失败",
+                    "message": f"MQTT消息发送失败: {response.get('error', '未知错误')}",
                     "code": 500,
                     "data": None,
                     "timestamp": int(time.time())
@@ -432,6 +477,13 @@ class AnalysisClient:
             # 使用MQTT通信
             logger.info(f"使用MQTT模式发送流分析请求: task_id={task_id}")
             
+            # 获取可用的MQTT节点
+            mqtt_node = await self.mqtt_client.get_available_mqtt_node()
+            if not mqtt_node:
+                logger.warning("未找到可用的MQTT节点，将直接创建任务")
+                # 不提前返回，继续尝试创建任务
+            
+            # 构建任务配置
             task_config = {
                 "source": {
                     "type": "stream",
@@ -450,14 +502,31 @@ class AnalysisClient:
                 }
             }
             
-            success = self.mqtt_client.publish_task_request(task_id, "stream_analysis", task_config)
+            # 如果找到节点，尝试通过MQTT发送任务
+            success = False
+            response = {"error": "未初始化"}
+            
+            if mqtt_node:
+                # 使用正确的方法发送任务
+                success, response = await self.mqtt_client.send_task_to_node(
+                    mac_address=mqtt_node.mac_address,
+                    task_id=task_id,
+                    subtask_id=f"{task_id}-1",  # 生成子任务ID
+                    config=task_config
+                )
+            else:
+                # 即使没有找到MQTT节点，也创建一个任务（稍后可以通过健康检查重新分配）
+                logger.warning(f"没有可用的MQTT节点，创建任务 {task_id} 但不分配节点")
+                # 自己处理成功状态和响应
+                success = True
+                response = {}
             
             if success:
                 return {
                     "requestId": task_id,
                     "path": "/api/v1/analyze/stream",
                     "success": True,
-                    "message": "任务已提交",
+                    "message": "任务已提交" + (" (未分配节点)" if not mqtt_node else ""),
                     "code": 200,
                     "data": {
                         "task_id": task_id
@@ -469,7 +538,7 @@ class AnalysisClient:
                     "requestId": task_id,
                     "path": "/api/v1/analyze/stream",
                     "success": False,
-                    "message": "MQTT消息发送失败",
+                    "message": f"MQTT消息发送失败: {response.get('error', '未知错误')}",
                     "code": 500,
                     "data": None,
                     "timestamp": int(time.time())
@@ -880,5 +949,5 @@ class AnalysisClient:
         析构函数，确保资源被正确释放
         """
         # 断开MQTT连接
-        if hasattr(self, 'mqtt_client') and self.mqtt_client and getattr(self, 'mqtt_connected', False):
+        if hasattr(self, 'mqtt_client') and self.mqtt_client and getattr(self, '_mqtt_connected', False):
             self.mqtt_client.disconnect() 

@@ -106,62 +106,59 @@ def show_service_banner(service_name: str):
 
 @app.on_event("startup")
 async def startup_event():
-    """应用启动时的初始化"""
-    global analysis_client
+    """应用启动时的事件处理"""
+    logger.info("API服务启动...")
     
-    # 加载配置文件
-    config = load_config()
+    # 读取配置
+    comm_mode = settings.config.get('COMMUNICATION', {}).get('mode', 'http')
+    logger.info(f"通信模式: {comm_mode}")
     
-    show_service_banner("api_service")
-    logger.info("Starting API Service...")
-    try:
-        comm_mode = config.get('COMMUNICATION', {}).get('mode', 'http')
-        logger.info(f"当前通信模式: {comm_mode}")
-
-        # 先初始化数据库
-        logger.info("正在初始化数据库...")
-        from services.database import init_db
-        init_db()
-        
-        # 初始化分析服务客户端
-        logger.info("正在初始化分析服务客户端...")
-        analysis_client = AnalysisClient(config)
-        app.state.analysis_client = analysis_client
-        logger.info(f"分析服务客户端初始化完成: {comm_mode}模式")
-        
-        logger.info("正在启动API服务...")
-        
-        # 启动视频源监控服务(不等待初始化完成)
-        await stream_monitor.start()
-        logger.info("视频源监控服务启动成功")
-        
-        # 启动节点健康检查服务
-        logger.info("正在启动节点健康检查服务...")
-        health_check_task = asyncio.create_task(start_health_checker())
-        await asyncio.sleep(1)  # 等待服务启动
-        if not health_check_task.done():
-            if comm_mode == "mqtt":
-                logger.info("节点健康检查服务启动成功 (MQTT模式 - 被动监控节点状态)")
-            else:
-                logger.info("节点健康检查服务启动成功 (HTTP模式 - 主动检查节点状态)")
+    # 初始化分析客户端
+    app.state.analysis_client = AnalysisClient(config=settings.config)
+    
+    # 检查MQTT连接状态
+    if comm_mode == 'mqtt':
+        if not hasattr(app.state, 'analysis_client') or not app.state.analysis_client or not app.state.analysis_client.mqtt_connected:
+            logger.error("MQTT客户端连接失败! 请检查以下MQTT配置:")
+            logger.error(f"  - 服务器: {settings.config.get('MQTT', {}).get('broker_host')}:{settings.config.get('MQTT', {}).get('broker_port')}")
+            logger.error(f"  - 客户端ID: {settings.config.get('MQTT', {}).get('client_id')}")
+            logger.error(f"  - 用户名: {settings.config.get('MQTT', {}).get('username')}")
+            logger.error(f"  - 密码: {'已设置' if settings.config.get('MQTT', {}).get('password') else '未设置'}")
+            logger.error(f"  - 主题前缀: {settings.config.get('MQTT', {}).get('topic_prefix')}")
+            logger.warning("API服务将以受限模式运行，直到MQTT连接恢复")
             
-            # 启动后立即手动执行一次节点健康检查
-            from services.node_health_check import health_checker
-            logger.info("执行首次节点健康检查...")
+            # 尝试再次连接
             try:
-                await health_checker.check_nodes_health() if comm_mode == "http" else await health_checker.check_mqtt_nodes_health()
-                logger.info("首次节点健康检查完成")
+                if app.state.analysis_client and app.state.analysis_client.mqtt_client:
+                    logger.info("尝试重新连接MQTT...")
+                    app.state.analysis_client.mqtt_client.connect()
+                    if app.state.analysis_client.mqtt_connected:
+                        logger.info("MQTT重新连接成功!")
+                    else:
+                        logger.warning("MQTT重新连接失败，将在后台继续尝试")
             except Exception as e:
-                logger.error(f"首次节点健康检查失败: {str(e)}")
+                logger.error(f"MQTT重新连接异常: {e}")
         else:
-            error = health_check_task.exception()
-            if error:
-                logger.error(f"节点健康检查服务启动失败: {str(error)}")
-                raise error
-            
+            logger.info("MQTT客户端连接成功!")
+    
+    # 初始化健康检查服务
+    try:
+        from services.node_health_check import start_health_checker
+        app.state.health_checker = await start_health_checker()
+        logger.info("节点健康检查服务启动成功")
+        
+        # 执行首次健康检查
+        if comm_mode == 'mqtt':
+            logger.info("执行首次MQTT节点健康检查")
+            await app.state.health_checker.check_mqtt_nodes_health()
+        else:
+            logger.info("执行首次HTTP节点健康检查")
+            await app.state.health_checker.check_nodes_health()
     except Exception as e:
-        logger.error(f"启动失败: {str(e)}")
-        raise
+        logger.error(f"健康检查服务启动失败: {e}")
+        # 不中断启动过程，继续运行服务
+    
+    logger.info("API服务启动完成")
 
 @app.on_event("shutdown")
 async def shutdown_event():

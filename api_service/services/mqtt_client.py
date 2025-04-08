@@ -74,24 +74,117 @@ class MQTTClient:
         连接到MQTT Broker
         
         Returns:
-            bool: 连接是否成功
+            bool: 是否连接成功
         """
-        try:
-            # API服务作为管理者不需要设置遗嘱消息
-            logger.info(f"正在连接到MQTT Broker: {self.config.get('broker_host', 'localhost')}:{self.config.get('broker_port', 1883)}")
-            
-            # 连接到broker
-            self.client.connect(
-                self.config.get('broker_host', 'localhost'),
-                self.config.get('broker_port', 1883),
-                keepalive=self.config.get('keepalive', 60)
-            )
-            
-            # 启动循环
-            self.client.loop_start()
+        if self.connected:
+            logger.info("MQTT客户端已连接，无需重新连接")
             return True
+            
+        try:
+            # 设置连接回调
+            self.client.on_connect = self._on_connect
+            self.client.on_message = self._on_message
+            self.client.on_disconnect = self._on_disconnect
+            
+            # 设置认证
+            if self.config.get("username") and self.config.get("password"):
+                logger.info(f"使用认证信息连接MQTT: 用户名={self.config.get('username')}")
+                self.client.username_pw_set(
+                    self.config.get("username"),
+                    self.config.get("password")
+                )
+            
+            # 设置遗嘱消息
+            if self.topic_prefix and self.client_id:
+                logger.info(f"设置遗嘱消息，主题: {self.topic_prefix}connection")
+                will_payload = json.dumps({
+                    "status": "offline",
+                    "client_id": self.client_id,
+                    "timestamp": int(time.time())
+                })
+                self.client.will_set(
+                    f"{self.topic_prefix}connection",
+                    will_payload,
+                    qos=self.config.get("qos", 1),
+                    retain=False
+                )
+            
+            # 尝试连接多次
+            max_retries = 3
+            retry_delay = 1  # 秒
+            
+            for attempt in range(1, max_retries + 1):
+                try:
+                    logger.info(f"尝试连接MQTT Broker [{attempt}/{max_retries}]: {self.config.get('broker_host')}:{self.config.get('broker_port')}")
+                    
+                    # 设置较短的连接超时
+                    self.client.connect(
+                        self.config.get("broker_host"),
+                        self.config.get("broker_port", 1883),
+                        keepalive=self.config.get("keepalive", 60)
+                    )
+                    
+                    # 即使没有收到on_connect回调，也需要启动网络循环，否则回调不会被触发
+                    self.client.loop_start()
+                    
+                    # 等待2秒，看是否接收到on_connect回调或检测到连接状态
+                    start_time = time.time()
+                    while time.time() - start_time < 2:
+                        # 使用两种方法检查连接状态
+                        if self.connected or self.client.is_connected():
+                            if not self.connected and self.client.is_connected():
+                                logger.info("通过is_connected()检测到连接成功，但未收到回调")
+                                self.connected = True
+                            logger.info("MQTT连接成功")
+                            break
+                        time.sleep(0.1)
+                    
+                    if self.connected or self.client.is_connected():
+                        # 确保connected标志与实际状态一致
+                        self.connected = True
+                        break
+                    else:
+                        logger.warning(f"连接尝试 {attempt} 未收到连接确认，可能连接失败")
+                        # 停止网络循环，准备下一次尝试
+                        self.client.loop_stop()
+                        
+                    if attempt < max_retries:
+                        logger.info(f"等待 {retry_delay} 秒后重试...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # 指数退避
+                        
+                except Exception as e:
+                    logger.error(f"连接MQTT Broker失败 [{attempt}/{max_retries}]: {e}")
+                    if attempt < max_retries:
+                        logger.info(f"等待 {retry_delay} 秒后重试...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # 指数退避
+                    else:
+                        raise
+            
+            # 启动网络循环线程（如果已经启动则忽略）
+            if not self.client.is_connected() and self.connected:
+                logger.info("启动MQTT网络循环")
+                self.client.loop_start()
+            elif not self.connected and self.client.is_connected():
+                # 状态不一致，更新标志
+                logger.info("客户端已连接但标志未更新，修正状态")
+                self.connected = True
+            
+            # 发布连接状态
+            if self.connected or self.client.is_connected():
+                self.connected = True  # 确保状态一致
+                logger.info("发布上线状态")
+                self._publish_connection_status("online")
+                return True
+            else:
+                logger.error("MQTT客户端无法连接，未收到连接确认")
+                return False
+                
         except Exception as e:
-            logger.error(f"MQTT连接失败: {e}")
+            logger.error(f"连接MQTT Broker失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
     
     def disconnect(self):
@@ -295,6 +388,47 @@ class MQTTClient:
                 self.command_responses[message_uuid] = payload
                 logger.info(f"命令响应已保存: {message_uuid}, 状态: {status}")
                 
+                # 处理任务指令响应
+                if payload.get('data', {}).get('cmd_type') == 'start_task':
+                    task_data = payload.get('data', {})
+                    task_id = task_data.get('task_id')
+                    subtask_id = task_data.get('subtask_id')
+                    
+                    if task_id and subtask_id:
+                        # 更新数据库中的子任务状态
+                        db = SessionLocal()
+                        try:
+                            # 查找子任务
+                            subtask = db.query(SubTask).filter(
+                                SubTask.analysis_task_id == subtask_id
+                            ).first()
+                            
+                            if subtask:
+                                if status == 'success':
+                                    # 任务被节点成功接收，更新状态为运行中
+                                    logger.info(f"MQTT节点接收任务成功: task_id={task_id}, subtask_id={subtask_id}")
+                                    subtask.status = 1  # 运行中状态
+                                    subtask.started_at = datetime.now()
+                                    subtask.error_message = None
+                                else:
+                                    # 任务被节点拒绝，记录错误信息
+                                    error_msg = task_data.get('message', '节点拒绝任务')
+                                    logger.warning(f"MQTT节点拒绝任务: task_id={task_id}, subtask_id={subtask_id}, 原因: {error_msg}")
+                                    subtask.error_message = f"节点拒绝任务: {error_msg}"
+                                
+                                db.commit()
+                                
+                                # 更新主任务状态
+                                from crud.task import update_task_status_from_subtasks
+                                update_task_status_from_subtasks(db, subtask.task_id)
+                            else:
+                                logger.warning(f"未找到子任务记录: task_id={task_id}, subtask_id={subtask_id}")
+                        except Exception as e:
+                            logger.error(f"更新子任务状态失败: {e}")
+                            logger.error(traceback.format_exc())
+                        finally:
+                            db.close()
+                
                 # 如果是任务指令回复且失败，需要处理任务重新分配
                 if status == 'error' and payload.get('data', {}).get('cmd_type') == 'start_task':
                     self._handle_task_failure(payload)
@@ -385,8 +519,8 @@ class MQTTClient:
             try:
                 # 查找子任务
                 subtask = db.query(SubTask).filter(
-                    SubTask.task_id == int(task_id),
-                    SubTask.analysis_task_id == subtask_id
+                    (SubTask.analysis_task_id == subtask_id) |
+                    ((SubTask.task_id == int(task_id)) & (SubTask.analysis_task_id == subtask_id))
                 ).first()
                 
                 if subtask:
@@ -398,15 +532,20 @@ class MQTTClient:
                         subtask.status = 3  # 失败
                         subtask.error_message = payload.get('message', '任务执行失败')
                     elif status == 'running':
+                        # 如果状态是运行中，但子任务状态是未启动(0)，则更新为运行中(1)
+                        if subtask.status == 0:
+                            logger.info(f"子任务 {subtask_id} 从未启动状态改为运行中状态")
                         subtask.status = 1  # 运行中
                         if not subtask.started_at:
                             subtask.started_at = datetime.now()
+                        subtask.error_message = None
                     
                     db.commit()
                     logger.info(f"子任务 {subtask_id} 状态已更新: {status}")
                     
                     # 更新主任务状态
-                    TaskCRUD.update_task_status(db, int(task_id))
+                    from crud.task import update_task_status_from_subtasks
+                    update_task_status_from_subtasks(db, subtask.task_id)
                 else:
                     logger.warning(f"未找到子任务记录: task_id={task_id}, subtask_id={subtask_id}")
             finally:
@@ -524,7 +663,7 @@ class MQTTClient:
             db.close()
     
     async def send_task_to_node(self, mac_address: str, task_id: str, subtask_id: str, 
-                               config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+                               config: Dict[str, Any], wait_for_response: bool = True) -> Tuple[bool, Dict[str, Any]]:
         """
         向指定节点发送任务
         
@@ -533,6 +672,7 @@ class MQTTClient:
             task_id: 任务ID
             subtask_id: 子任务ID
             config: 任务配置
+            wait_for_response: 是否等待节点响应，默认为True
             
         Returns:
             Tuple[bool, Dict[str, Any]]: (是否成功, 响应数据)
@@ -577,6 +717,11 @@ class MQTTClient:
         if result.rc != 0:
             logger.error(f"发布任务消息失败: {result.rc}")
             return False, {"error": f"发布消息失败: {result.rc}"}
+            
+        # 如果不等待响应，直接返回成功
+        if not wait_for_response:
+            logger.info(f"已发送任务消息到节点 {mac_address}，不等待响应")
+            return True, {"success": True, "message": "消息已发送，不等待响应"}
             
         # 等待响应
         for _ in range(30):  # 最多等待3秒
@@ -623,4 +768,63 @@ class MQTTClient:
             if handler in self.topic_handlers[topic_pattern]:
                 self.topic_handlers[topic_pattern].remove(handler)
                 return True
-        return False 
+        return False
+    
+    def _publish_connection_status(self, status: str):
+        """
+        发布API服务连接状态
+        
+        Args:
+            status: 状态，'online'或'offline'
+        """
+        try:
+            if not self.client.is_connected():
+                logger.warning(f"无法发布连接状态，MQTT客户端未连接")
+                return
+                
+            # 准备连接状态消息
+            hostname = socket.gethostname()
+            ip_address = None
+            try:
+                ip_address = socket.gethostbyname(hostname)
+            except:
+                ip_address = "unknown"
+                
+            # 获取系统信息
+            system_info = {
+                "os": platform.system(),
+                "version": platform.version(),
+                "hostname": hostname,
+                "cpu_count": psutil.cpu_count(),
+                "memory_total": psutil.virtual_memory().total
+            }
+                
+            payload = {
+                "client_id": self.client_id,
+                "service_type": "api_service",
+                "status": status,
+                "timestamp": int(time.time()),
+                "metadata": {
+                    "ip": ip_address,
+                    "hostname": hostname,
+                    "system_info": system_info
+                }
+            }
+            
+            # 发布状态
+            logger.info(f"发布API服务连接状态: {status}")
+            result = self.client.publish(
+                f"{self.topic_prefix}connection",
+                json.dumps(payload),
+                qos=self.config.get('qos', 1),
+                retain=False
+            )
+            
+            if result.rc != 0:
+                logger.error(f"发布连接状态失败: {result.rc}")
+            else:
+                logger.info(f"成功发布API服务连接状态: {status}")
+                
+        except Exception as e:
+            logger.error(f"发布连接状态时出错: {e}")
+            logger.error(traceback.format_exc()) 

@@ -54,9 +54,12 @@ class NodeHealthChecker:
                 self.comm_mode = self._get_comm_mode()
                 logger.info(f"当前通信模式: {self.comm_mode}")
                 
+                # 明确根据通信模式执行对应的健康检查
                 if self.comm_mode == "mqtt":
+                    logger.info("MQTT模式：执行MQTT节点健康检查")
                     await self.check_mqtt_nodes_health()
                 else:  # http 模式
+                    logger.info("HTTP模式：执行HTTP节点健康检查")
                     await self.check_nodes_health()
                 
                 end_time = datetime.now()
@@ -233,13 +236,43 @@ class NodeHealthChecker:
                 
             logger.info(f"发现 {len(unstarted_subtasks)} 个待分配的子任务")
             
-            # 为任务分配节点
-            from services.analysis_client import AnalysisClient
-            from core.config import settings
+            # 使用应用级别的MQTT客户端而不是创建新的
+            from fastapi import FastAPI
+            from app import app as fastapi_app
             
-            # 初始化分析客户端
-            analysis_client = AnalysisClient(settings.config)
+            mqtt_client = None
+            try:
+                if not hasattr(fastapi_app.state, "analysis_client") or not fastapi_app.state.analysis_client:
+                    logger.warning("无法获取应用程序状态中的analysis_client，尝试创建临时客户端")
+                    # 创建临时客户端
+                    from services.mqtt_client import MQTTClient
+                    from core.config import settings
+                    mqtt_client = MQTTClient(settings.config.get('MQTT', {}))
+                    if mqtt_client:
+                        logger.info("创建临时MQTT客户端")
+                        connected = mqtt_client.connect()
+                        if not connected:
+                            logger.warning("临时MQTT客户端连接失败，但仍会创建任务记录等待连接恢复")
+                else:
+                    analysis_client = fastapi_app.state.analysis_client
+                    mqtt_client = analysis_client.mqtt_client
+                    
+                    # 检查MQTT客户端连接状态（使用mqtt_connected属性）
+                    if not analysis_client.mqtt_connected:
+                        logger.warning("应用程序中的MQTT客户端未连接，尝试重新连接")
+                        # 尝试重新连接
+                        mqtt_client.connect()
+                        # 重新检查连接状态（使用is_connected()方法）
+                        if mqtt_client.is_connected():
+                            logger.info("MQTT客户端重连成功")
+                        else:
+                            logger.warning("MQTT客户端重连失败，但仍会创建任务记录等待连接恢复")
+            except Exception as e:
+                logger.error(f"获取MQTT客户端时出错: {str(e)}")
+                logger.error(traceback.format_exc())
+                # 继续执行，使用其他方式尝试分配
             
+            # 无论连接状态如何，都尝试处理任务
             tasks_started = 0
             
             for subtask in unstarted_subtasks:
@@ -248,7 +281,7 @@ class NodeHealthChecker:
                     available_nodes.sort(key=lambda n: n.task_count)
                     node = available_nodes[0]
                     
-                    logger.info(f"为子任务 {subtask.id} 分配节点 {node.mac_address}")
+                    logger.info(f"为子任务 {subtask.id} 分配MQTT节点 {node.mac_address}")
                     
                     # 构建任务配置
                     task_config = {
@@ -275,30 +308,47 @@ class NodeHealthChecker:
                         }
                     
                     # 向节点发送任务
-                    success, response = await analysis_client.mqtt_client.send_task_to_node(
-                        mac_address=node.mac_address,
-                        task_id=str(subtask.task_id),
-                        subtask_id=subtask.analysis_task_id or f"{subtask.task_id}-{subtask.id}",
-                        config=task_config
-                    )
+                    success = False
+                    response = {"error": "MQTT客户端未初始化"}
                     
-                    if success:
-                        # 更新子任务状态
-                        subtask.status = 1  # 运行中
-                        subtask.mqtt_node_id = node.id
-                        subtask.started_at = datetime.now()
-                        subtask.error_message = None
-                        
-                        # 更新主任务状态
-                        if subtask.task:
-                            subtask.task.active_subtasks += 1
-                        
-                        # 更新节点任务计数
-                        node.task_count += 1
-                        
-                        tasks_started += 1
-                        logger.info(f"子任务 {subtask.id} 已成功分配到节点 {node.mac_address}")
-                    else:
+                    if mqtt_client:
+                        try:
+                            # 如果任务ID不存在，使用组合ID
+                            if not subtask.analysis_task_id:
+                                subtask.analysis_task_id = f"{subtask.task_id}-{subtask.id}"
+                                logger.info(f"为子任务 {subtask.id} 生成分析任务ID: {subtask.analysis_task_id}")
+                                
+                            # 记录任务关联信息，但状态保持为未启动(0)
+                            subtask.mqtt_node_id = node.id
+                            subtask.node_id = None  # 显式清除HTTP节点ID
+                            subtask.error_message = "任务已创建，等待MQTT节点接收"
+                            
+                            # 提前更新数据库，确保任务记录创建
+                            db.flush()
+                            
+                            # 发送任务到节点，不等待响应
+                            await mqtt_client.send_task_to_node(
+                                mac_address=node.mac_address,
+                                task_id=str(subtask.task_id),
+                                subtask_id=subtask.analysis_task_id,
+                                config=task_config,
+                                wait_for_response=False
+                            )
+                            
+                            # 记录任务已发送，但不立即更改状态
+                            success = True
+                            logger.info(f"子任务 {subtask.id} 已发送到MQTT节点 {node.mac_address}，等待节点响应")
+                            
+                            # 更新节点任务计数（预分配）
+                            node.task_count += 1
+                            tasks_started += 1
+                            
+                        except Exception as e:
+                            logger.error(f"发送任务到节点时出错: {e}")
+                            success = False
+                            response = {"error": f"发送任务异常: {str(e)}"}
+                    
+                    if not success:
                         logger.warning(f"子任务 {subtask.id} 分配失败: {response.get('error', '未知错误')}")
                         # 标记错误信息，但保持未启动状态
                         subtask.error_message = f"任务分配失败: {response.get('error', '未知错误')}"
@@ -317,10 +367,9 @@ class NodeHealthChecker:
                     logger.error(traceback.format_exc())
             
             db.commit()
-            logger.info(f"共成功分配 {tasks_started} 个子任务")
+            logger.info(f"共成功分配 {tasks_started} 个子任务到MQTT节点")
             
-            # 关闭分析客户端
-            await analysis_client.close()
+            # 不关闭MQTT客户端，因为它是应用级别的
             
         except Exception as e:
             logger.error(f"处理MQTT任务分配出错: {str(e)}")
@@ -758,7 +807,40 @@ health_checker = NodeHealthChecker()
 # 启动健康检查服务的协程函数
 async def start_health_checker():
     """启动节点健康检查服务"""
-    await health_checker.start()
+    global health_checker
+    
+    try:
+        logger.info("正在启动节点健康检查服务...")
+        # 从配置文件获取健康检查间隔时间，默认为5分钟
+        from core.config import settings
+        check_interval = int(settings.config.get('HEALTH_CHECK', {}).get('interval', 300))
+        logger.info(f"节点健康检查间隔: {check_interval}秒")
+        
+        # 创建健康检查器
+        health_checker = NodeHealthChecker(check_interval=check_interval)
+        
+        # 以非阻塞方式启动健康检查任务
+        try:
+            # 不使用await，避免阻塞启动过程
+            asyncio.create_task(health_checker.start())
+            logger.info("节点健康检查服务已启动")
+        except Exception as e:
+            logger.error(f"启动健康检查任务失败: {e}")
+            logger.error(traceback.format_exc())
+            # 即使启动任务失败，也返回健康检查器，允许手动调用方法
+        
+        return health_checker
+    except Exception as e:
+        logger.error(f"创建健康检查器失败: {e}")
+        logger.error(traceback.format_exc())
+        # 出现异常时创建一个基本的健康检查器，确保服务可以继续运行
+        try:
+            health_checker = NodeHealthChecker(check_interval=300)  # 默认5分钟
+            logger.info("已创建基本健康检查器（由于错误回退）")
+            return health_checker
+        except:
+            logger.critical("无法创建健康检查器，服务可能无法正常工作")
+            raise
 
 # 停止健康检查服务的函数
 def stop_health_checker():
