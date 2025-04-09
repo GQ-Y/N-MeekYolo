@@ -306,7 +306,7 @@ class MQTTClient:
     
     def _handle_connection(self, topic: str, payload: Dict[str, Any]):
         """
-        处理连接状态消息
+        处理节点连接/断开连接消息
         """
         try:
             logger.info(f"接收到连接状态消息: {json.dumps(payload, ensure_ascii=False)}")
@@ -315,24 +315,37 @@ class MQTTClient:
                 logger.error(f"连接状态消息格式错误: {payload}")
                 return
                 
-            # 获取客户端ID和MAC地址
+            # 获取客户端ID和相关字段
             client_id = payload.get('client_id')
+            message_type = payload.get('message_type')
+            
+            # 确认消息类型为连接消息
+            if message_type and message_type != 'connection':
+                logger.warning(f"未知的消息类型: {message_type}，期望为'connection'")
+            
             # 优先使用node_type，如果不存在则尝试service_type，默认为'analysis'
             service_type = payload.get('node_type') or payload.get('service_type') or 'analysis'
             status = payload.get('status')
             timestamp = payload.get('timestamp')
             metadata = payload.get('metadata', {})
             
-            # 提取MAC地址，优先使用顶层的mac_address
+            # 提取节点ID信息
+            mqtt_node_id = payload.get('mqtt_node_id')
+            node_id = payload.get('node_id')
+            
+            # 提取MAC地址，按优先级获取
             if 'mac_address' in payload:
                 mac_address = payload.get('mac_address')
             elif 'mac_address' in metadata:
                 mac_address = metadata.get('mac_address')
             else:
-                # 尝试从client_id中提取MAC地址
-                mac_address = client_id.split('_')[-1] if client_id and '_' in client_id else client_id
+                # 尝试从mqtt_node_id或node_id或client_id中提取MAC地址
+                mac_address = mqtt_node_id or node_id or client_id
+                # 如果client_id是复合格式，尝试提取MAC部分
+                if not mac_address and client_id and '_' in client_id:
+                    mac_address = client_id.split('_')[-1]
             
-            logger.info(f"提取到节点信息: mac_address={mac_address}, client_id={client_id}, service_type={service_type}")
+            logger.info(f"提取到节点信息: mac_address={mac_address}, client_id={client_id}, service_type={service_type}, node_id={node_id}")
             
             if not mac_address or not client_id or not status:
                 logger.error(f"连接状态消息缺少必要字段: {payload}")
@@ -340,6 +353,9 @@ class MQTTClient:
                 
             # 处理节点连接或断开
             if status == 'online':
+                # 使用提取的node_id更新元数据
+                if node_id and node_id != client_id:
+                    metadata['node_id'] = node_id
                 self._handle_node_connection(mac_address, client_id, service_type, metadata)
             elif status == 'offline':
                 self._handle_node_disconnection(mac_address)
@@ -357,8 +373,18 @@ class MQTTClient:
             
             # 获取节点其他信息
             ip_address = metadata.get('ip')
+            port = metadata.get('port')  # 添加提取端口信息
             hostname = metadata.get('hostname')
             system_info = metadata.get('system_info', {})
+            # 获取资源信息
+            resources = metadata.get('resources', {})
+            capabilities = metadata.get('capabilities', {})
+            
+            # 获取最大任务数，优先使用顶层的max_tasks，其次使用capabilities中的max_tasks
+            max_tasks = metadata.get('max_tasks') or capabilities.get('max_tasks', 20)
+            
+            # 获取版本信息
+            version = metadata.get('version')
             
             # 更新数据库中的节点记录
             db = SessionLocal()
@@ -373,10 +399,26 @@ class MQTTClient:
                     node.client_id = client_id
                     node.service_type = service_type
                     node.ip = ip_address
+                    node.port = port  # 更新端口信息
                     node.hostname = hostname
                     node.last_active = datetime.now()
                     # 确保节点处于激活状态
                     node.is_active = True
+                    
+                    # 更新最大任务数
+                    node.max_tasks = max_tasks
+                    
+                    # 更新版本信息
+                    if version:
+                        node.version = version
+                    
+                    # 如果存在资源信息，更新资源使用率
+                    if resources:
+                        node.cpu_usage = resources.get('cpu', node.cpu_usage)
+                        node.memory_usage = resources.get('memory', node.memory_usage)
+                        
+                        # 更新任务计数
+                        node.task_count = metadata.get('active_tasks', 0)
                     
                     # 更新节点元数据
                     if node.node_metadata is None:
@@ -392,17 +434,19 @@ class MQTTClient:
                     logger.info(f"创建新节点记录: MAC={mac_address}")
                     # 创建新节点记录
                     node = MQTTNode(
-                        node_id=client_id,
+                        node_id=client_id,  # 使用client_id作为node_id
                         mac_address=mac_address,
                         client_id=client_id,
                         service_type=service_type,
                         status='online',
                         ip=ip_address,
+                        port=port,  # 添加端口信息
                         hostname=hostname,
                         last_active=datetime.now(),
                         node_metadata=metadata,
-                        task_count=0,
-                        max_tasks=20,  # 增加默认最大任务数
+                        task_count=metadata.get('active_tasks', 0),
+                        max_tasks=max_tasks,
+                        version=version,
                         is_active=True
                     )
                     db.add(node)
@@ -440,10 +484,13 @@ class MQTTClient:
                     node.status = 'offline'
                     node.last_active = datetime.now()
                     
-                    # 重要：处理该节点的所有任务 - 转移到其他节点
-                    self._handle_node_offline(db, mac_address)
+                    # 设置任务转移标记，由健康检查服务处理离线任务
+                    node.node_metadata = node.node_metadata or {}
+                    node.node_metadata['need_task_transfer'] = True
+                    node.node_metadata['offline_time'] = int(time.time())
                     
                     db.commit()
+                    logger.info(f"节点 {mac_address} 已标记为离线，待任务转移")
                 else:
                     logger.warning(f"未找到离线节点：MAC={mac_address}")
             finally:
@@ -482,27 +529,19 @@ class MQTTClient:
                         # 更新数据库中的子任务状态
                         db = SessionLocal()
                         try:
-                            # 查找子任务 - 首先通过完整的subtask_id查找
-                            logger.info(f"尝试使用完整ID查找子任务: subtask_id={subtask_id}")
-                            subtask = db.query(SubTask).filter(
-                                SubTask.analysis_task_id == subtask_id
-                            ).first()
+                            # 通过subtask_id作为ID直接查找子任务
+                            logger.info(f"查找子任务: subtask_id={subtask_id}")
+                            subtask = None
                             
-                            # 如果找不到，尝试使用task_id查找
-                            if not subtask and "-" in subtask_id:
-                                # 解析出原始task_id部分（去除后缀）
-                                base_task_id = subtask_id.split("-")[0]
-                                logger.info(f"未找到完整ID匹配，尝试使用基础task_id查找: base_task_id={base_task_id}")
-                                
-                                # 尝试查找analysis_task_id包含base_task_id的子任务
-                                subtask = db.query(SubTask).filter(
-                                    SubTask.analysis_task_id.like(f"{base_task_id}%")
-                                ).first()
-                                
+                            # 检查subtask_id是否为纯数字
+                            if subtask_id.isdigit():
+                                subtask = db.query(SubTask).filter(SubTask.id == int(subtask_id)).first()
                                 if subtask:
-                                    # 找到后更新其analysis_task_id为完整的subtask_id
-                                    logger.info(f"找到基础ID匹配的子任务，更新analysis_task_id: {subtask.analysis_task_id} -> {subtask_id}")
-                                    subtask.analysis_task_id = subtask_id
+                                    logger.info(f"找到子任务: {subtask.id}")
+                                else:
+                                    logger.warning(f"未找到子任务: subtask_id={subtask_id}")
+                            else:
+                                logger.warning(f"子任务ID不是纯数字: {subtask_id}，无法查询数据库")
                             
                             if subtask:
                                 if status == 'success':
@@ -511,6 +550,18 @@ class MQTTClient:
                                     subtask.status = 1  # 运行中状态
                                     subtask.started_at = datetime.now()
                                     subtask.error_message = None
+                                    
+                                    # 关联MQTT节点到子任务
+                                    mac_address = payload.get('mac_address')
+                                    if mac_address:
+                                        mqtt_node = db.query(MQTTNode).filter(MQTTNode.mac_address == mac_address).first()
+                                        if mqtt_node:
+                                            logger.info(f"关联MQTT节点 {mac_address} 到子任务 {subtask_id}")
+                                            subtask.mqtt_node_id = mqtt_node.id
+                                            # 更新节点任务计数
+                                            mqtt_node.task_count += 1
+                                        else:
+                                            logger.warning(f"未找到MAC地址为 {mac_address} 的MQTT节点")
                                 else:
                                     # 任务被节点拒绝，记录错误信息
                                     error_msg = task_data.get('message', '节点拒绝任务')
@@ -674,27 +725,17 @@ class MQTTClient:
             # 更新数据库中的子任务状态
             db = SessionLocal()
             try:
-                # 查找子任务 - 首先通过完整的subtask_id查找
-                logger.info(f"尝试使用完整ID查找子任务: subtask_id={subtask_id}")
-                subtask = db.query(SubTask).filter(
-                    SubTask.analysis_task_id == subtask_id
-                ).first()
+                # 查找子任务 - 通过subtask_id作为ID直接查找
+                logger.info(f"尝试使用subtask_id查找子任务: subtask_id={subtask_id}")
+                subtask = None
                 
-                # 如果找不到，尝试使用task_id查找
-                if not subtask and "-" in subtask_id:
-                    # 解析出原始task_id部分（去除后缀）
-                    base_task_id = subtask_id.split("-")[0]
-                    logger.info(f"未找到完整ID匹配，尝试使用基础task_id查找: base_task_id={base_task_id}")
-                    
-                    # 尝试查找analysis_task_id包含base_task_id的子任务
-                    subtask = db.query(SubTask).filter(
-                        SubTask.analysis_task_id.like(f"{base_task_id}%")
-                    ).first()
-                    
+                # 检查subtask_id是否为纯数字
+                if subtask_id.isdigit():
+                    subtask = db.query(SubTask).filter(SubTask.id == int(subtask_id)).first()
                     if subtask:
-                        # 找到后更新其analysis_task_id为完整的subtask_id
-                        logger.info(f"找到基础ID匹配的子任务，更新analysis_task_id: {subtask.analysis_task_id} -> {subtask_id}")
-                        subtask.analysis_task_id = subtask_id
+                        logger.info(f"通过ID直接找到子任务: {subtask.id}")
+                else:
+                    logger.warning(f"子任务ID不是纯数字: {subtask_id}，无法查询数据库")
                 
                 if subtask:
                     # 如果还没有关联MQTT节点，从结果消息中获取mac_address并关联节点
@@ -897,8 +938,7 @@ class MQTTClient:
             
         except Exception as e:
             logger.error(f"处理节点离线任务转移失败: {e}")
-            logger.error(traceback.format_exc())
-    
+            logger.error(traceback.format_exc())    
     def _handle_task_failure(self, payload: Dict[str, Any]):
         """
         处理任务执行失败的情况
@@ -917,10 +957,19 @@ class MQTTClient:
             # 更新子任务状态，等待重新分配
             db = SessionLocal()
             try:
-                # 直接使用subtask_id查找，不尝试整数转换
-                subtask = db.query(SubTask).filter(
-                    SubTask.analysis_task_id == subtask_id
-                ).first()
+                # 查找子任务 - 通过subtask_id作为ID直接查找
+                logger.info(f"查找失败的子任务: subtask_id={subtask_id}")
+                subtask = None
+                
+                # 检查subtask_id是否为纯数字
+                if subtask_id.isdigit():
+                    subtask = db.query(SubTask).filter(SubTask.id == int(subtask_id)).first()
+                    if subtask:
+                        logger.info(f"找到失败的子任务: {subtask.id}")
+                    else:
+                        logger.warning(f"未找到失败的子任务: subtask_id={subtask_id}")
+                else:
+                    logger.warning(f"子任务ID不是纯数字: {subtask_id}，无法查询数据库")
                 
                 if subtask:
                     subtask.status = 0  # 未启动

@@ -647,12 +647,29 @@ async def stop_task(
                     if node and node.stream_task_count > 0:
                         node.stream_task_count -= 1
                 
+                # 如果有mqtt节点，也要更新mqtt节点任务计数
+                if subtask.mqtt_node_id:
+                    mqtt_node = db.query(MQTTNode).filter(MQTTNode.id == subtask.mqtt_node_id).first()
+                    if mqtt_node and mqtt_node.task_count > 0:
+                        mqtt_node.task_count -= 1
+                        logger.info(f"减少MQTT节点 {mqtt_node.mac_address} 的任务计数")
+                
                 # 如果有分析任务ID，调用分析服务停止任务
                 if subtask.analysis_task_id:
                     try:
-                        # 传递节点ID，确保使用正确的节点停止任务
-                        await analysis_service.stop_task(subtask.analysis_task_id, subtask.node_id)
-                        logger.info(f"已停止子任务 {subtask.id} 的分析任务 {subtask.analysis_task_id}")
+                        if subtask.node_id:
+                            # 传递节点ID，确保使用正确的节点停止任务
+                            await analysis_service.stop_task(subtask.analysis_task_id, subtask.node_id)
+                            logger.info(f"已停止子任务 {subtask.id} 的分析任务 {subtask.analysis_task_id}")
+                        elif subtask.mqtt_node_id:
+                            # 传递分析任务ID，由analysis_service判断使用哪种方式停止任务
+                            logger.info(f"尝试停止MQTT子任务 {subtask.id}，分析任务ID: {subtask.analysis_task_id}")
+                            await analysis_service.stop_task(subtask.analysis_task_id)
+                            logger.info(f"已停止MQTT子任务 {subtask.id} 的分析任务 {subtask.analysis_task_id}")
+                        else:
+                            # 如果既没有node_id也没有mqtt_node_id，只传递分析任务ID
+                            await analysis_service.stop_task(subtask.analysis_task_id)
+                            logger.info(f"已停止子任务 {subtask.id} 的分析任务 {subtask.analysis_task_id}")
                     except Exception as e:
                         logger.error(f"停止子任务 {subtask.id} 的分析任务失败: {str(e)}")
                         # 虽然停止分析任务可能失败，但我们仍认为子任务已停止
