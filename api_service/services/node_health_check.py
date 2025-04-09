@@ -22,7 +22,7 @@ import time
 logger = setup_logger(__name__)
 
 class NodeHealthChecker:
-    def __init__(self, check_interval: int = 300):
+    def __init__(self, check_interval: int = 20):
         """
         初始化节点健康检查器
         :param check_interval: 检查间隔时间（秒），默认300秒
@@ -115,6 +115,7 @@ class NodeHealthChecker:
             now = datetime.now()
             timeout_seconds = self.check_interval * 2  # 超时时间为检查间隔的2倍
             updated_nodes = []
+            offline_nodes = []  # 记录所有处于离线状态的节点
             
             for node in nodes:
                 logger.info(f"------- 检查MQTT节点 {node.id} ({node.mac_address}) -------")
@@ -129,6 +130,10 @@ class NodeHealthChecker:
                         logger.warning(f"MQTT节点 {node.id} ({node.mac_address}) 超时 {time_diff:.0f}秒未活跃，标记为离线")
                         node.status = "offline"
                         updated_nodes.append(node)
+                        offline_nodes.append(node)  # 添加到离线节点列表
+                elif node.status == "offline":
+                    # 如果节点已经处于离线状态，也加入离线节点列表进行任务检查
+                    offline_nodes.append(node)
                 
                 logger.info(f"节点 {node.id} 当前状态: {node.status}")
                 logger.info(f"------- 节点 {node.id} 检查完成 -------")
@@ -139,11 +144,30 @@ class NodeHealthChecker:
                 db.commit()
                 logger.info("节点状态更新成功")
                 
-                # 处理离线节点的任务重新分配
+                # 处理刚变为离线的节点的任务重新分配
                 for node in updated_nodes:
                     await self._handle_mqtt_node_offline(db, node)
             else:
                 logger.info("没有超时离线的MQTT节点")
+            
+            # 检查所有离线节点上是否仍有运行中的任务需要迁移
+            if offline_nodes:
+                logger.info(f"检查所有离线节点上的运行中任务，共 {len(offline_nodes)} 个离线节点")
+                for node in offline_nodes:
+                    # 查找该节点上运行中的子任务数量
+                    running_tasks_count = db.query(SubTask).filter(
+                        SubTask.mqtt_node_id == node.id,
+                        SubTask.status == 1  # 运行中
+                    ).count()
+                    
+                    if running_tasks_count > 0:
+                        logger.warning(f"离线节点 {node.id} ({node.mac_address}) 上仍有 {running_tasks_count} 个运行中的子任务，需要迁移")
+                        # 处理迁移
+                        await self._handle_mqtt_node_offline(db, node)
+                    else:
+                        logger.info(f"离线节点 {node.id} ({node.mac_address}) 上没有运行中的子任务")
+            else:
+                logger.info("没有离线节点需要检查")
             
             # 处理待分配的任务
             await self._handle_mqtt_task_allocation(db)
@@ -159,7 +183,7 @@ class NodeHealthChecker:
             db.close()
 
     async def _handle_mqtt_node_offline(self, db: Session, node: MQTTNode):
-        """处理MQTT节点离线情况，重置该节点上运行的任务"""
+        """处理MQTT节点离线情况，将该节点上运行的任务转移至其他在线节点"""
         try:
             logger.info(f"处理离线MQTT节点 {node.id} ({node.mac_address}) 的任务...")
             
@@ -173,26 +197,214 @@ class NodeHealthChecker:
                 logger.info(f"节点 {node.mac_address} 没有运行中的子任务")
                 return
                 
-            logger.info(f"节点 {node.mac_address} 有 {len(running_subtasks)} 个运行中的子任务需要重置")
+            logger.info(f"节点 {node.mac_address} 有 {len(running_subtasks)} 个运行中的子任务需要转移")
             
-            # 重置节点上的子任务
-            for subtask in running_subtasks:
-                subtask.status = 0  # 未启动
-                subtask.mqtt_node_id = None  # 清除节点关联
-                subtask.started_at = None
-                subtask.error_message = f"节点离线，等待重新分配"
+            # 查找可用的其他在线节点
+            available_nodes = db.query(MQTTNode).filter(
+                MQTTNode.status == "online",
+                MQTTNode.is_active == True,
+                MQTTNode.mac_address != node.mac_address,  # 排除当前离线节点
+                MQTTNode.task_count < MQTTNode.max_tasks
+            ).order_by(MQTTNode.task_count).all()
+            
+            if not available_nodes:
+                logger.warning(f"没有可用的在线节点，所有子任务将重置为未启动状态等待后续分配")
+                # 将子任务重置为未启动状态，等待有节点在线时再分配
+                for subtask in running_subtasks:
+                    subtask.status = 0  # 未启动
+                    subtask.mqtt_node_id = None  # 清除节点关联
+                    subtask.started_at = None
+                    subtask.error_message = f"节点 {node.mac_address} 离线，等待重新分配"
+                    
+                    # 同时更新关联的主任务active_subtasks计数
+                    task = subtask.task
+                    if task and task.active_subtasks > 0:
+                        task.active_subtasks -= 1
                 
-                # 更新关联的主任务active_subtasks计数
-                task = subtask.task
-                if task and task.active_subtasks > 0:
-                    task.active_subtasks -= 1
+                db.commit()
+                logger.info(f"已重置 {len(running_subtasks)} 个子任务为未启动状态")
+                return
+            
+            # 使用应用级别的MQTT客户端
+            from fastapi import FastAPI
+            from app import app as fastapi_app
+            
+            mqtt_client = None
+            try:
+                if hasattr(fastapi_app.state, "analysis_client") and fastapi_app.state.analysis_client:
+                    analysis_client = fastapi_app.state.analysis_client
+                    mqtt_client = analysis_client.mqtt_client
+                
+                if not mqtt_client:
+                    logger.warning("无法获取MQTT客户端，任务转移失败，将重置任务状态")
+                    # 重置所有任务并返回
+                    for subtask in running_subtasks:
+                        subtask.status = 0  # 未启动
+                        subtask.mqtt_node_id = None  # 清除节点关联
+                        subtask.started_at = None
+                        subtask.error_message = f"节点 {node.mac_address} 离线，无法获取MQTT客户端进行转移"
+                        
+                        # 更新主任务计数
+                        task = subtask.task
+                        if task and task.active_subtasks > 0:
+                            task.active_subtasks -= 1
+                    
+                    db.commit()
+                    return
+            except Exception as e:
+                logger.error(f"获取MQTT客户端时出错: {str(e)}")
+                logger.error(traceback.format_exc())
+                # 重置所有任务并返回
+                for subtask in running_subtasks:
+                    subtask.status = 0
+                    subtask.mqtt_node_id = None
+                    subtask.started_at = None
+                    subtask.error_message = f"节点离线，获取MQTT客户端出错: {str(e)}"
+                db.commit()
+                return
+            
+            # 开始任务转移
+            transferred_count = 0
+            failed_count = 0
+            node_index = 0  # 初始节点索引
+            
+            for subtask in running_subtasks:
+                try:
+                    # 获取子任务关联的主任务信息
+                    task = subtask.task
+                    if not task:
+                        logger.warning(f"子任务 {subtask.id} 没有关联的主任务，跳过转移")
+                        continue
+                    
+                    # 获取子任务使用的模型和流信息
+                    model = subtask.model
+                    stream = subtask.stream
+                    
+                    # 选择下一个节点 (循环分配)
+                    target_node = available_nodes[node_index % len(available_nodes)]
+                    node_index += 1
+                    
+                    logger.info(f"准备将子任务 {subtask.id} 从节点 {node.mac_address} 转移到节点 {target_node.mac_address}")
+                    
+                    # 构建任务配置
+                    task_config = {
+                        "source": {},
+                        "config": subtask.config or {},
+                        "result_config": {
+                            "save_result": task.save_result if task else False,
+                            "save_images": task.save_images if task else False,
+                            "callback_topic": f"meek/{target_node.mac_address}/result"
+                        }
+                    }
+                    
+                    # 根据分析类型设置源数据
+                    if stream:
+                        # 视频流任务
+                        task_config["source"] = {
+                            "type": "stream",
+                            "urls": [stream.url]
+                        }
+                    else:
+                        # 假设是图像任务（从配置中提取）
+                        urls = subtask.config.get("image_urls", []) if subtask.config else []
+                        task_config["source"] = {
+                            "type": "image",
+                            "urls": urls
+                        }
+                    
+                    # 设置模型和分析类型
+                    if model:
+                        task_config["config"]["model_code"] = model.code
+                    
+                    if subtask.analysis_type:
+                        task_config["config"]["analysis_type"] = subtask.analysis_type
+                    
+                    if task.analysis_interval:
+                        task_config["config"]["analysis_interval"] = task.analysis_interval
+                    
+                    # 如果任务ID不存在，使用纯数字ID
+                    if not subtask.analysis_task_id:
+                        # 生成纯数字ID: 主任务ID + (子任务ID+1000) 确保是纯数字格式
+                        subtask.analysis_task_id = str(subtask.id + 1000)
+                        logger.info(f"为子任务 {subtask.id} 生成纯数字分析任务ID: {subtask.analysis_task_id}")
+                    
+                    # 发送任务消息到新节点
+                    success = False
+                    try:
+                        result = await mqtt_client.send_task_to_node(
+                            mac_address=target_node.mac_address,
+                            task_id=str(task.id),
+                            subtask_id=subtask.analysis_task_id or str(subtask.id),
+                            config=task_config,
+                            wait_for_response=False
+                        )
+                        
+                        if isinstance(result, tuple):
+                            success = result[0]  # 如果返回元组，取第一个元素作为成功标志
+                        else:
+                            success = result
+                    except Exception as e:
+                        logger.error(f"发送任务到节点 {target_node.mac_address} 失败: {e}")
+                        success = False
+                    
+                    if success:
+                        # 更新子任务信息
+                        subtask.mqtt_node_id = target_node.id
+                        subtask.status = 1  # 保持运行中状态
+                        subtask.error_message = f"已从节点 {node.mac_address} 自动转移到节点 {target_node.mac_address}"
+                        
+                        # 更新目标节点任务计数
+                        target_node.task_count += 1
+                        
+                        transferred_count += 1
+                        logger.info(f"成功将子任务 {subtask.id} 转移到节点 {target_node.mac_address}")
+                        
+                        # 如果节点任务数达到上限，从可用节点列表中移除
+                        if target_node.task_count >= target_node.max_tasks:
+                            available_nodes.remove(target_node)
+                            logger.info(f"节点 {target_node.mac_address} 已达到最大任务数，从可用列表中移除")
+                            # 如果没有可用节点了，跳出循环
+                            if not available_nodes:
+                                logger.warning("没有更多可用节点，停止转移")
+                                break
+                    else:
+                        # 转移失败，重置子任务状态
+                        subtask.status = 0  # 未启动
+                        subtask.mqtt_node_id = None
+                        subtask.started_at = None
+                        subtask.error_message = f"从节点 {node.mac_address} 转移失败，等待重新分配"
+                        
+                        # 更新主任务active_subtasks计数
+                        if task.active_subtasks > 0:
+                            task.active_subtasks -= 1
+                        
+                        failed_count += 1
+                
+                except Exception as e:
+                    logger.error(f"转移子任务 {subtask.id} 时出错: {e}")
+                    logger.error(traceback.format_exc())
+                    
+                    # 转移出错，重置子任务状态
+                    subtask.status = 0  # 未启动
+                    subtask.mqtt_node_id = None
+                    subtask.started_at = None
+                    subtask.error_message = f"从节点 {node.mac_address} 转移出错: {str(e)}"
+                    
+                    # 更新主任务active_subtasks计数
+                    task = subtask.task
+                    if task and task.active_subtasks > 0:
+                        task.active_subtasks -= 1
+                    
+                    failed_count += 1
+            
+            # 更新离线节点的任务计数
+            node.task_count = max(0, node.task_count - (transferred_count + failed_count))
             
             db.commit()
-            logger.info(f"节点 {node.mac_address} 的所有任务已重置")
+            logger.info(f"节点 {node.mac_address} 的任务转移完成: 成功={transferred_count}, 失败={failed_count}")
             
         except Exception as e:
-            logger.error(f"处理MQTT节点离线任务重置失败: {e}")
-            import traceback
+            logger.error(f"处理MQTT节点离线任务转移失败: {e}")
             logger.error(traceback.format_exc())
 
     async def _handle_mqtt_task_allocation(self, db: Session):
@@ -782,7 +994,7 @@ async def start_health_checker():
         logger.info("正在启动节点健康检查服务...")
         # 从配置文件获取健康检查间隔时间，默认为5分钟
         from core.config import settings
-        check_interval = int(settings.config.get('HEALTH_CHECK', {}).get('interval', 300))
+        check_interval = int(settings.config.get('HEALTH_CHECK', {}).get('interval', 20))
         logger.info(f"节点健康检查间隔: {check_interval}秒")
         
         # 创建健康检查器

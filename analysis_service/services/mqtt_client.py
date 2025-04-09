@@ -415,11 +415,6 @@ class MQTTClient:
         result = self.client.subscribe(request_setting_topic, qos=2)
         logger.info(f"已订阅节点配置主题: {request_setting_topic}, 结果: {result}")
         
-        # 订阅连接状态主题
-        connection_topic = f"{self.topic_prefix}connection"
-        result = self.client.subscribe(connection_topic, qos=1)
-        logger.info(f"已订阅连接状态主题: {connection_topic}, 结果: {result}")
-        
         # 订阅系统广播主题
         broadcast_topic = f"{self.topic_prefix}system/broadcast"
         result = self.client.subscribe(broadcast_topic, qos=1)
@@ -431,7 +426,6 @@ class MQTTClient:
         logger.info(f"主题前缀: {self.topic_prefix}")
         logger.info("已订阅的主题列表:")
         logger.info(f" - {request_setting_topic}")
-        logger.info(f" - {connection_topic}")
         logger.info(f" - {broadcast_topic}")
         
     def _on_message(self, client, userdata, msg):
@@ -668,14 +662,16 @@ class MQTTClient:
         
     def _handle_connection(self, data):
         """
-        处理连接状态消息 - 已移除实际处理逻辑，因为分析服务客户端不需要处理此类消息
+        处理连接状态消息
+        
+        注意：此方法已废弃。我们不再订阅meek/connection主题，
+        因此此方法不会被调用。保留此方法仅为保持代码结构完整性。
         
         Args:
             data: 消息数据
         """
-        # 只记录日志，不做实际处理
-        logger.debug(f"收到连接状态消息(忽略): {data}")
-        
+        pass
+    
     def _handle_sync_time(self, data, message_id, message_uuid, confirmation_topic):
         """
         处理时间同步命令

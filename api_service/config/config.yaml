@@ -11,7 +11,7 @@ API_SERVICE:
 
 # 通信模式配置，支持 http 或 mqtt
 COMMUNICATION:
-  mode: mqtt  # http 或 mqtt
+  mode: http  # http 或 mqtt
 
 # MQTT配置
 MQTT:

@@ -9,7 +9,7 @@ SERVICES:
 
 # 通信模式配置
 COMMUNICATION:
-  mode: "mqtt"  # http 或 mqtt，决定使用哪种通信方式
+  mode: "http"  # http 或 mqtt，决定使用哪种通信方式
 
 # MQTT配置
 MQTT:

@@ -302,7 +302,8 @@ class YOLODetector:
                 - confidence: 置信度阈值
                 - iou: IoU阈值
                 - classes: 需要检测的类别ID列表
-                - roi: 感兴趣区域，格式为{x1, y1, x2, y2}，值为0-1的归一化坐标
+                - roi: 感兴趣区域，用于过滤检测结果，不再用于裁剪原始图像
+                - roi_type: ROI类型（1=矩形，2=多边形，3=直线，4=圆形）
                 - imgsz: 输入图片大小
                 - nested_detection: 是否进行嵌套检测
         """
@@ -330,30 +331,22 @@ class YOLODetector:
                 
             logger.info(f"检测配置 - 置信度: {conf}, IoU: {iou}, 类别: {classes}, ROI: {roi}, 图片大小: {imgsz}, 嵌套检测: {nested_detection}")
             
-            # 处理ROI
-            original_shape = None
-            if roi:
-                h, w = image.shape[:2]
-                original_shape = (h, w)
-                x1 = int(roi['x1'] * w)
-                y1 = int(roi['y1'] * h)
-                x2 = int(roi['x2'] * w)
-                y2 = int(roi['y2'] * h)
-                image = image[y1:y2, x1:x2]
-            
             # 处理图片大小
             if imgsz:
-                image = cv2.resize(image, (imgsz, imgsz))
+                resized_image = cv2.resize(image, (imgsz, imgsz))
+            else:
+                resized_image = image.copy()
             
-            # 执行推理
+            # 执行推理 - 在整个图像上进行检测
             results = self.model(
-                image,
+                resized_image,
                 conf=conf,
                 iou=iou,
                 classes=classes
             )
             
             # 处理检测结果
+            h, w = image.shape[:2]  # 原始图像尺寸，用于ROI过滤
             detections = []
             for result in results:
                 boxes = result.boxes
@@ -363,13 +356,14 @@ class YOLODetector:
                     cls = int(box.cls[0])
                     name = result.names[cls]
                     
-                    # 如果使用了ROI，需要调整坐标
-                    if roi and original_shape:
-                        h, w = original_shape
-                        bbox[0] = bbox[0] / w * (roi['x2'] - roi['x1']) * w + roi['x1'] * w
-                        bbox[1] = bbox[1] / h * (roi['y2'] - roi['y1']) * h + roi['y1'] * h
-                        bbox[2] = bbox[2] / w * (roi['x2'] - roi['x1']) * w + roi['x1'] * w
-                        bbox[3] = bbox[3] / h * (roi['y2'] - roi['y1']) * h + roi['y1'] * h
+                    # 如果检测是在调整大小后的图像上进行的，需要调整坐标
+                    if imgsz:
+                        scale_x = w / imgsz
+                        scale_y = h / imgsz
+                        bbox[0] *= scale_x
+                        bbox[1] *= scale_y
+                        bbox[2] *= scale_x
+                        bbox[3] *= scale_y
                     
                     detection = {
                         "bbox": {
@@ -423,12 +417,243 @@ class YOLODetector:
                 # 只保留没有父目标的检测结果
                 detections = [det for det in detections if det['parent_idx'] is None]
             
+            # 如果设置了ROI，根据ROI类型过滤检测结果
+            if roi:
+                # 默认为矩形ROI (roi_type=1)
+                roi_type = config.get('roi_type', 1)
+                # 优先使用roi对象中的roi_type，这是经过规范化处理的
+                roi_type_from_roi = roi.get("roi_type", None)
+                if roi_type_from_roi is not None:
+                    roi_type = roi_type_from_roi
+                detections = self._filter_by_roi(detections, roi, roi_type, h, w)
+            
             return detections
                     
         except Exception as e:
             logger.error(f"检测失败: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             raise ProcessingException(f"检测失败: {str(e)}")
 
+    def _filter_by_roi(self, detections, roi, roi_type, img_height, img_width):
+        """
+        根据ROI过滤检测结果
+        
+        Args:
+            detections: 检测结果列表
+            roi: ROI配置
+            roi_type: ROI类型 (1=矩形, 2=多边形, 3=直线, 4=圆形)
+            img_height: 图像高度
+            img_width: 图像宽度
+            
+        Returns:
+            过滤后的检测结果列表
+        """
+        try:
+            if not roi:
+                return detections
+                
+            # 准备原始图像尺寸
+            image_size = (img_width, img_height)
+            filtered_detections = []
+            
+            # 将归一化的ROI转换为像素坐标
+            pixel_roi = {}
+            if roi.get("normalized", True):
+                for key, value in roi.items():
+                    if key == "x1" or key == "x2":
+                        pixel_roi[key] = int(value * img_width)
+                    elif key == "y1" or key == "y2":
+                        pixel_roi[key] = int(value * img_height)
+                    elif key == "center" and isinstance(value, list) and len(value) == 2:
+                        pixel_roi[key] = [int(value[0] * img_width), int(value[1] * img_height)]
+                    elif key == "radius":
+                        # 对于圆形ROI，使用平均半径
+                        pixel_roi[key] = int(value * (img_width + img_height) / 2)
+                    else:
+                        pixel_roi[key] = value
+            else:
+                pixel_roi = roi
+            
+            # 根据ROI类型过滤
+            for detection in detections:
+                bbox = detection["bbox"]
+                # 转换边界框为像素坐标
+                if bbox.get("x1") < 1 and bbox.get("y1") < 1 and bbox.get("x2") < 1 and bbox.get("y2") < 1:
+                    # 如果边界框是归一化坐标（0-1范围），转换为像素坐标
+                    pixel_bbox = {
+                        "x1": int(bbox["x1"] * img_width),
+                        "y1": int(bbox["y1"] * img_height),
+                        "x2": int(bbox["x2"] * img_width),
+                        "y2": int(bbox["y2"] * img_height)
+                    }
+                else:
+                    pixel_bbox = bbox
+                
+                # 计算检测框面积
+                det_area = (pixel_bbox["x2"] - pixel_bbox["x1"]) * (pixel_bbox["y2"] - pixel_bbox["y1"])
+                
+                # 根据ROI类型进行过滤
+                if roi_type == 1:  # 矩形ROI
+                    # 计算与ROI的重叠区域
+                    overlap_x1 = max(pixel_roi["x1"], pixel_bbox["x1"])
+                    overlap_y1 = max(pixel_roi["y1"], pixel_bbox["y1"])
+                    overlap_x2 = min(pixel_roi["x2"], pixel_bbox["x2"])
+                    overlap_y2 = min(pixel_roi["y2"], pixel_bbox["y2"])
+                    
+                    # 检查是否有重叠
+                    if overlap_x1 < overlap_x2 and overlap_y1 < overlap_y2:
+                        # 计算重叠区域的面积
+                        overlap_area = (overlap_x2 - overlap_x1) * (overlap_y2 - overlap_y1)
+                        # 检查是否有50%以上的目标在ROI内
+                        if overlap_area / det_area >= 0.5:
+                            filtered_detections.append(detection)
+                
+                elif roi_type == 2:  # 多边形ROI
+                    # 使用矩形包围盒近似，实际项目可能需要更准确的多边形重叠计算
+                    overlap_x1 = max(pixel_roi["x1"], pixel_bbox["x1"])
+                    overlap_y1 = max(pixel_roi["y1"], pixel_bbox["y1"])
+                    overlap_x2 = min(pixel_roi["x2"], pixel_bbox["x2"])
+                    overlap_y2 = min(pixel_roi["y2"], pixel_bbox["y2"])
+                    
+                    # 检查是否有重叠
+                    if overlap_x1 < overlap_x2 and overlap_y1 < overlap_y2:
+                        # 计算重叠区域的面积
+                        overlap_area = (overlap_x2 - overlap_x1) * (overlap_y2 - overlap_y1)
+                        # 检查是否有50%以上的目标在ROI内
+                        if overlap_area / det_area >= 0.5:
+                            filtered_detections.append(detection)
+                
+                elif roi_type == 3:  # 直线ROI
+                    # 对于直线ROI，只要边界框与直线有任何交点，就保留此检测结果
+                    # 从roi中获取点，优先使用规范化的points列表
+                    points = roi.get("points", [])
+                    if not points and "points" in roi:
+                        points = roi["points"]
+                    
+                    if len(points) >= 2:  # 至少需要两个点才能形成线段
+                        # 获取线段的两个端点
+                        if isinstance(points[0], dict) and 'x' in points[0] and 'y' in points[0]:
+                            p1 = (int(points[0]['x'] * img_width), int(points[0]['y'] * img_height))
+                            p2 = (int(points[1]['x'] * img_width), int(points[1]['y'] * img_height))
+                        else:
+                            p1 = (int(points[0][0] * img_width), int(points[0][1] * img_height))
+                            p2 = (int(points[1][0] * img_width), int(points[1][1] * img_height))
+                        
+                        # 检查线段是否与检测框相交
+                        # 简化处理：检查线段是否与检测框的任意边相交
+                        # 检测框的四个边
+                        box_edges = [
+                            ((pixel_bbox["x1"], pixel_bbox["y1"]), (pixel_bbox["x2"], pixel_bbox["y1"])),  # 上边
+                            ((pixel_bbox["x2"], pixel_bbox["y1"]), (pixel_bbox["x2"], pixel_bbox["y2"])),  # 右边
+                            ((pixel_bbox["x2"], pixel_bbox["y2"]), (pixel_bbox["x1"], pixel_bbox["y2"])),  # 下边
+                            ((pixel_bbox["x1"], pixel_bbox["y2"]), (pixel_bbox["x1"], pixel_bbox["y1"]))   # 左边
+                        ]
+                        
+                        # 检查线段是否与任何边相交
+                        for edge in box_edges:
+                            if self._line_segments_intersect(p1, p2, edge[0], edge[1]):
+                                filtered_detections.append(detection)
+                                break
+                
+                elif roi_type == 4:  # 圆形ROI
+                    # 对于圆形ROI，只要有50%以上的目标在圆内，就保留此检测结果
+                        if len(points) >= 2:  # 至少需要两个点才能形成线段
+                            # 获取线段的两个端点
+                            if isinstance(points[0], dict) and 'x' in points[0] and 'y' in points[0]:
+                                p1 = (int(points[0]['x'] * img_width), int(points[0]['y'] * img_height))
+                                p2 = (int(points[1]['x'] * img_width), int(points[1]['y'] * img_height))
+                            else:
+                                p1 = (int(points[0][0] * img_width), int(points[0][1] * img_height))
+                                p2 = (int(points[1][0] * img_width), int(points[1][1] * img_height))
+                            
+                            # 检查线段是否与检测框相交
+                            # 简化处理：检查线段是否与检测框的任意边相交
+                            # 检测框的四个边
+                            box_edges = [
+                                ((pixel_bbox["x1"], pixel_bbox["y1"]), (pixel_bbox["x2"], pixel_bbox["y1"])),  # 上边
+                                ((pixel_bbox["x2"], pixel_bbox["y1"]), (pixel_bbox["x2"], pixel_bbox["y2"])),  # 右边
+                                ((pixel_bbox["x2"], pixel_bbox["y2"]), (pixel_bbox["x1"], pixel_bbox["y2"])),  # 下边
+                                ((pixel_bbox["x1"], pixel_bbox["y2"]), (pixel_bbox["x1"], pixel_bbox["y1"]))   # 左边
+                            ]
+                            
+                            # 检查线段是否与任何边相交
+                            for edge in box_edges:
+                                if self._line_segments_intersect(p1, p2, edge[0], edge[1]):
+                                    filtered_detections.append(detection)
+                                    break
+                
+                elif roi_type == 4:  # 圆形ROI
+                    # 对于圆形ROI，只要有50%以上的目标在圆内，就保留此检测结果
+                    if "center" in pixel_roi and "radius" in pixel_roi:
+                        center = pixel_roi["center"]
+                        radius = pixel_roi["radius"]
+                        
+                        # 检测框的中心点
+                        box_center_x = (pixel_bbox["x1"] + pixel_bbox["x2"]) / 2
+                        box_center_y = (pixel_bbox["y1"] + pixel_bbox["y2"]) / 2
+                        
+                        # 计算中心点到圆心的距离
+                        distance = ((box_center_x - center[0]) ** 2 + (box_center_y - center[1]) ** 2) ** 0.5
+                        
+                        # 如果检测框中心在圆内，并且检测框面积的50%以上在圆内
+                        # 这里使用简化逻辑，实际可能需要更精确的圆与矩形重叠计算
+                        if distance <= radius:
+                            # 假设有50%以上的目标在圆内
+                            filtered_detections.append(detection)
+            
+            return filtered_detections
+                
+        except Exception as e:
+            logger.error(f"根据ROI过滤检测结果失败: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            # 如果过滤失败，返回原始检测结果
+            return detections
+    
+    def _line_segments_intersect(self, p1, p2, p3, p4):
+        """
+        检查两条线段是否相交
+        
+        Args:
+            p1, p2: 第一条线段的两个端点
+            p3, p4: 第二条线段的两个端点
+            
+        Returns:
+            bool: 两条线段是否相交
+        """
+        def orientation(p, q, r):
+            val = (q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1])
+            if val == 0:
+                return 0  # 共线
+            return 1 if val > 0 else 2  # 顺时针或逆时针
+        
+        def on_segment(p, q, r):
+            return (q[0] <= max(p[0], r[0]) and q[0] >= min(p[0], r[0]) and
+                    q[1] <= max(p[1], r[1]) and q[1] >= min(p[1], r[1]))
+        
+        # 计算四个方向
+        o1 = orientation(p1, p2, p3)
+        o2 = orientation(p1, p2, p4)
+        o3 = orientation(p3, p4, p1)
+        o4 = orientation(p3, p4, p2)
+        
+        # 一般情况下的相交
+        if o1 != o2 and o3 != o4:
+            return True
+        
+        # 特殊情况
+        if o1 == 0 and on_segment(p1, p3, p2):
+            return True
+        if o2 == 0 and on_segment(p1, p4, p2):
+            return True
+        if o3 == 0 and on_segment(p3, p1, p4):
+            return True
+        if o4 == 0 and on_segment(p3, p2, p4):
+            return True
+        
+        return False
+                
     async def _save_result_image(self, image: np.ndarray, detections: List[Dict], task_name: Optional[str] = None) -> str:
         """保存带有检测结果的图片"""
         try:
@@ -463,3 +688,32 @@ class YOLODetector:
         except Exception as e:
             logger.error(f"保存结果图片失败: {str(e)}")
             return None 
+
+    def draw_detections(self, image: np.ndarray, detections: List[Dict]) -> np.ndarray:
+        """绘制检测结果到图像上
+        
+        Args:
+            image: 输入图像
+            detections: 检测结果列表
+            
+        Returns:
+            np.ndarray: 带有检测框和标签的图像
+        """
+        try:
+            # 创建异步事件循环来调用_encode_result_image方法
+            loop = asyncio.new_event_loop()
+            result_image = loop.run_until_complete(
+                self._encode_result_image(image, detections, return_image=True)
+            )
+            loop.close()
+            
+            # 检查结果
+            if result_image is None:
+                logger.error("生成检测结果图像失败")
+                return image  # 返回原始图像
+                
+            return result_image
+        except Exception as e:
+            logger.error(f"绘制检测结果时出错: {str(e)}")
+            logger.exception(e)
+            return image  # 发生错误时返回原始图像 

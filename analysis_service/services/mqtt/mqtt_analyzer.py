@@ -70,34 +70,81 @@ class StreamDetectionTask:
             
             # 矩形ROI (roi_type=1)
             if roi_type == 1 and all(k in roi_data for k in ["x1", "y1", "x2", "y2"]):
+                # 基于固定尺寸464x261
+                base_width = 464
+                base_height = 261
+                # 归一化坐标（转为0-1范围）
                 self.roi = {
-                    "x1": roi_data.get("x1"),
-                    "y1": roi_data.get("y1"),
-                    "x2": roi_data.get("x2"),
-                    "y2": roi_data.get("y2")
+                    "x1": roi_data.get("x1") / base_width,
+                    "y1": roi_data.get("y1") / base_height,
+                    "x2": roi_data.get("x2") / base_width,
+                    "y2": roi_data.get("y2") / base_height,
+                    "normalized": True,  # 标记这是归一化坐标
+                    "roi_type": roi_type  # 保存ROI类型
                 }
             # 多边形ROI (roi_type=2) 或 线段ROI (roi_type=3)
             elif (roi_type == 2 or roi_type == 3) and "points" in roi_data:
-                # 将多边形或线段ROI转换为矩形包围盒
                 points = roi_data.get("points", [])
                 if points:
-                    x_coords = [p[0] for p in points]
-                    y_coords = [p[1] for p in points]
+                    # 检查点的格式，支持两种格式：[x, y] 或 {'x': x, 'y': y}
+                    if isinstance(points[0], dict) and 'x' in points[0] and 'y' in points[0]:
+                        # 字典格式的点 - ROI坐标基于固定尺寸464x261
+                        base_width = 464
+                        base_height = 261
+                        # 归一化坐标（转为0-1范围）
+                        x_coords = [p['x'] / base_width for p in points]
+                        y_coords = [p['y'] / base_height for p in points]
+                        
+                        # 创建归一化的点列表
+                        normalized_points = []
+                        for i in range(len(points)):
+                            normalized_points.append({
+                                'x': x_coords[i],
+                                'y': y_coords[i]
+                            })
+                    else:
+                        # 数组格式的点 - 假设已经是归一化坐标
+                        x_coords = [p[0] for p in points]
+                        y_coords = [p[1] for p in points]
+                        
+                        # 创建归一化的点列表
+                        normalized_points = []
+                        for i in range(len(points)):
+                            normalized_points.append([x_coords[i], y_coords[i]])
+                    
+                    # 存储归一化的ROI坐标（0-1范围）
                     self.roi = {
                         "x1": min(x_coords),
                         "y1": min(y_coords),
                         "x2": max(x_coords),
-                        "y2": max(y_coords)
+                        "y2": max(y_coords),
+                        "normalized": True,  # 标记这是归一化坐标
+                        "roi_type": roi_type,  # 保存ROI类型
+                        "points": normalized_points  # 添加点列表
                     }
             # 圆形ROI (roi_type=4)
             elif roi_type == 4 and "center" in roi_data and "radius" in roi_data:
                 center = roi_data.get("center")
                 radius = roi_data.get("radius")
+                # 基于固定尺寸464x261
+                base_width = 464
+                base_height = 261
+                # 归一化中心点和半径
+                center_x = center[0] / base_width if isinstance(center, list) else center.get("x") / base_width
+                center_y = center[1] / base_height if isinstance(center, list) else center.get("y") / base_height
+                radius_x = radius / base_width  # 在x方向的归一化半径
+                radius_y = radius / base_height  # 在y方向的归一化半径
+                
                 self.roi = {
-                    "x1": center[0] - radius,
-                    "y1": center[1] - radius,
-                    "x2": center[0] + radius,
-                    "y2": center[1] + radius
+                    "x1": max(0, center_x - radius_x),
+                    "y1": max(0, center_y - radius_y),
+                    "x2": min(1, center_x + radius_x),
+                    "y2": min(1, center_y + radius_y),
+                    "normalized": True,  # 标记这是归一化坐标
+                    "roi_type": roi_type,  # 保存ROI类型
+                    "is_circle": True,  # 标记这是圆形ROI
+                    "center": [center_x, center_y],
+                    "radius": (radius_x + radius_y) / 2  # 平均半径
                 }
         
         # 结果相关参数
@@ -197,24 +244,25 @@ class StreamDetectionTask:
                 # 保存结果图片（如果需要）
                 saved_file_path = None
                 if output_dir and self.result_config.get("save_images", False) and frame_count % 30 == 0:  # 每30帧保存一次
-                    timestamp = int(time.time())
-                    filename = f"{timestamp}_{frame_count}.jpg"
-                    filepath = os.path.join(output_dir, filename)
-                    
-                    # 绘制检测框到图像
-                    try:
-                        loop = asyncio.new_event_loop()
-                        result_image = loop.run_until_complete(self.detector._encode_result_image(frame, detections, return_image=True))
-                        loop.close()
-                        if result_image is not None:
+                    # 检查是否有检测结果，只有有目标时才保存图片
+                    if detections and len(detections) > 0:
+                        timestamp = int(time.time())
+                        filename = f"{timestamp}_{frame_count}.jpg"
+                        filepath = os.path.join(output_dir, filename)
+                        
+                        # 绘制检测结果到图像
+                        try:
+                            result_image = self.detector.draw_detections(frame.copy(), detections)
                             cv2.imwrite(filepath, result_image)
                             saved_file_path = filepath
                             logger.debug(f"已保存检测结果图片: {filepath}")
-                    except Exception as e:
-                        logger.error(f"保存检测结果图片失败: {str(e)}")
-                        # 保存原始帧作为备用
-                        cv2.imwrite(filepath, frame)
-                        saved_file_path = filepath
+                        except Exception as e:
+                            logger.error(f"保存检测结果图片失败: {str(e)}")
+                            # 保存原始帧作为备用
+                            cv2.imwrite(filepath, frame)
+                            saved_file_path = filepath
+                    else:
+                        logger.debug(f"跳过保存图片：当前帧未检测到目标")
                 
                 # 发送回调（如果需要）
                 current_time = time.time()
@@ -269,6 +317,7 @@ class StreamDetectionTask:
                 "classes": self.classes,
                 "nested_detection": self.nested_detection,
                 "roi": self.roi,
+                "roi_type": self.model_config.get("roi_type", 1),  # 添加roi_type参数
                 "imgsz": self.imgsz
             }
             
@@ -293,6 +342,11 @@ class StreamDetectionTask:
         callback_enabled = self.model_config.get("callback", {}).get("enabled", True)
         if not callback_enabled or not self.callback_topic:
             logger.debug("不发送结果：回调未启用或未指定回调主题")
+            return
+        
+        # 检查是否有检测结果，没有检测到目标时不发送回调
+        if not detections or len(detections) == 0:
+            logger.debug("不发送结果：未检测到目标")
             return
         
         try:
@@ -400,34 +454,81 @@ class StreamSegmentationTask:
             
             # 矩形ROI (roi_type=1)
             if roi_type == 1 and all(k in roi_data for k in ["x1", "y1", "x2", "y2"]):
+                # 基于固定尺寸464x261
+                base_width = 464
+                base_height = 261
+                # 归一化坐标（转为0-1范围）
                 self.roi = {
-                    "x1": roi_data.get("x1"),
-                    "y1": roi_data.get("y1"),
-                    "x2": roi_data.get("x2"),
-                    "y2": roi_data.get("y2")
+                    "x1": roi_data.get("x1") / base_width,
+                    "y1": roi_data.get("y1") / base_height,
+                    "x2": roi_data.get("x2") / base_width,
+                    "y2": roi_data.get("y2") / base_height,
+                    "normalized": True,  # 标记这是归一化坐标
+                    "roi_type": roi_type  # 保存ROI类型
                 }
             # 多边形ROI (roi_type=2) 或 线段ROI (roi_type=3)
             elif (roi_type == 2 or roi_type == 3) and "points" in roi_data:
-                # 将多边形或线段ROI转换为矩形包围盒
                 points = roi_data.get("points", [])
                 if points:
-                    x_coords = [p[0] for p in points]
-                    y_coords = [p[1] for p in points]
+                    # 检查点的格式，支持两种格式：[x, y] 或 {'x': x, 'y': y}
+                    if isinstance(points[0], dict) and 'x' in points[0] and 'y' in points[0]:
+                        # 字典格式的点 - ROI坐标基于固定尺寸464x261
+                        base_width = 464
+                        base_height = 261
+                        # 归一化坐标（转为0-1范围）
+                        x_coords = [p['x'] / base_width for p in points]
+                        y_coords = [p['y'] / base_height for p in points]
+                        
+                        # 创建归一化的点列表
+                        normalized_points = []
+                        for i in range(len(points)):
+                            normalized_points.append({
+                                'x': x_coords[i],
+                                'y': y_coords[i]
+                            })
+                    else:
+                        # 数组格式的点 - 假设已经是归一化坐标
+                        x_coords = [p[0] for p in points]
+                        y_coords = [p[1] for p in points]
+                        
+                        # 创建归一化的点列表
+                        normalized_points = []
+                        for i in range(len(points)):
+                            normalized_points.append([x_coords[i], y_coords[i]])
+                    
+                    # 存储归一化的ROI坐标（0-1范围）
                     self.roi = {
                         "x1": min(x_coords),
                         "y1": min(y_coords),
                         "x2": max(x_coords),
-                        "y2": max(y_coords)
+                        "y2": max(y_coords),
+                        "normalized": True,  # 标记这是归一化坐标
+                        "roi_type": roi_type,  # 保存ROI类型
+                        "points": normalized_points  # 添加点列表
                     }
             # 圆形ROI (roi_type=4)
             elif roi_type == 4 and "center" in roi_data and "radius" in roi_data:
                 center = roi_data.get("center")
                 radius = roi_data.get("radius")
+                # 基于固定尺寸464x261
+                base_width = 464
+                base_height = 261
+                # 归一化中心点和半径
+                center_x = center[0] / base_width if isinstance(center, list) else center.get("x") / base_width
+                center_y = center[1] / base_height if isinstance(center, list) else center.get("y") / base_height
+                radius_x = radius / base_width  # 在x方向的归一化半径
+                radius_y = radius / base_height  # 在y方向的归一化半径
+                
                 self.roi = {
-                    "x1": center[0] - radius,
-                    "y1": center[1] - radius,
-                    "x2": center[0] + radius,
-                    "y2": center[1] + radius
+                    "x1": max(0, center_x - radius_x),
+                    "y1": max(0, center_y - radius_y),
+                    "x2": min(1, center_x + radius_x),
+                    "y2": min(1, center_y + radius_y),
+                    "normalized": True,  # 标记这是归一化坐标
+                    "roi_type": roi_type,  # 保存ROI类型
+                    "is_circle": True,  # 标记这是圆形ROI
+                    "center": [center_x, center_y],
+                    "radius": (radius_x + radius_y) / 2  # 平均半径
                 }
         
         # 结果相关参数
@@ -526,24 +627,25 @@ class StreamSegmentationTask:
                 # 保存结果图片（如果需要）
                 saved_file_path = None
                 if output_dir and self.result_config.get("save_images", False) and frame_count % 30 == 0:  # 每30帧保存一次
-                    timestamp = int(time.time())
-                    filename = f"{timestamp}_{frame_count}.jpg"
-                    filepath = os.path.join(output_dir, filename)
-                    
-                    # 绘制分割结果到图像
-                    try:
-                        loop = asyncio.new_event_loop()
-                        result_image = loop.run_until_complete(self.segmentor._encode_result_image(frame, segmentation_results, return_image=True))
-                        loop.close()
-                        if result_image is not None:
+                    # 检查是否有分割结果，只有有目标时才保存图片
+                    if segmentation_results and len(segmentation_results) > 0:
+                        timestamp = int(time.time())
+                        filename = f"{timestamp}_{frame_count}.jpg"
+                        filepath = os.path.join(output_dir, filename)
+                        
+                        # 绘制分割结果到图像
+                        try:
+                            result_image = self.segmentor.draw_segmentations(frame.copy(), segmentation_results)
                             cv2.imwrite(filepath, result_image)
                             saved_file_path = filepath
                             logger.debug(f"已保存分割结果图片: {filepath}")
-                    except Exception as e:
-                        logger.error(f"保存分割结果图片失败: {str(e)}")
-                        # 保存原始帧作为备用
-                        cv2.imwrite(filepath, frame)
-                        saved_file_path = filepath
+                        except Exception as e:
+                            logger.error(f"保存分割结果图片失败: {str(e)}")
+                            # 保存原始帧作为备用
+                            cv2.imwrite(filepath, frame)
+                            saved_file_path = filepath
+                    else:
+                        logger.debug(f"跳过保存图片：当前帧未检测到分割目标")
                 
                 # 发送回调（如果需要）
                 current_time = time.time()
@@ -597,6 +699,7 @@ class StreamSegmentationTask:
                 "iou": self.iou,
                 "classes": self.classes,
                 "roi": self.roi,
+                "roi_type": self.model_config.get("roi_type", 1),  # 添加roi_type参数
                 "imgsz": self.imgsz,
                 "retina_masks": self.retina_masks
             }
@@ -622,6 +725,11 @@ class StreamSegmentationTask:
         callback_enabled = self.model_config.get("callback", {}).get("enabled", True)
         if not callback_enabled or not self.callback_topic:
             logger.debug("不发送结果：回调未启用或未指定回调主题")
+            return
+        
+        # 检查是否有分割结果，没有检测到分割目标时不发送回调
+        if not segmentation_results or len(segmentation_results) == 0:
+            logger.debug("不发送结果：未检测到分割目标")
             return
         
         try:
