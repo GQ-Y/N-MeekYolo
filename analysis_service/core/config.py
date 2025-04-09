@@ -111,7 +111,7 @@ class AnalysisServiceConfig(BaseSettings):
         max_size: int = 1073741824  # 1GB
         
         model_config = {"protected_namespaces": ()}
-    
+
     # 输出配置
     class OutputConfig(BaseModel):
         save_dir: str = "results"
@@ -186,4 +186,4 @@ try:
     logger.debug(f"配置加载成功: {settings}")
 except Exception as e:
     logger.error(f"加载配置失败: {str(e)}")
-    raise 
+    raise

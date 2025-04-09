@@ -1171,36 +1171,50 @@ class MQTTClient:
     def _get_available_models(self):
         """获取本地可用的模型列表"""
         try:
-            # 直接使用已导入的settings模块
+            # 使用base_dir和model_dir组合成完整路径
             model_dir = settings.STORAGE.model_dir
+            base_dir = settings.STORAGE.base_dir
+            complete_model_dir = os.path.join(base_dir, model_dir)
+            
             
             # 检查模型目录是否存在
-            if not os.path.exists(model_dir):
-                logger.warning(f"模型目录不存在: {model_dir}")
-                return ["yolov8n"]  # 返回默认模型
-            
-            # 获取模型目录中的所有文件
-            models = []
-            valid_extensions = ['.pt', '.pth', '.onnx', '.tflite', '.bin']
-            
-            for file in os.listdir(model_dir):
-                file_path = os.path.join(model_dir, file)
-                # 检查是否是文件且具有有效的模型扩展名
-                if os.path.isfile(file_path) and any(file.endswith(ext) for ext in valid_extensions):
-                    # 去掉扩展名，作为模型名称
-                    model_name = os.path.splitext(file)[0]
-                    models.append(model_name)
-            
-            # 如果没有找到模型，返回默认模型
-            if not models:
-                logger.warning(f"模型目录中未找到有效模型: {model_dir}")
-                return ["yolov8n"]
+            if not os.path.exists(complete_model_dir):
+                logger.warning(f"模型目录不存在: {complete_model_dir}")
+                return []  # 返回空列表
                 
+            # 打印目录中的文件列表
+            try:
+                dir_content = os.listdir(complete_model_dir)
+                logger.info(f"模型目录内容: {dir_content}")
+            except Exception as e:
+                logger.warning(f"无法列出目录内容: {str(e)}")
+            
+            # 获取模型目录中的所有子目录作为模型
+            models = []
+            
+            for item in os.listdir(complete_model_dir):
+                item_path = os.path.join(complete_model_dir, item)
+                # 检查是否是目录
+                is_dir = os.path.isdir(item_path)
+                logger.info(f"检查模型: {item}, 是目录: {is_dir}")
+                
+                if is_dir:
+                    # 将目录名作为模型代码
+                    model_code = item
+                    models.append(model_code)
+                    logger.info(f"找到模型: {model_code}")
+            
+            # 如果没有找到模型，返回空列表
+            if not models:
+                logger.warning(f"模型目录中未找到有效模型目录: {complete_model_dir}")
+                return []
+                
+            logger.info(f"找到的所有模型: {models}")
             return models
             
         except Exception as e:
             logger.error(f"获取可用模型列表失败: {str(e)}")
-            return ["yolov8n"]  # 错误时返回默认模型
+            return []  # 错误时返回空列表
     
     def _get_local_ip(self):
         """获取本地IP地址"""
