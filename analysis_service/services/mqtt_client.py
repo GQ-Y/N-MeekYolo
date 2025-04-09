@@ -42,8 +42,25 @@ def get_mqtt_client() -> 'MQTTClient':
     if _MQTT_CLIENT_INSTANCE is None:
         with _MQTT_CLIENT_LOCK:
             if _MQTT_CLIENT_INSTANCE is None:
-                # 从配置加载MQTT设置
-                client_id = f"analysis_node_{socket.gethostname()}_{uuid.uuid4().hex[:6]}"
+                # 获取MAC地址作为客户端ID
+                def get_mac_address():
+                    try:
+                        mac = uuid.getnode()
+                        mac_str = ':'.join(['{:02x}'.format((mac >> elements) & 0xff) for elements in range(0, 8*6, 8)][::-1])
+                        # 转换为大写形式
+                        mac_str = mac_str.upper()
+                        return mac_str
+                    except Exception as e:
+                        logger.error(f"获取MAC地址失败: {str(e)}")
+                        # 使用随机生成的MAC地址，并转为大写
+                        import random
+                        mac = [random.randint(0x00, 0xff) for _ in range(6)]
+                        mac_str = ':'.join(['{:02x}'.format(x) for x in mac]).upper()
+                        return mac_str
+
+                mac_address = get_mac_address()
+                client_id = f"meek-{mac_address}"
+                
                 # 使用socket.gethostname()作为device_id
                 device_id = socket.gethostname()
                 broker_host = settings.MQTT.broker_host
@@ -92,12 +109,10 @@ class MQTTClient:
         self.username = username
         self.password = password
         
-        # 设置客户端ID
-        self.client_id = client_id or f"meek-device-{device_id}"
-        
-        # 获取MAC地址
+        # 设置客户端ID，使用MAC地址作为基础
         self.mac_address = self._get_mac_address()
         logger.info(f"初始化MQTT客户端: mac_address={self.mac_address}")
+        self.client_id = self.mac_address
         
         # 使用MAC地址作为节点ID
         self.node_id = self.mac_address
@@ -111,7 +126,7 @@ class MQTTClient:
         self.status_topic = status_topic or f"meek/device/{self.node_id}/status"
         
         # 创建MQTT客户端
-        self.client = mqtt.Client(client_id=self.client_id, protocol=mqtt.MQTTv311, clean_session=True)
+        self.client = mqtt.Client(client_id=f"meek-{self.mac_address}", protocol=mqtt.MQTTv311, clean_session=True)
         
         # 设置回调函数
         self.client.on_connect = self._on_connect
@@ -264,7 +279,7 @@ class MQTTClient:
                 "client_id": self.client_id,  # 添加客户端ID
                 "service_type": "analysis",  # 添加服务类型
                 "is_active": False,  # 离线状态
-                "max_tasks": 4,  # 最大任务数
+                "max_tasks": 100,  # 最大任务数
                 "timestamp": int(time.time()),
                 "metadata": {
                     "version": settings.VERSION,
@@ -820,10 +835,9 @@ class MQTTClient:
             
         logger.info(f"收到停止任务命令: {task_id}/{subtask_id}")
         
-        # 检查任务是否存在
-        task_key = f"{task_id}_{subtask_id}"
+        # 检查任务是否存在 - 使用subtask_id作为任务键
         with self.active_tasks_lock:
-            if task_key not in self.active_tasks:
+            if subtask_id not in self.active_tasks:
                 logger.warning(f"任务不存在: {task_id}/{subtask_id}")
                 error_data = {
                     "cmd_type": "stop_task",
@@ -836,11 +850,13 @@ class MQTTClient:
                 self._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error", data=error_data)
                 return
                 
-            # 移除任务
-            del self.active_tasks[task_key]
+            # 移除任务 - 使用subtask_id作为任务键
+            del self.active_tasks[subtask_id]
             
         # 发送任务状态：已停止
         self._send_task_status(task_id, subtask_id, "stopped")
+        
+        # 无需从TaskManager中删除任务，因为我们采用无状态设计，任务从未被注册到TaskManager中
         
         # 发送接受停止命令的响应
         success_data = {
@@ -924,11 +940,10 @@ class MQTTClient:
                 
                 self._send_task_result(task_id, subtask_id, "completed", result)
                 
-            # 从活跃任务中移除
-            task_key = f"{task_id}_{subtask_id}"
-            with self.active_tasks_lock:
-                if task_key in self.active_tasks:
-                    del self.active_tasks[task_key]
+                # 从活跃任务中移除
+                with self.active_tasks_lock:
+                    if subtask_id in self.active_tasks:
+                        del self.active_tasks[subtask_id]
                     
         except Exception as e:
             logger.error(f"执行任务失败: {task_id}/{subtask_id}, 错误: {str(e)}")
@@ -952,10 +967,9 @@ class MQTTClient:
             self._send_task_result(task_id, subtask_id, "error", error_result, error=str(e))
             
             # 从活跃任务中移除
-            task_key = f"{task_id}_{subtask_id}"
             with self.active_tasks_lock:
-                if task_key in self.active_tasks:
-                    del self.active_tasks[task_key]
+                if subtask_id in self.active_tasks:
+                    del self.active_tasks[subtask_id]
                     
     def _send_task_status(self, task_id, subtask_id, status, error=None):
         """
@@ -1007,12 +1021,11 @@ class MQTTClient:
         if not isinstance(result, dict):
             result = {"data": result}
             
-        # 查找任务配置中的回调主题
+        # 查找任务配置中的回调主题 - 使用subtask_id作为任务键
         result_callback_topic = None
-        task_key = f"{task_id}_{subtask_id}"
         with self.active_tasks_lock:
-            if task_key in self.active_tasks:
-                task_data = self.active_tasks.get(task_key, {})
+            if subtask_id in self.active_tasks:
+                task_data = self.active_tasks.get(subtask_id, {})
                 result_config = task_data.get("result_config", {})
                 result_callback_topic = result_config.get("callback_topic")
                 
@@ -1117,7 +1130,7 @@ class MQTTClient:
                 "service_type": "analysis",  # 添加服务类型
                 "timestamp": int(time.time()),
                 "is_active": True,  # 添加到顶层
-                "max_tasks": 4,  # 添加到顶层
+                "max_tasks": 100,  # 添加到顶层
                 "metadata": {
                     "version": settings.VERSION,
                     "ip": self._get_local_ip(),
@@ -1127,7 +1140,7 @@ class MQTTClient:
                     "capabilities": {
                         "models": models,
                         "gpu_available": len(gpu_info) > 0 and "error" not in gpu_info[0],
-                        "max_tasks": 4,
+                        "max_tasks": 100,
                         "cpu_cores": psutil.cpu_count(),
                         "memory": round(psutil.virtual_memory().total / (1024**3))
                     },
@@ -1281,7 +1294,7 @@ class MQTTClient:
                 "memory_usage": memory_usage,
                 "gpu_usage": gpu_usage,
                 "task_count": len(self.active_tasks),
-                "max_tasks": 4,
+                "max_tasks": 100,
                 "status": "online"
             }
             

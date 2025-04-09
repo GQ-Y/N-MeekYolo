@@ -238,7 +238,11 @@ class StreamDetectionTask:
     def _send_status(self, status, error=None):
         """发送任务状态"""
         if self.mqtt_client:
+            # 发送MQTT状态消息
             self.mqtt_client._send_task_status(self.task_id, self.subtask_id, status, error=error)
+            
+            # 移除TaskManager中更新任务状态的代码
+            # 我们遵循无状态原则，仅发送MQTT消息，不更新TaskManager
 
 class MQTTAnalyzerService(BaseAnalyzerService):
     """MQTT分析服务"""
@@ -368,15 +372,13 @@ class MQTTAnalyzerService(BaseAnalyzerService):
         
         # 创建分析任务
         try:
-            # 创建停止检查函数
-            task_key = f"{task_id}_{subtask_id}"
-            
+            # 创建停止检查函数 - 使用subtask_id作为唯一标识符，不再使用组合ID
             def should_stop():
-                return task_key not in self.mqtt_client.active_tasks or self.mqtt_client.stop_event.is_set()
+                return subtask_id not in self.mqtt_client.active_tasks or self.mqtt_client.stop_event.is_set()
                 
-            # 记录任务
+            # 记录任务 - 使用subtask_id作为任务键（这是必要的运行时状态管理）
             with self.mqtt_client.active_tasks_lock:
-                self.mqtt_client.active_tasks[task_key] = {
+                self.mqtt_client.active_tasks[subtask_id] = {
                     "start_time": time.time(),
                     "source": source,
                     "config": config,
@@ -399,32 +401,8 @@ class MQTTAnalyzerService(BaseAnalyzerService):
                 should_stop=should_stop
             )
             
-            # 在TaskManager中创建任务记录
-            combined_id = f"{task_id}_{subtask_id}"
-            params = {
-                "task_id": task_id,
-                "subtask_id": subtask_id,
-                "stream_url": url,
-                "model_code": model_code,
-                "config": config,
-                "result_config": result_config
-            }
-            self.task_manager.update_task(combined_id, {
-                "id": combined_id,
-                "type": "stream",
-                "params": params,
-                "status": "pending",
-                "protocol": "mqtt",
-                "create_time": int(time.time()),
-                "progress": 0,
-                "detection_task": detection_task  # 保存任务对象
-            })
-            
             # 启动任务
             detection_task.start()
-            
-            # 更新任务状态为运行中
-            self.task_manager.update_task(combined_id, {"status": "running"})
             
             logger.info(f"流分析任务已启动: {task_id}/{subtask_id}")
             return True
@@ -436,9 +414,9 @@ class MQTTAnalyzerService(BaseAnalyzerService):
             
             # 移除任务
             with self.mqtt_client.active_tasks_lock:
-                if task_key in self.mqtt_client.active_tasks:
-                    del self.mqtt_client.active_tasks[task_key]
-                    
+                if subtask_id in self.mqtt_client.active_tasks:
+                    del self.mqtt_client.active_tasks[subtask_id]
+            
             if confirmation_topic:
                 self.mqtt_client._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error", 
                                                data={"error_message": error_msg, "task_id": task_id, "subtask_id": subtask_id})
