@@ -125,11 +125,6 @@ class MQTTClient:
         # 从kwargs获取topic_prefix或使用默认值
         self.topic_prefix = kwargs.get("topic_prefix", "meek/")
         
-        # 设置主题 - 使用node_id（MAC地址）而不是device_id
-        self.command_topic = command_topic or f"meek/device/{self.node_id}/command"
-        self.response_topic = response_topic or f"meek/device/{self.node_id}/response"
-        self.status_topic = status_topic or f"meek/device/{self.node_id}/status"
-        
         # 创建MQTT客户端
         self.client = mqtt.Client(client_id=self.client_id, protocol=mqtt.MQTTv311, clean_session=True)
         
@@ -147,11 +142,7 @@ class MQTTClient:
         
         # 连接标志
         self.connected = False
-        
-        logger.info(f"MQTT客户端已初始化: 设备ID={device_id}, 客户端ID={self.client_id}, 代理={broker_host}:{broker_port}")
-        logger.info(f"命令主题: {self.command_topic}")
-        logger.info(f"响应主题: {self.response_topic}")
-        logger.info(f"状态主题: {self.status_topic}")
+
         
         # 状态标志
         self.is_connected = False
@@ -974,7 +965,7 @@ class MQTTClient:
                     
     def _send_task_status(self, task_id, subtask_id, status, error=None):
         """
-        发送任务状态
+        发送任务状态 (实际发送到节点状态主题)
         
         Args:
             task_id: 任务ID
@@ -1002,14 +993,14 @@ class MQTTClient:
         if error and status == "error":
             payload["error"] = str(error)
             
-        # 发布状态消息
+        # 发布状态消息到标准 /status 主题
         topic = f"{self.topic_prefix}{self.node_id}/status"
         self._publish_message(topic, payload, qos=1)
-        logger.info(f"已发送任务状态: {task_id}/{subtask_id}, 状态: {status}")
+        logger.info(f"已发送任务状态到 {topic}: {task_id}/{subtask_id}, 状态: {status}")
         
     def _send_task_result(self, task_id, subtask_id, status, result, error=None):
         """
-        发送任务结果
+        发送任务结果到标准 /result 主题
         
         Args:
             task_id: 任务ID
@@ -1070,8 +1061,8 @@ class MQTTClient:
         elif "frame_base64" in result:
             base64_image = result.get("frame_base64", "")
                 
-        # 如果在任务配置中找到了回调主题，使用它，否则使用默认主题
-        topic = result_callback_topic if result_callback_topic else f"{self.topic_prefix}{self.node_id}/result"
+        # 强制使用标准 /result 主题，忽略配置中的 callback_topic
+        topic = f"{self.topic_prefix}{self.node_id}/result"
         
         # 尝试将task_id转换为整数，用于标准HTTP回调格式
         try:
@@ -1155,7 +1146,7 @@ class MQTTClient:
             
         # 发布结果消息
         self._publish_message(topic, payload, qos=1)
-        logger.info(f"已发送任务结果: {task_id}/{subtask_id}, 状态: {status}, 主题: {topic}")
+        logger.info(f"已发送任务结果到 {topic}: {task_id}/{subtask_id}, 状态: {status}")
         
     def _publish_connection_status(self, is_online):
         """
