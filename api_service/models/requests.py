@@ -154,7 +154,10 @@ class TaskStreamConfig(BaseModel):
 class TaskCreate(BaseModel):
     """创建任务请求"""
     name: str = Field(..., description="任务名称，用于识别和显示任务")
-    save_result: bool = Field(False, description="是否保存分析结果图片和数据到服务器")
+    save_result: bool = Field(False, description="是否保存分析结果数据到服务器")
+    save_images: bool = Field(False, description="是否保存分析结果图片到服务器")
+    analysis_interval: int = Field(1, description="分析间隔(秒)，控制分析频率")
+    specific_node_id: Optional[int] = Field(None, description="指定运行节点ID，如果提供则优先使用该节点")
     tasks: List[TaskStreamConfig] = Field(
         ..., 
         description="子任务配置列表，每个子任务包含一个视频流和多个分析模型的配置"
@@ -166,7 +169,11 @@ class TaskUpdate(BaseModel):
     """更新任务请求"""
     id: int = Field(..., description="任务ID")
     name: Optional[str] = Field(None, description="任务名称")
-    save_result: Optional[bool] = Field(None, description="保存结果")
+    save_result: Optional[bool] = Field(None, description="是否保存分析结果数据到服务器")
+    save_images: Optional[bool] = Field(None, description="是否保存分析结果图片到服务器")
+    analysis_interval: Optional[int] = Field(None, description="分析间隔(秒)，控制分析频率")
+    specific_node_id: Optional[int] = Field(None, description="指定运行节点ID，如果提供则优先使用该节点")
+    tasks: Optional[List[TaskStreamConfig]] = Field(None, description="更新子任务配置")
     
     model_config = {"protected_namespaces": ()}
 

@@ -40,6 +40,9 @@ def create_task(
     task = Task(
         name=task_data.name,
         save_result=task_data.save_result,
+        save_images=task_data.save_images,
+        analysis_interval=task_data.analysis_interval,
+        specific_node_id=task_data.specific_node_id,
         status=0,  # 未启动状态(0)
         total_subtasks=0,  # 初始化为0，稍后根据实际创建的子任务更新
         active_subtasks=0
@@ -219,26 +222,163 @@ def update_task(
     db: Session,
     task_id: int,
     task_data: TaskUpdate
-) -> Optional[Task]:
-    """更新任务基本信息"""
-    task = get_task(db, task_id, include_subtasks=False)
-    if not task:
-        return None
+) -> Task:
+    """更新任务
     
-    # 仅允许在创建状态下更新任务
-    if task.status != "created":
-        return task
-    
-    if task_data.name:
-        task.name = task_data.name
+    Args:
+        db: 数据库会话
+        task_id: 任务ID
+        task_data: 任务更新数据
         
+    Returns:
+        更新后的任务对象
+        
+    Raises:
+        ValueError: 如果任务不存在或者数据无效
+    """
+    # 获取任务
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise ValueError(f"任务 {task_id} 不存在")
+    
+    # 检查任务状态，如果任务正在运行，不允许更新
+    if task.status == 1:  # 1表示运行中
+        raise ValueError(f"任务 {task_id} 正在运行中，无法更新。请先停止任务")
+    
+    # 更新基本信息
+    if task_data.name is not None:
+        task.name = task_data.name
+    
     if task_data.save_result is not None:
         task.save_result = task_data.save_result
     
-    db.commit()
-    db.refresh(task)
+    if task_data.save_images is not None:
+        task.save_images = task_data.save_images
     
-    return task
+    if task_data.analysis_interval is not None:
+        task.analysis_interval = task_data.analysis_interval
+    
+    if task_data.specific_node_id is not None:
+        task.specific_node_id = task_data.specific_node_id
+    
+    # 如果提供了任务配置，则更新子任务
+    if task_data.tasks:
+        # 首先移除所有现有的子任务
+        db.query(SubTask).filter(SubTask.task_id == task_id).delete()
+        
+        # 清除与流和模型的关联
+        task.streams = []
+        task.models = []
+        
+        # 记录所有配置中的模型ID
+        all_model_ids = []
+        for stream_config in task_data.tasks:
+            for model_config in stream_config.models:
+                all_model_ids.append(model_config.model_id)
+        
+        logger.info(f"任务更新包含模型ID: {all_model_ids}")
+        
+        # 创建新的子任务
+        created_subtasks = []
+        failed_streams = []
+        failed_models = []
+        
+        # 为每个流和模型创建子任务
+        for stream_config in task_data.tasks:
+            # 获取流
+            stream = db.query(Stream).filter(Stream.id == stream_config.stream_id).first()
+            if not stream:
+                failed_streams.append(stream_config.stream_id)
+                logger.warning(f"视频流 {stream_config.stream_id} 不存在，但继续创建任务")
+                continue
+                
+            # 添加关联
+            task.streams.append(stream)
+            logger.info(f"为任务 {task.id} 添加流 ID={stream.id}, name={stream.name}")
+                
+            # 处理每个模型配置
+            for model_config in stream_config.models:
+                # 获取模型
+                model = db.query(Model).filter(Model.id == model_config.model_id).first()
+                if not model:
+                    failed_models.append(model_config.model_id)
+                    logger.warning(f"模型 {model_config.model_id} 不存在，但继续创建任务")
+                    continue
+                    
+                # 添加关联
+                if model not in task.models:
+                    task.models.append(model)
+                    logger.info(f"为任务 {task.id} 添加模型 ID={model.id}, code={model.code}, name={model.name}")
+                    
+                # 提取回调配置
+                enable_callback = False
+                callback_url = None
+                if model_config.config and "callback" in model_config.config:
+                    callback_conf = model_config.config["callback"]
+                    enable_callback = callback_conf.get("enabled", False)
+                    callback_url = callback_conf.get("url")
+                    
+                # 确定ROI类型
+                roi_type = 0
+                if model_config.config:
+                    roi_type = model_config.config.get("roi_type", 0)
+                    
+                # 确定分析类型
+                analysis_type = "detection"
+                if model_config.config:
+                    analysis_type = model_config.config.get("analysis_type", "detection")
+                    
+                # 创建子任务
+                subtask = SubTask(
+                    task_id=task.id,
+                    stream_id=stream.id,
+                    model_id=model.id,
+                    status=0,  # 未启动状态(0)
+                    config=model_config.config,
+                    enable_callback=enable_callback,
+                    callback_url=callback_url,
+                    roi_type=roi_type,
+                    analysis_type=analysis_type
+                )
+                
+                db.add(subtask)
+                created_subtasks.append(subtask)
+                logger.info(f"创建子任务，task_id={task.id}, stream={stream.id}({stream.name}), model={model.id}({model.code})")
+        
+        # 更新实际的子任务数量
+        task.total_subtasks = len(created_subtasks)
+        # 确保active_subtasks为0
+        task.active_subtasks = 0
+        logger.info(f"任务 {task.id} 共更新了 {task.total_subtasks} 个子任务")
+        
+        # 生成警告信息
+        warnings = []
+        if failed_streams:
+            warnings.append(f"以下视频流不存在或无法连接: {', '.join(map(str, failed_streams))}")
+        if failed_models:
+            warnings.append(f"以下模型不存在或未下载: {', '.join(map(str, failed_models))}")
+        
+        # 更新任务信息
+        if warnings:
+            task.error_message = " | ".join(warnings)
+    
+    # 更新时间
+    task.updated_at = datetime.now()
+    
+    try:
+        # 提交事务
+        db.commit()
+        logger.info(f"成功更新任务 {task.id}")
+        
+        # 刷新任务数据
+        db.refresh(task)
+        return task
+    except Exception as e:
+        db.rollback()
+        logger.error(f"更新任务失败，事务回滚: {str(e)}")
+        import traceback
+        logger.error(f"详细错误跟踪: {traceback.format_exc()}")
+        raise ValueError(f"更新任务失败，数据库错误: {str(e)}")
 
 def delete_task(
     db: Session,
@@ -315,6 +455,28 @@ async def start_task(
         db.commit()
         return False, "模型服务不可用，任务无法启动"
     
+    # 检查是否有指定节点
+    specific_node = None
+    specific_node_type = None
+    if task.specific_node_id:
+        logger.info(f"任务 {task_id} 指定了节点ID: {task.specific_node_id}")
+        
+        # 首先尝试查找HTTP节点
+        http_node = db.query(Node).filter(Node.id == task.specific_node_id).first()
+        if http_node:
+            specific_node = http_node
+            specific_node_type = "http"
+            logger.info(f"找到指定的HTTP节点: ID={http_node.id}, IP={http_node.ip}:{http_node.port}")
+        else:
+            # 尝试查找MQTT节点
+            mqtt_node = db.query(MQTTNode).filter(MQTTNode.id == task.specific_node_id).first()
+            if mqtt_node:
+                specific_node = mqtt_node
+                specific_node_type = "mqtt"
+                logger.info(f"找到指定的MQTT节点: ID={mqtt_node.id}, MAC={mqtt_node.mac_address}")
+            else:
+                logger.warning(f"指定的节点ID {task.specific_node_id} 不存在，将使用自动节点选择")
+    
     # 如果是重新启动任务，更新启动时间和计数
     if task.started_at:
         logger.info(f"重启任务 {task_id}，清除之前的启动时间")
@@ -358,6 +520,28 @@ async def start_task(
     # 构建系统回调URL - API服务接收回调的地址
     system_callback = f"http://{settings.SERVICE.host}:{settings.SERVICE.port}/api/v1/callback"
     logger.info(f"系统回调URL: {system_callback}")
+    
+    # 获取当前通信模式
+    from core.config import settings as config_settings
+    import yaml
+    comm_mode = "http"  # 默认值
+    try:
+        with open("config/config.yaml", "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+            comm_mode = config.get('COMMUNICATION', {}).get('mode', 'http')
+            logger.info(f"当前通信模式: {comm_mode}")
+    except Exception as e:
+        logger.error(f"读取配置文件失败，使用默认HTTP模式: {e}")
+    
+    # 如果有指定节点且是MQTT节点，则强制使用MQTT模式
+    if specific_node_type == "mqtt":
+        comm_mode = "mqtt"
+        logger.info(f"检测到指定MQTT节点，强制使用MQTT通信模式")
+    
+    # 如果有指定节点且是HTTP节点，则强制使用HTTP模式
+    if specific_node_type == "http":
+        comm_mode = "http"
+        logger.info(f"检测到指定HTTP节点，强制使用HTTP通信模式")
     
     # 逐个启动未启动状态的子任务
     success_count = 0
@@ -434,7 +618,6 @@ async def start_task(
                     else:
                         analysis_task_id = subtask.analysis_task_id
                     
-                    # MQTT模式下，不使用analyze_stream方法创建新任务，而是直接发送消息
                     # 构建发送到MQTT节点的任务配置
                     task_config = {
                         "source": {
@@ -444,13 +627,12 @@ async def start_task(
                         "config": {
                             "model_code": model.code,
                             "analysis_type": subtask.analysis_type,
+                            "analysis_interval": task.analysis_interval,  # 新增：分析间隔
                             **(subtask.config or {})
                         },
                         "result_config": {
-                            "save_result": task.save_result,
-                            "callback_urls": user_callback_url.split(",") if user_callback_url else [],
-                            "callback_url": system_callback,
-                            "enable_callback": subtask.enable_callback
+                            "save_result": task.save_result,  # 保存数据结果
+                            "save_images": task.save_images,  # 新增：保存图像结果
                         }
                     }
                     
@@ -462,9 +644,17 @@ async def start_task(
                         MQTTNode.task_count < MQTTNode.max_tasks
                     ).order_by(MQTTNode.task_count).all()
                     
-                    mqtt_node = mqtt_nodes[0] if mqtt_nodes else None
+                    # 如果有指定的MQTT节点，则优先使用
+                    if specific_node_type == "mqtt" and specific_node:
+                        mqtt_node = specific_node
+                        logger.info(f"使用指定的MQTT节点: {mqtt_node.id} / {mqtt_node.mac_address}")
+                    else:
+                        mqtt_node = mqtt_nodes[0] if mqtt_nodes else None
                     
                     if mqtt_node:
+                        # 添加回调主题到result_config
+                        task_config["result_config"]["callback_topic"] = f"meek/{mqtt_node.mac_address}/result"
+                        
                         # 更新子任务信息，关联到MQTT节点而不是普通节点
                         subtask.mqtt_node_id = mqtt_node.id
                         subtask.node_id = None  # 确保不设置node_id
@@ -503,6 +693,13 @@ async def start_task(
                         continue
                 else:
                     # 使用HTTP分析服务
+                    # 如果有指定的HTTP节点，则直接传递node_id参数
+                    specified_node_id = None
+                    if specific_node_type == "http" and specific_node:
+                        specified_node_id = specific_node.id
+                        logger.info(f"使用指定的HTTP节点: {specified_node_id}")
+                    
+                    # 在调用分析服务时传递新字段
                     result = await analysis_service.analyze_stream(
                         model_code=model.code,
                         stream_url=stream.url,
@@ -511,9 +708,12 @@ async def start_task(
                         callback_urls=user_callback_url,
                         enable_callback=subtask.enable_callback,
                         save_result=task.save_result,
+                        save_images=task.save_images,  # 新增：保存图像结果
+                        analysis_interval=task.analysis_interval,  # 新增：分析间隔
                         config=subtask.config,
                         analysis_task_id=subtask.analysis_task_id,
-                        analysis_type=subtask.analysis_type
+                        analysis_type=subtask.analysis_type,
+                        specified_node_id=specified_node_id  # 传递指定节点ID
                     )
                 
                 if not result:

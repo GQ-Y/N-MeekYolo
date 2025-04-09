@@ -33,6 +33,9 @@ class MQTTClient:
         self.config = config
         self.client_id = f"{config.get('client_id', 'api_service')}-{str(uuid.uuid4())}"
         
+        # 判断是否为API服务（根据client_id前缀判断）
+        self.is_api_service = self.client_id.startswith('api_service-')
+        
         # 兼容paho-mqtt 2.0版本
         self.client = mqtt_client.Client(
             client_id=self.client_id,
@@ -94,8 +97,8 @@ class MQTTClient:
                     self.config.get("password")
                 )
             
-            # 设置遗嘱消息
-            if self.topic_prefix and self.client_id:
+            # 设置遗嘱消息，仅在非API服务时设置
+            if not self.is_api_service and self.topic_prefix and self.client_id:
                 logger.info(f"设置遗嘱消息，主题: {self.topic_prefix}connection")
                 will_payload = json.dumps({
                     "status": "offline",
@@ -171,11 +174,17 @@ class MQTTClient:
                 logger.info("客户端已连接但标志未更新，修正状态")
                 self.connected = True
             
-            # 发布连接状态
-            if self.connected or self.client.is_connected():
+            # 发布连接状态（仅在非API服务时发布）
+            if (self.connected or self.client.is_connected()):
                 self.connected = True  # 确保状态一致
-                logger.info("发布上线状态")
-                self._publish_connection_status("online")
+                
+                # API服务不发布上线状态
+                if not self.is_api_service:
+                    logger.info("发布上线状态")
+                    self._publish_connection_status("online")
+                else:
+                    logger.info("API服务无需发布上线状态")
+                    
                 return True
             else:
                 logger.error("MQTT客户端无法连接，未收到连接确认")
@@ -875,13 +884,13 @@ class MQTTClient:
                         "config": {
                             "model_code": model.code,
                             "analysis_type": subtask.analysis_type,
+                            "analysis_interval": task.analysis_interval,  # 新增分析间隔
                             **(subtask.config or {})
                         },
                         "result_config": {
                             "save_result": task.save_result,
-                            "callback_urls": subtask.callback_url.split(",") if subtask.callback_url else [],
-                            "callback_url": subtask.callback_url,
-                            "enable_callback": subtask.enable_callback
+                            "save_images": task.save_images,  # 新增保存图像字段
+                            "callback_topic": f"meek/{target_node.mac_address}/result"  # 目标节点已存在
                         }
                     }
                     
@@ -1102,7 +1111,8 @@ class MQTTClient:
                 "source": config.get("source", {}),
                 "config": config.get("config", {}),
                 "result_config": {
-                    "save_result": config.get("save_result", False),
+                    "save_result": config.get("result_config", {}).get("save_result", False),
+                    "save_images": config.get("result_config", {}).get("save_images", False),
                     "callback_topic": f"{self.topic_prefix}{mac_address}/result"
                 }
             }
@@ -1273,6 +1283,11 @@ class MQTTClient:
         Args:
             status: 状态，'online'或'offline'
         """
+        # API服务不应发布连接状态
+        if self.is_api_service:
+            logger.debug(f"跳过API服务连接状态发布: {status}")
+            return
+        
         try:
             if not self.client.is_connected():
                 logger.warning(f"无法发布连接状态，MQTT客户端未连接")

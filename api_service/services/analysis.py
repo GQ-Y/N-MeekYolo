@@ -149,9 +149,12 @@ class AnalysisService:
         callback_url: str = None,
         enable_callback: bool = False,
         save_result: bool = True,
+        save_images: bool = False,
+        analysis_interval: int = 1,
         config: dict = None,
         analysis_task_id: str = None,
-        analysis_type: str = "detection"
+        analysis_type: str = "detection",
+        specified_node_id: int = None
     ) -> Optional[tuple]:
         """分析视频流
         
@@ -162,10 +165,13 @@ class AnalysisService:
             callback_urls: 回调地址，多个用逗号分隔
             callback_url: 单独的回调URL，优先级高于callback_urls
             enable_callback: 是否启用用户回调
-            save_result: 是否保存结果
+            save_result: 是否保存结果数据
+            save_images: 是否保存结果图片
+            analysis_interval: 分析间隔(秒)
             config: 分析配置
             analysis_task_id: 分析任务ID，如果不提供将自动生成
             analysis_type: 分析类型，可选值：detection, segmentation, tracking, counting
+            specified_node_id: 指定节点ID，如果提供则优先使用该节点
             
         Returns:
             (task_id, node_id): 任务ID和节点ID组成的元组
@@ -182,18 +188,39 @@ class AnalysisService:
         request_url = None
         db = SessionLocal()
         try:
-            # 为这个特定子任务选择一个在线的分析服务节点
-            node = NodeCRUD.get_available_node(db)
-            if node:
-                # 保存节点信息，但不立即增加计数
-                node_id = node.id
-                node_ip = node.ip
-                node_port = node.port
-                request_url = f"http://{node_ip}:{node_port}/api/v1/analyze/stream"
-                logger.info(f"为子任务选择节点: {node_id} ({node_ip}:{node_port})")
-            else:
-                logger.error("未找到可用的分析服务节点，任务无法启动")
-                return None, None
+            # 如果指定了节点ID，则优先尝试使用该节点
+            if specified_node_id:
+                node = db.query(Node).filter(
+                    Node.id == specified_node_id,
+                    Node.service_status == "online",
+                    Node.is_active == True
+                ).first()
+                
+                if node:
+                    # 保存节点信息
+                    node_id = node.id
+                    node_ip = node.ip
+                    node_port = node.port
+                    request_url = f"http://{node_ip}:{node_port}/api/v1/analyze/stream"
+                    logger.info(f"使用指定节点: {node_id} ({node_ip}:{node_port})")
+                else:
+                    logger.warning(f"指定节点 {specified_node_id} 不可用，将尝试自动选择节点")
+                    # 继续执行自动节点选择
+            
+            # 如果没有指定节点或指定节点不可用，则自动选择节点
+            if not node_id:
+                # 为这个特定子任务选择一个在线的分析服务节点
+                node = NodeCRUD.get_available_node(db)
+                if node:
+                    # 保存节点信息，但不立即增加计数
+                    node_id = node.id
+                    node_ip = node.ip
+                    node_port = node.port
+                    request_url = f"http://{node_ip}:{node_port}/api/v1/analyze/stream"
+                    logger.info(f"为子任务选择节点: {node_id} ({node_ip}:{node_port})")
+                else:
+                    logger.error("未找到可用的分析服务节点，任务无法启动")
+                    return None, None
                 
         finally:
             db.close()
@@ -220,7 +247,7 @@ class AnalysisService:
             else:
                 combined_callback_urls = callback_url
         
-        # 构建请求参数
+        # 构建请求参数，包含新字段
         request_data = {
             "model_code": model_code,
             "stream_url": stream_url,
@@ -229,6 +256,8 @@ class AnalysisService:
             "callback_url": system_callback_url,
             "enable_callback": enable_callback,
             "save_result": save_result,
+            "save_images": save_images,
+            "analysis_interval": analysis_interval,
             "config": config or {},
             "analysis_type": analysis_type,
             "task_id": analysis_task_id,

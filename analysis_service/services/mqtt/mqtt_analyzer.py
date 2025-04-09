@@ -21,6 +21,7 @@ from core.task_manager import TaskManager
 from core.task_processor import TaskProcessor
 from core.config import settings
 from core.detection.yolo_detector import YOLODetector
+from core.segmentation.yolo_segmentor import YOLOSegmentor
 from services.base_analyzer import BaseAnalyzerService
 from services.mqtt_client import MQTTClient
 
@@ -59,6 +60,45 @@ class StreamDetectionTask:
         self.iou = model_config.get("iou", 0.5)
         self.classes = model_config.get("classes", None)
         self.imgsz = model_config.get("imgsz", 640)
+        self.nested_detection = model_config.get("nested_detection", False)
+        
+        # 处理ROI参数
+        self.roi = None
+        if "roi" in model_config:
+            roi_data = model_config.get("roi", {})
+            roi_type = model_config.get("roi_type", 0)
+            
+            # 矩形ROI (roi_type=1)
+            if roi_type == 1 and all(k in roi_data for k in ["x1", "y1", "x2", "y2"]):
+                self.roi = {
+                    "x1": roi_data.get("x1"),
+                    "y1": roi_data.get("y1"),
+                    "x2": roi_data.get("x2"),
+                    "y2": roi_data.get("y2")
+                }
+            # 多边形ROI (roi_type=2) 或 线段ROI (roi_type=3)
+            elif (roi_type == 2 or roi_type == 3) and "points" in roi_data:
+                # 将多边形或线段ROI转换为矩形包围盒
+                points = roi_data.get("points", [])
+                if points:
+                    x_coords = [p[0] for p in points]
+                    y_coords = [p[1] for p in points]
+                    self.roi = {
+                        "x1": min(x_coords),
+                        "y1": min(y_coords),
+                        "x2": max(x_coords),
+                        "y2": max(y_coords)
+                    }
+            # 圆形ROI (roi_type=4)
+            elif roi_type == 4 and "center" in roi_data and "radius" in roi_data:
+                center = roi_data.get("center")
+                radius = roi_data.get("radius")
+                self.roi = {
+                    "x1": center[0] - radius,
+                    "y1": center[1] - radius,
+                    "x2": center[0] + radius,
+                    "y2": center[1] + radius
+                }
         
         # 结果相关参数
         self.save_result = result_config.get("save_result", True)
@@ -67,6 +107,13 @@ class StreamDetectionTask:
         
         # 创建检测器实例
         self.detector = None
+        
+        # 打印完整的配置信息，包括嵌套检测参数
+        logger.info(f"流检测任务初始化 - 任务ID: {task_id}, 子任务ID: {subtask_id}")
+        logger.info(f"模型配置: {json.dumps(model_config, ensure_ascii=False)}")
+        logger.info(f"嵌套检测参数: {self.nested_detection}")
+        logger.info(f"ROI参数: {json.dumps(self.roi, ensure_ascii=False) if self.roi else 'None'}")
+        logger.info(f"结果配置: {json.dumps(result_config, ensure_ascii=False)}")
         
     def start(self):
         """启动任务"""
@@ -115,13 +162,18 @@ class StreamDetectionTask:
                 
             # 创建输出目录（如果需要保存结果）
             output_dir = None
-            if self.save_result:
+            if self.save_result or self.result_config.get("save_images", False):
                 output_dir = os.path.join(settings.OUTPUT.save_dir, "streams", f"{self.task_id}_{self.subtask_id}")
                 os.makedirs(output_dir, exist_ok=True)
+                logger.info(f"已创建输出目录: {output_dir}")
                 
             # 处理参数
             last_callback_time = 0
             frame_count = 0
+            
+            # 获取回调配置
+            callback_enabled = self.model_config.get("callback", {}).get("enabled", True)
+            logger.info(f"回调状态: {'已启用' if callback_enabled else '已禁用'}")
             
             # 处理视频流
             while self.running and not self.should_stop():
@@ -142,18 +194,31 @@ class StreamDetectionTask:
                 detections = self._detect_frame(frame)
                 frame_count += 1
                 
-                # 保存结果（如果需要）
+                # 保存结果图片（如果需要）
                 saved_file_path = None
-                if self.save_result and frame_count % 30 == 0:  # 每30帧保存一次
+                if output_dir and self.result_config.get("save_images", False) and frame_count % 30 == 0:  # 每30帧保存一次
                     timestamp = int(time.time())
                     filename = f"{timestamp}_{frame_count}.jpg"
                     filepath = os.path.join(output_dir, filename)
-                    cv2.imwrite(filepath, frame)
-                    saved_file_path = filepath
                     
+                    # 绘制检测框到图像
+                    try:
+                        loop = asyncio.new_event_loop()
+                        result_image = loop.run_until_complete(self.detector._encode_result_image(frame, detections, return_image=True))
+                        loop.close()
+                        if result_image is not None:
+                            cv2.imwrite(filepath, result_image)
+                            saved_file_path = filepath
+                            logger.debug(f"已保存检测结果图片: {filepath}")
+                    except Exception as e:
+                        logger.error(f"保存检测结果图片失败: {str(e)}")
+                        # 保存原始帧作为备用
+                        cv2.imwrite(filepath, frame)
+                        saved_file_path = filepath
+                
                 # 发送回调（如果需要）
                 current_time = time.time()
-                if self.callback_topic and (current_time - last_callback_time) >= self.callback_interval:
+                if callback_enabled and self.callback_topic and (current_time - last_callback_time) >= self.callback_interval:
                     self._send_result(frame, detections, saved_file_path)
                     last_callback_time = current_time
                     
@@ -201,8 +266,14 @@ class StreamDetectionTask:
             config = {
                 "confidence": self.confidence,
                 "iou": self.iou,
-                "classes": self.classes
+                "classes": self.classes,
+                "nested_detection": self.nested_detection,
+                "roi": self.roi,
+                "imgsz": self.imgsz
             }
+            
+            # 记录详细的检测参数
+            logger.debug(f"检测参数: {json.dumps(config, ensure_ascii=False)}")
             
             # 调用检测器 - 由于detector.detect是异步的，我们需要使用同步方式调用
             loop = asyncio.new_event_loop()
@@ -218,9 +289,12 @@ class StreamDetectionTask:
             
     def _send_result(self, frame, detections, saved_file_path=None):
         """发送检测结果"""
-        if not self.callback_topic:
+        # 检查回调是否启用和主题是否存在
+        callback_enabled = self.model_config.get("callback", {}).get("enabled", True)
+        if not callback_enabled or not self.callback_topic:
+            logger.debug("不发送结果：回调未启用或未指定回调主题")
             return
-            
+        
         try:
             # 准备结果数据
             result = {
@@ -268,9 +342,340 @@ class StreamDetectionTask:
                     status="processing",
                     result=result
                 )
-                
+                logger.debug(f"已发送检测结果到主题: {self.callback_topic}")
+            
         except Exception as e:
             logger.error(f"发送检测结果时出错: {str(e)}")
+            logger.exception(e)
+            
+    def _send_status(self, status, error=None):
+        """发送任务状态"""
+        if self.mqtt_client:
+            # 发送MQTT状态消息
+            self.mqtt_client._send_task_status(self.task_id, self.subtask_id, status, error=error)
+            
+            # 移除TaskManager中更新任务状态的代码
+            # 我们遵循无状态原则，仅发送MQTT消息，不更新TaskManager
+
+# 添加StreamSegmentationTask类定义
+class StreamSegmentationTask:
+    """流分割任务类，用于处理流视频的实时分割"""
+    
+    def __init__(self, task_id, subtask_id, stream_url, model_config, result_config, mqtt_client, should_stop):
+        """
+        初始化流分割任务
+        
+        Args:
+            task_id: 任务ID
+            subtask_id: 子任务ID
+            stream_url: 流URL
+            model_config: 模型配置
+            result_config: 结果配置
+            mqtt_client: MQTT客户端
+            should_stop: 停止检查函数
+        """
+        self.task_id = task_id
+        self.subtask_id = subtask_id
+        self.stream_url = stream_url
+        self.model_config = model_config
+        self.result_config = result_config
+        self.mqtt_client = mqtt_client
+        self.should_stop = should_stop
+        self.running = False
+        self.thread = None
+        
+        # 分割相关参数
+        self.model_code = model_config.get("model_code", "yolov8n-seg")
+        self.confidence = model_config.get("confidence", 0.5)
+        self.iou = model_config.get("iou", 0.5)
+        self.classes = model_config.get("classes", None)
+        self.imgsz = model_config.get("imgsz", 640)
+        self.retina_masks = model_config.get("retina_masks", True)  # 精细掩码默认开启
+        
+        # 处理ROI参数
+        self.roi = None
+        if "roi" in model_config:
+            roi_data = model_config.get("roi", {})
+            roi_type = model_config.get("roi_type", 0)
+            
+            # 矩形ROI (roi_type=1)
+            if roi_type == 1 and all(k in roi_data for k in ["x1", "y1", "x2", "y2"]):
+                self.roi = {
+                    "x1": roi_data.get("x1"),
+                    "y1": roi_data.get("y1"),
+                    "x2": roi_data.get("x2"),
+                    "y2": roi_data.get("y2")
+                }
+            # 多边形ROI (roi_type=2) 或 线段ROI (roi_type=3)
+            elif (roi_type == 2 or roi_type == 3) and "points" in roi_data:
+                # 将多边形或线段ROI转换为矩形包围盒
+                points = roi_data.get("points", [])
+                if points:
+                    x_coords = [p[0] for p in points]
+                    y_coords = [p[1] for p in points]
+                    self.roi = {
+                        "x1": min(x_coords),
+                        "y1": min(y_coords),
+                        "x2": max(x_coords),
+                        "y2": max(y_coords)
+                    }
+            # 圆形ROI (roi_type=4)
+            elif roi_type == 4 and "center" in roi_data and "radius" in roi_data:
+                center = roi_data.get("center")
+                radius = roi_data.get("radius")
+                self.roi = {
+                    "x1": center[0] - radius,
+                    "y1": center[1] - radius,
+                    "x2": center[0] + radius,
+                    "y2": center[1] + radius
+                }
+        
+        # 结果相关参数
+        self.save_result = result_config.get("save_result", True)
+        self.callback_topic = result_config.get("callback_topic", "")
+        self.callback_interval = model_config.get("callback", {}).get("interval", 5)
+        
+        # 创建分割器实例
+        self.segmentor = None
+        
+        # 打印完整的配置信息
+        logger.info(f"流分割任务初始化 - 任务ID: {task_id}, 子任务ID: {subtask_id}")
+        logger.info(f"模型配置: {json.dumps(model_config, ensure_ascii=False)}")
+        logger.info(f"ROI参数: {json.dumps(self.roi, ensure_ascii=False) if self.roi else 'None'}")
+        logger.info(f"结果配置: {json.dumps(result_config, ensure_ascii=False)}")
+        
+    def start(self):
+        """启动任务"""
+        if self.running:
+            logger.warning(f"任务已在运行中: {self.task_id}/{self.subtask_id}")
+            return
+            
+        self.running = True
+        self.thread = threading.Thread(target=self._run_task)
+        self.thread.daemon = True
+        self.thread.start()
+        logger.info(f"已启动流分割任务: {self.task_id}/{self.subtask_id}")
+        
+    def stop(self):
+        """停止任务"""
+        self.running = False
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=5)
+            logger.info(f"已停止流分割任务: {self.task_id}/{self.subtask_id}")
+            
+    def _run_task(self):
+        """执行任务"""
+        try:
+            logger.info(f"开始执行流分割任务: {self.task_id}/{self.subtask_id}")
+            
+            # 更新任务状态为处理中
+            self._send_status("processing")
+            
+            # 初始化分割器
+            self._init_segmentor()
+            
+            # 打开视频流
+            try:
+                cap = cv2.VideoCapture(self.stream_url)
+                if not cap.isOpened():
+                    error_msg = f"无法打开流 {self.stream_url}"
+                    logger.error(error_msg)
+                    self._send_status("error", error=error_msg)
+                    return
+            except Exception as e:
+                error_msg = f"打开流时出错: {self.stream_url}, 错误: {str(e)}"
+                logger.error(error_msg)
+                logger.exception(e)
+                self._send_status("error", error=error_msg)
+                return
+                
+            # 创建输出目录（如果需要保存结果）
+            output_dir = None
+            if self.save_result or self.result_config.get("save_images", False):
+                output_dir = os.path.join(settings.OUTPUT.save_dir, "segmentation", f"{self.task_id}_{self.subtask_id}")
+                os.makedirs(output_dir, exist_ok=True)
+                logger.info(f"已创建输出目录: {output_dir}")
+                
+            # 处理参数
+            last_callback_time = 0
+            frame_count = 0
+            
+            # 获取回调配置
+            callback_enabled = self.model_config.get("callback", {}).get("enabled", True)
+            logger.info(f"回调状态: {'已启用' if callback_enabled else '已禁用'}")
+            
+            # 处理视频流
+            while self.running and not self.should_stop():
+                # 读取帧
+                ret, frame = cap.read()
+                if not ret:
+                    logger.warning(f"无法从流中读取帧，尝试重新连接: {self.stream_url}")
+                    # 尝试重新连接
+                    cap.release()
+                    time.sleep(1)
+                    cap = cv2.VideoCapture(self.stream_url)
+                    if not cap.isOpened():
+                        logger.error(f"无法重新连接到流: {self.stream_url}")
+                        break
+                    continue
+                    
+                # 对当前帧进行分割
+                segmentation_results = self._segment_frame(frame)
+                frame_count += 1
+                
+                # 保存结果图片（如果需要）
+                saved_file_path = None
+                if output_dir and self.result_config.get("save_images", False) and frame_count % 30 == 0:  # 每30帧保存一次
+                    timestamp = int(time.time())
+                    filename = f"{timestamp}_{frame_count}.jpg"
+                    filepath = os.path.join(output_dir, filename)
+                    
+                    # 绘制分割结果到图像
+                    try:
+                        loop = asyncio.new_event_loop()
+                        result_image = loop.run_until_complete(self.segmentor._encode_result_image(frame, segmentation_results, return_image=True))
+                        loop.close()
+                        if result_image is not None:
+                            cv2.imwrite(filepath, result_image)
+                            saved_file_path = filepath
+                            logger.debug(f"已保存分割结果图片: {filepath}")
+                    except Exception as e:
+                        logger.error(f"保存分割结果图片失败: {str(e)}")
+                        # 保存原始帧作为备用
+                        cv2.imwrite(filepath, frame)
+                        saved_file_path = filepath
+                
+                # 发送回调（如果需要）
+                current_time = time.time()
+                if callback_enabled and self.callback_topic and (current_time - last_callback_time) >= self.callback_interval:
+                    self._send_result(frame, segmentation_results, saved_file_path)
+                    last_callback_time = current_time
+                    
+                # 显示进度
+                if frame_count % 100 == 0:
+                    logger.info(f"任务 {self.task_id}/{self.subtask_id} 已处理 {frame_count} 帧")
+                    
+            # 关闭视频流
+            cap.release()
+            
+            # 任务结束
+            if not self.should_stop():
+                self._send_status("completed")
+                logger.info(f"流分割任务完成: {self.task_id}/{self.subtask_id}, 共处理 {frame_count} 帧")
+            else:
+                self._send_status("stopped")
+                logger.info(f"流分割任务已停止: {self.task_id}/{self.subtask_id}, 共处理 {frame_count} 帧")
+                
+        except Exception as e:
+            logger.error(f"流分割任务执行出错: {str(e)}")
+            logger.exception(e)
+            self._send_status("error", error=str(e))
+            
+    def _init_segmentor(self):
+        """初始化分割器"""
+        try:
+            # 创建分割器实例
+            self.segmentor = YOLOSegmentor()
+            
+            # 加载模型 - 由于YOLOSegmentor.load_model是异步的，我们需要使用同步方式调用
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(self.segmentor.load_model(self.model_code))
+            loop.close()
+            
+            logger.info(f"流分割任务 {self.task_id}/{self.subtask_id} 已加载模型: {self.model_code}")
+            
+        except Exception as e:
+            logger.error(f"初始化分割器失败: {str(e)}")
+            raise
+            
+    def _segment_frame(self, frame):
+        """分割当前帧"""
+        try:
+            # 分割参数
+            config = {
+                "confidence": self.confidence,
+                "iou": self.iou,
+                "classes": self.classes,
+                "roi": self.roi,
+                "imgsz": self.imgsz,
+                "retina_masks": self.retina_masks
+            }
+            
+            # 记录详细的分割参数
+            logger.debug(f"分割参数: {json.dumps(config, ensure_ascii=False)}")
+            
+            # 调用分割器 - 由于segmentor.segment是异步的，我们需要使用同步方式调用
+            loop = asyncio.new_event_loop()
+            segmentation_results = loop.run_until_complete(self.segmentor.segment(frame, config))
+            loop.close()
+            
+            # 返回分割结果列表
+            return segmentation_results
+            
+        except Exception as e:
+            logger.error(f"分割帧时出错: {str(e)}")
+            return []
+            
+    def _send_result(self, frame, segmentation_results, saved_file_path=None):
+        """发送分割结果"""
+        # 检查回调是否启用和主题是否存在
+        callback_enabled = self.model_config.get("callback", {}).get("enabled", True)
+        if not callback_enabled or not self.callback_topic:
+            logger.debug("不发送结果：回调未启用或未指定回调主题")
+            return
+        
+        try:
+            # 准备结果数据
+            result = {
+                "task_id": self.task_id,
+                "subtask_id": self.subtask_id,
+                "timestamp": int(time.time()),
+                "segmentation_results": segmentation_results,
+                "frame_size": {
+                    "width": frame.shape[1],
+                    "height": frame.shape[0]
+                }
+            }
+            
+            # 添加保存的图片路径
+            if saved_file_path:
+                result["image_path"] = saved_file_path
+            
+            # 如果需要，添加帧图像
+            if self.result_config.get("include_image", True):
+                # 压缩图像并编码为base64
+                compression_quality = self.result_config.get("compression_quality", 90)  # 默认90%质量
+                max_width = self.result_config.get("max_width", 1280)  # 默认最大宽度
+                
+                # 调整图像大小（如果需要）
+                h, w = frame.shape[:2]
+                if w > max_width:
+                    scale = max_width / w
+                    new_w = max_width
+                    new_h = int(h * scale)
+                    frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                
+                # 压缩并转换为base64
+                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), compression_quality]
+                _, buffer = cv2.imencode('.jpg', frame, encode_param)
+                image_base64 = base64.b64encode(buffer).decode('utf-8')
+                result["image"] = image_base64
+                result["frame_base64"] = image_base64  # 添加标准字段名
+                
+            # 发送到MQTT主题 - 使用_send_task_result而不是直接_publish_message
+            if self.mqtt_client:
+                # 如果callback_topic存在于result_config中，_send_task_result会使用它
+                self.mqtt_client._send_task_result(
+                    task_id=self.task_id,
+                    subtask_id=self.subtask_id,
+                    status="processing",
+                    result=result
+                )
+                logger.debug(f"已发送分割结果到主题: {self.callback_topic}")
+            
+        except Exception as e:
+            logger.error(f"发送分割结果时出错: {str(e)}")
+            logger.exception(e)
             
     def _send_status(self, status, error=None):
         """发送任务状态"""
@@ -352,11 +757,15 @@ class MQTTAnalyzerService(BaseAnalyzerService):
         self.mqtt_client.register_task_handler("stream", self._handle_stream_task)
         logger.info("已注册流分析任务处理器")
         
+        # 注册分割任务处理器
+        self.mqtt_client.register_task_handler("segmentation", self._handle_segmentation_task)
+        logger.info("已注册分割任务处理器")
+        
         # 根据模型配置注册特定类型的处理器
         if self.model_configs:
             for model_code, config in self.model_configs.items():
                 analysis_type = config.get("analysis_type")
-                if analysis_type and analysis_type not in ["image", "video", "stream"]:
+                if analysis_type and analysis_type not in ["image", "video", "stream", "segmentation"]:
                     # 只为不同于基本类型的分析类型注册处理器
                     self.mqtt_client.register_task_handler(analysis_type, self._handle_detection_task)
                     logger.info(f"已注册{analysis_type}分析任务处理器")
@@ -946,4 +1355,127 @@ class MQTTAnalyzerService(BaseAnalyzerService):
                 "success": False,
                 "command_id": command.get("command_id"),
                 "error": f"处理获取任务列表命令时出错: {str(e)}"
-            }) 
+            })
+
+    def _handle_segmentation_task(self, task_id, subtask_id, source, config, result_config, message_id=None, message_uuid=None, confirmation_topic=None):
+        """
+        处理分割任务
+        
+        Args:
+            task_id: 任务ID
+            subtask_id: 子任务ID
+            source: 源配置
+            config: 任务配置
+            result_config: 结果配置
+            message_id: 消息ID
+            message_uuid: 消息UUID
+            confirmation_topic: 确认主题
+        
+        Returns:
+            bool: 处理结果
+        """
+        logger.info(f"处理分割任务: {task_id}/{subtask_id}")
+        
+        # 获取数据源URL
+        url = ""
+        source_type = source.get("type", "")
+        
+        if source_type == "stream":
+            # 从流源获取URL
+            url = source.get("url", "")
+            if not url and "urls" in source and source["urls"]:
+                url = source["urls"][0]
+        elif source_type == "video":
+            # 从视频源获取URL
+            url = source.get("path", "")
+        elif source_type == "image":
+            # 对于图像源，暂不支持，返回错误
+            error_msg = "分割任务暂不支持图像源类型"
+            logger.error(error_msg)
+            if confirmation_topic:
+                self.mqtt_client._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error", 
+                                               data={"error_message": error_msg, "task_id": task_id, "subtask_id": subtask_id})
+            return False
+        else:
+            error_msg = f"不支持的数据源类型: {source_type}"
+            logger.error(error_msg)
+            if confirmation_topic:
+                self.mqtt_client._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error", 
+                                               data={"error_message": error_msg, "task_id": task_id, "subtask_id": subtask_id})
+            return False
+        
+        if not url:
+            error_msg = "未指定数据源URL"
+            logger.error(error_msg)
+            if confirmation_topic:
+                self.mqtt_client._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error", 
+                                               data={"error_message": error_msg, "task_id": task_id, "subtask_id": subtask_id})
+            return False
+        
+        logger.info(f"数据源URL: {url}")
+        
+        # 验证是否指定了分割模型
+        model_code = config.get("model_code", "")
+        if not model_code:
+            error_msg = "未指定分割模型代码"
+            logger.error(error_msg)
+            if confirmation_topic:
+                self.mqtt_client._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error", 
+                                               data={"error_message": error_msg, "task_id": task_id, "subtask_id": subtask_id})
+            return False
+        
+        # 验证模型代码是否为分割模型
+        if "seg" not in model_code.lower():
+            logger.warning(f"模型代码 {model_code} 可能不是分割模型，请确保使用正确的分割模型")
+        
+        # 创建分析任务
+        try:
+            # 创建停止检查函数 - 使用subtask_id作为唯一标识符
+            def should_stop():
+                return subtask_id not in self.mqtt_client.active_tasks or self.mqtt_client.stop_event.is_set()
+            
+            # 记录任务 - 使用subtask_id作为任务键（这是必要的运行时状态管理）
+            with self.mqtt_client.active_tasks_lock:
+                self.mqtt_client.active_tasks[subtask_id] = {
+                    "start_time": time.time(),
+                    "source": source,
+                    "config": config,
+                    "result_config": result_config
+                }
+            
+            # 通知MQTT客户端已接受任务
+            if confirmation_topic:
+                self.mqtt_client._send_cmd_reply(message_id, message_uuid, confirmation_topic, "success", 
+                                               data={"message": "分割任务已接受", "task_id": task_id, "subtask_id": subtask_id})
+            
+            # 创建任务
+            segmentation_task = StreamSegmentationTask(
+                task_id=task_id,
+                subtask_id=subtask_id,
+                stream_url=url,
+                model_config=config,  # 使用完整配置
+                result_config=result_config,
+                mqtt_client=self.mqtt_client,
+                should_stop=should_stop
+            )
+            
+            # 启动任务
+            segmentation_task.start()
+            
+            logger.info(f"分割任务已启动: {task_id}/{subtask_id}")
+            return True
+            
+        except Exception as e:
+            error_msg = f"启动分割任务时出错: {str(e)}"
+            logger.error(error_msg)
+            logger.exception(e)
+            
+            # 移除任务
+            with self.mqtt_client.active_tasks_lock:
+                if subtask_id in self.mqtt_client.active_tasks:
+                    del self.mqtt_client.active_tasks[subtask_id]
+            
+            if confirmation_topic:
+                self.mqtt_client._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error", 
+                                               data={"error_message": error_msg, "task_id": task_id, "subtask_id": subtask_id})
+            return False 

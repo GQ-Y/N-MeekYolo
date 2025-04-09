@@ -406,24 +406,28 @@ async def get_task(
                 "model_name": model_name,
                 "model_code": model_code,
                 "status": st.status,
-                "roi_type": st.roi_type,
-                "analysis_type": st.analysis_type,
                 "config": st.config,
-                "node_id": st.node_id,
-                "analysis_task_id": st.analysis_task_id,
-                "enable_callback": st.enable_callback,
-                "callback_url": st.callback_url,
+                "analysis_type": st.analysis_type,
+                "roi_type": st.roi_type,
+                "created_at": st.created_at,
                 "started_at": st.started_at,
                 "completed_at": st.completed_at,
-                "error_message": st.error_message
+                "error_message": st.error_message,
+                "node_id": st.node_id,
+                "mqtt_node_id": st.mqtt_node_id,
+                "enable_callback": st.enable_callback,
+                "callback_url": st.callback_url
             })
         
-        # 构建响应数据
+        # 准备任务响应
         task_data = {
             "id": task_obj.id,
             "name": task_obj.name,
             "status": task_obj.status,
             "save_result": task_obj.save_result,
+            "save_images": task_obj.save_images,  # 新增字段
+            "analysis_interval": task_obj.analysis_interval,  # 新增字段
+            "specific_node_id": task_obj.specific_node_id,  # 新增字段
             "active_subtasks": task_obj.active_subtasks,
             "total_subtasks": task_obj.total_subtasks,
             "created_at": task_obj.created_at,
@@ -431,11 +435,9 @@ async def get_task(
             "started_at": task_obj.started_at,
             "completed_at": task_obj.completed_at,
             "error_message": task_obj.error_message,
-            "has_subtasks": has_subtasks,
             "subtasks": subtasks
         }
         
-        # 构建成功响应
         return BaseResponse(
             path=str(request.url),
             message="获取成功",
@@ -457,39 +459,112 @@ async def update_task(
     db: Session = Depends(get_db)
 ):
     """
-    更新任务基本信息
+    更新任务配置
     
     参数:
-    - id: 任务ID
-    - name: 任务名称 (可选)
-    - save_result: 是否保存结果 (可选)
+    - id: 任务ID(必须)
+    - name: 任务名称(可选)
+    - save_result: 是否保存结果数据(可选)
+    - save_images: 是否保存结果图片(可选)
+    - analysis_interval: 分析间隔(秒)(可选)
+    - specific_node_id: 指定运行节点ID(可选)
+    - tasks: 子任务配置列表(可选)，如果提供则完全替换现有配置
+    
+    请求示例:
+    ```json
+    {
+        "id": 1,
+        "name": "更新后的任务名称",
+        "save_result": true,
+        "save_images": true,
+        "analysis_interval": 2,
+        "specific_node_id": 5,
+        "tasks": [
+            {
+                "stream_id": 1,
+                "stream_name": "前门摄像头",
+                "models": [
+                    {
+                        "model_id": 2,
+                        "config": {
+                            "confidence": 0.5,
+                            "iou": 0.45,
+                            "classes": [0, 1, 2],
+                            "roi_type": 1,
+                            "roi": {
+                                "x1": 0.1,
+                                "y1": 0.1,
+                                "x2": 0.9,
+                                "y2": 0.9
+                            },
+                            "imgsz": 640,
+                            "nested_detection": true,
+                            "analysis_type": "detection",
+                            "alarm_recording": {
+                                "enabled": true,
+                                "before_seconds": 5,
+                                "after_seconds": 5
+                            },
+                            "callback": {
+                                "enabled": true,
+                                "url": "http://example.com/callback",
+                                "interval": 5
+                            }
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    ```
     
     返回:
     - 更新后的任务基本信息
     """
     try:
-        updated_task = task_crud.update_task(db, task_data.id, task_data)
-        if not updated_task:
+        # 检查任务是否存在
+        task_id = task_data.id
+        task = db.query(task_crud.Task).filter(task_crud.Task.id == task_id).first()
+        if not task:
             return BaseResponse(
                 path=str(request.url),
                 success=False,
                 code=404,
-                message="任务不存在"
+                message=f"任务 {task_id} 不存在"
             )
         
-        return BaseResponse(
-            path=str(request.url),
-            message="更新成功",
-            data={
+        # 任务更新
+        try:
+            updated_task = task_crud.update_task(db, task_id, task_data)
+            logger.info(f"任务 {task_id} 更新成功")
+            
+            # 构建响应数据
+            response_data = {
                 "id": updated_task.id,
                 "name": updated_task.name,
                 "status": updated_task.status,
                 "save_result": updated_task.save_result,
-                "active_subtasks": updated_task.active_subtasks,
+                "save_images": updated_task.save_images,
+                "analysis_interval": updated_task.analysis_interval,
+                "specific_node_id": updated_task.specific_node_id,
                 "total_subtasks": updated_task.total_subtasks,
+                "created_at": updated_task.created_at,
                 "updated_at": updated_task.updated_at
             }
-        )
+            
+            return BaseResponse(
+                path=str(request.url),
+                message="更新成功",
+                data=response_data
+            )
+        except ValueError as e:
+            logger.error(f"更新任务 {task_id} 失败: {str(e)}")
+            return BaseResponse(
+                path=str(request.url),
+                success=False,
+                code=400,
+                message=str(e)
+            )
     except Exception as e:
         logger.error(f"更新任务失败: {str(e)}")
         return BaseResponse(
