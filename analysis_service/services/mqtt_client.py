@@ -59,7 +59,7 @@ def get_mqtt_client() -> 'MQTTClient':
                         return mac_str
 
                 mac_address = get_mac_address()
-                client_id = f"meek-{mac_address}"
+                client_id = mac_address  # 直接使用MAC地址，不添加前缀
                 
                 # 使用socket.gethostname()作为device_id
                 device_id = socket.gethostname()
@@ -112,7 +112,12 @@ class MQTTClient:
         # 设置客户端ID，使用MAC地址作为基础
         self.mac_address = self._get_mac_address()
         logger.info(f"初始化MQTT客户端: mac_address={self.mac_address}")
-        self.client_id = self.mac_address
+        
+        # 如果传入了client_id则使用，否则使用MAC地址
+        if client_id:
+            self.client_id = client_id
+        else:
+            self.client_id = self.mac_address
         
         # 使用MAC地址作为节点ID
         self.node_id = self.mac_address
@@ -126,7 +131,7 @@ class MQTTClient:
         self.status_topic = status_topic or f"meek/device/{self.node_id}/status"
         
         # 创建MQTT客户端
-        self.client = mqtt.Client(client_id=f"meek-{self.mac_address}", protocol=mqtt.MQTTv311, clean_session=True)
+        self.client = mqtt.Client(client_id=self.client_id, protocol=mqtt.MQTTv311, clean_session=True)
         
         # 设置回调函数
         self.client.on_connect = self._on_connect
@@ -143,7 +148,7 @@ class MQTTClient:
         # 连接标志
         self.connected = False
         
-        logger.info(f"MQTT客户端已初始化: 设备ID={device_id}, 代理={broker_host}:{broker_port}")
+        logger.info(f"MQTT客户端已初始化: 设备ID={device_id}, 客户端ID={self.client_id}, 代理={broker_host}:{broker_port}")
         logger.info(f"命令主题: {self.command_topic}")
         logger.info(f"响应主题: {self.response_topic}")
         logger.info(f"状态主题: {self.status_topic}")
@@ -1023,16 +1028,108 @@ class MQTTClient:
             
         # 查找任务配置中的回调主题 - 使用subtask_id作为任务键
         result_callback_topic = None
+        stream_url = ""
+        model_code = ""
+        config = {}
+        task_name = ""
+        base64_image = ""
+        
+        # 获取任务详情
         with self.active_tasks_lock:
             if subtask_id in self.active_tasks:
                 task_data = self.active_tasks.get(subtask_id, {})
                 result_config = task_data.get("result_config", {})
                 result_callback_topic = result_config.get("callback_topic")
                 
+                # 获取任务的额外信息用于构建完整回调
+                source = task_data.get("source", {})
+                if source:
+                    stream_url = source.get("url", "")
+                    if not stream_url and "urls" in source and source["urls"]:
+                        stream_url = source["urls"][0]
+                
+                config = task_data.get("config", {})
+                model_code = config.get("model_code", "")
+                task_name = task_data.get("task_name", f"{task_id}/{subtask_id}")
+                
+        # 提取图像尺寸和检测结果
+        frame_width = 1920
+        frame_height = 1080
+        detections = []
+        
+        # 尝试从result中提取关键信息
+        if "detections" in result:
+            detections = result.get("detections", [])
+        elif "result_data" in result and "detections" in result["result_data"]:
+            detections = result["result_data"]["detections"]
+            
+        # 提取图像尺寸
+        if "frame_size" in result:
+            frame_width = result.get("frame_size", {}).get("width", 1920)
+            frame_height = result.get("frame_size", {}).get("height", 1080)
+        
+        # 提取base64图像，如果有的话
+        if "src_pic_data" in result:
+            base64_image = result.get("src_pic_data", "")
+        elif "frame_base64" in result:
+            base64_image = result.get("frame_base64", "")
+                
         # 如果在任务配置中找到了回调主题，使用它，否则使用默认主题
         topic = result_callback_topic if result_callback_topic else f"{self.topic_prefix}{self.node_id}/result"
         
-        # 构建结果消息
+        # 尝试将task_id转换为整数，用于标准HTTP回调格式
+        try:
+            numeric_task_id = int(task_id.split('_')[-1], 16) if '_' in task_id and task_id.split('_')[-1].isalnum() else int(task_id) if task_id.isdigit() else 0
+        except (ValueError, TypeError):
+            numeric_task_id = 0
+            
+        # 构建与HTTP回调格式一致的数据结构
+        http_callback_data = {
+            "cameraDeviceType": 1,
+            "cameraDeviceStreamUrl": stream_url,
+            "cameraDeviceStatus": 1,
+            "cameraDeviceGroup": "",
+            "cameraDeviceGps": "",
+            "cameraDeviceId": 0,
+            "cameraDeviceName": task_name,
+            "algorithmId": 0,
+            "algorithmName": model_code,
+            "algorithmNameEn": "",
+            "dataID": task_id,
+            "parameter": config,
+            "picture": "",
+            "srcUrl": stream_url,
+            "alarmUrl": "",
+            "taskId": numeric_task_id,
+            "cameraId": 0,
+            "cameraUrl": stream_url,
+            "cameraName": task_name,
+            "timestamp": int(time.time()),
+            "imageWidth": frame_width,
+            "imageHeight": frame_height,
+            "srcPicData": base64_image,
+            "srcPicName": "",
+            "alarmPicName": "",
+            "src": "",
+            "alarm": "",
+            "alarmPicData": base64_image,
+            "other": "",
+            "result": "",
+            "extraInfo": detections,
+            "resultData": {
+                "detections": detections,
+                "task_id": task_id,
+                "subtask_id": subtask_id,
+                "timestamp": int(time.time()),
+                "frame_size": {
+                    "width": frame_width,
+                    "height": frame_height
+                }
+            },
+            "degree": 3
+        }
+        
+        # 构建MQTT结果消息 - 保留MQTT特有的元数据，但result字段使用HTTP格式
         payload = {
             "message_id": int(time.time()),
             "message_uuid": str(uuid.uuid4()),
@@ -1047,12 +1144,13 @@ class MQTTClient:
             "client_id": self.client_id,
             "service_type": "analysis",
             "is_active": True,
-            "result": result
+            "result": http_callback_data  # 使用HTTP回调格式的数据
         }
         
         # 添加错误信息
         if error and status == "error":
             payload["error"] = str(error)
+            http_callback_data["error"] = str(error)
             
         # 记录发送的结果消息
         logger.info(f"发送任务结果到主题 {topic}: task_id={task_id}, subtask_id={subtask_id}, 状态={status}")

@@ -327,11 +327,14 @@ class MQTTClient:
             service_type = payload.get('node_type') or payload.get('service_type') or 'analysis'
             status = payload.get('status')
             timestamp = payload.get('timestamp')
+            
+            # 获取或创建metadata对象，确保包含所有原始字段
             metadata = payload.get('metadata', {})
             
-            # 提取节点ID信息
-            mqtt_node_id = payload.get('mqtt_node_id')
-            node_id = payload.get('node_id')
+            # 将所有顶级字段复制到metadata中，除了'metadata'本身
+            for key, value in payload.items():
+                if key != 'metadata':
+                    metadata[key] = value
             
             # 提取MAC地址，按优先级获取
             if 'mac_address' in payload:
@@ -340,12 +343,12 @@ class MQTTClient:
                 mac_address = metadata.get('mac_address')
             else:
                 # 尝试从mqtt_node_id或node_id或client_id中提取MAC地址
-                mac_address = mqtt_node_id or node_id or client_id
+                mac_address = payload.get('mqtt_node_id') or payload.get('node_id') or client_id
                 # 如果client_id是复合格式，尝试提取MAC部分
                 if not mac_address and client_id and '_' in client_id:
                     mac_address = client_id.split('_')[-1]
             
-            logger.info(f"提取到节点信息: mac_address={mac_address}, client_id={client_id}, service_type={service_type}, node_id={node_id}")
+            logger.info(f"提取到节点信息: mac_address={mac_address}, client_id={client_id}, service_type={service_type}, node_id={payload.get('node_id')}")
             
             if not mac_address or not client_id or not status:
                 logger.error(f"连接状态消息缺少必要字段: {payload}")
@@ -353,9 +356,6 @@ class MQTTClient:
                 
             # 处理节点连接或断开
             if status == 'online':
-                # 使用提取的node_id更新元数据
-                if node_id and node_id != client_id:
-                    metadata['node_id'] = node_id
                 self._handle_node_connection(mac_address, client_id, service_type, metadata)
             elif status == 'offline':
                 self._handle_node_disconnection(mac_address)
@@ -389,11 +389,15 @@ class MQTTClient:
             # 更新数据库中的节点记录
             db = SessionLocal()
             try:
-                # 查找节点
+                # 首先通过MAC地址查找节点
                 node = db.query(MQTTNode).filter(MQTTNode.mac_address == mac_address).first()
                 
                 if node:
                     logger.info(f"更新已存在的节点记录: MAC={mac_address}")
+                    # 检查节点类型是否匹配
+                    if node.service_type != service_type:
+                        logger.warning(f"节点服务类型变更: {node.service_type} -> {service_type}")
+                    
                     # 更新节点状态
                     node.status = 'online'
                     node.client_id = client_id
@@ -432,15 +436,21 @@ class MQTTClient:
                         
                 else:
                     logger.info(f"创建新节点记录: MAC={mac_address}")
-                    # 创建新节点记录
+                    # 直接从原始消息中提取node_id
+                    node_id = metadata.get('node_id', client_id)
+                    mqtt_node_id = metadata.get('mqtt_node_id', mac_address)
+                    
+                    logger.info(f"使用原始数据字段创建节点: node_id={node_id}, mqtt_node_id={mqtt_node_id}")
+                    
+                    # 创建新节点记录 - 直接使用原始字段
                     node = MQTTNode(
-                        node_id=client_id,  # 使用client_id作为node_id
+                        node_id=node_id,  # 使用原始node_id
                         mac_address=mac_address,
                         client_id=client_id,
                         service_type=service_type,
                         status='online',
                         ip=ip_address,
-                        port=port,  # 添加端口信息
+                        port=port,
                         hostname=hostname,
                         last_active=datetime.now(),
                         node_metadata=metadata,

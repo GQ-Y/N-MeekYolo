@@ -61,7 +61,7 @@ class StreamDetectionTask:
         self.imgsz = model_config.get("imgsz", 640)
         
         # 结果相关参数
-        self.save_result = result_config.get("save_result", False)
+        self.save_result = result_config.get("save_result", True)
         self.callback_topic = result_config.get("callback_topic", "")
         self.callback_interval = model_config.get("callback", {}).get("interval", 5)
         
@@ -99,11 +99,22 @@ class StreamDetectionTask:
             self._init_detector()
             
             # 打开视频流
-            cap = cv2.VideoCapture(self.stream_url)
-            if not cap.isOpened():
-                raise Exception(f"无法打开流 {self.stream_url}")
+            try:
+                cap = cv2.VideoCapture(self.stream_url)
+                if not cap.isOpened():
+                    error_msg = f"无法打开流 {self.stream_url}"
+                    logger.error(error_msg)
+                    self._send_status("error", error=error_msg)
+                    return
+            except Exception as e:
+                error_msg = f"打开流时出错: {self.stream_url}, 错误: {str(e)}"
+                logger.error(error_msg)
+                logger.exception(e)
+                self._send_status("error", error=error_msg)
+                return
                 
             # 创建输出目录（如果需要保存结果）
+            output_dir = None
             if self.save_result:
                 output_dir = os.path.join(settings.OUTPUT.save_dir, "streams", f"{self.task_id}_{self.subtask_id}")
                 os.makedirs(output_dir, exist_ok=True)
@@ -132,16 +143,18 @@ class StreamDetectionTask:
                 frame_count += 1
                 
                 # 保存结果（如果需要）
+                saved_file_path = None
                 if self.save_result and frame_count % 30 == 0:  # 每30帧保存一次
                     timestamp = int(time.time())
                     filename = f"{timestamp}_{frame_count}.jpg"
                     filepath = os.path.join(output_dir, filename)
                     cv2.imwrite(filepath, frame)
+                    saved_file_path = filepath
                     
                 # 发送回调（如果需要）
                 current_time = time.time()
                 if self.callback_topic and (current_time - last_callback_time) >= self.callback_interval:
-                    self._send_result(frame, detections)
+                    self._send_result(frame, detections, saved_file_path)
                     last_callback_time = current_time
                     
                 # 显示进度
@@ -203,7 +216,7 @@ class StreamDetectionTask:
             logger.error(f"检测帧时出错: {str(e)}")
             return []
             
-    def _send_result(self, frame, detections):
+    def _send_result(self, frame, detections, saved_file_path=None):
         """发送检测结果"""
         if not self.callback_topic:
             return
@@ -221,16 +234,40 @@ class StreamDetectionTask:
                 }
             }
             
+            # 添加保存的图片路径
+            if saved_file_path:
+                result["image_path"] = saved_file_path
+            
             # 如果需要，添加帧图像
-            if self.save_result:
-                # 将图像编码为base64
-                _, buffer = cv2.imencode('.jpg', frame)
+            if self.result_config.get("include_image", True):
+                # 压缩图像并编码为base64
+                compression_quality = self.result_config.get("compression_quality", 90)  # 默认90%质量
+                max_width = self.result_config.get("max_width", 1280)  # 默认最大宽度
+                
+                # 调整图像大小（如果需要）
+                h, w = frame.shape[:2]
+                if w > max_width:
+                    scale = max_width / w
+                    new_w = max_width
+                    new_h = int(h * scale)
+                    frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                
+                # 压缩并转换为base64
+                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), compression_quality]
+                _, buffer = cv2.imencode('.jpg', frame, encode_param)
                 image_base64 = base64.b64encode(buffer).decode('utf-8')
                 result["image"] = image_base64
+                result["frame_base64"] = image_base64  # 添加标准字段名
                 
-            # 发送到MQTT主题
+            # 发送到MQTT主题 - 使用_send_task_result而不是直接_publish_message
             if self.mqtt_client:
-                self.mqtt_client._publish_message(self.callback_topic, result, qos=0)
+                # 如果callback_topic存在于result_config中，_send_task_result会使用它
+                self.mqtt_client._send_task_result(
+                    task_id=self.task_id,
+                    subtask_id=self.subtask_id,
+                    status="processing",
+                    result=result
+                )
                 
         except Exception as e:
             logger.error(f"发送检测结果时出错: {str(e)}")

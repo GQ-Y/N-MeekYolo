@@ -137,12 +137,22 @@ class MQTTTestClient:
             # 构造离线状态消息
             offline_payload = {
                 "mac_address": self.mac_address,
+                "node_id": self.node_id,  # 添加节点ID
+                "client_id": self.client_id,  # 添加客户端ID
                 "status": "offline",
                 "node_type": self.service_type,
                 "timestamp": int(time.time()),
                 "metadata": {
                     "ip": self.ip,
-                    "hostname": self.hostname
+                    "hostname": self.hostname,
+                    "port": 8002,  # 假设分析服务端口
+                    "version": "1.0.0",
+                    "is_active": False,  # 离线状态设为False
+                    "capabilities": {
+                        "max_tasks": 10,
+                        "supported_models": ["yolov5", "yolov8", "efficientdet"],
+                        "supported_sources": ["image", "video", "stream"]
+                    }
                 }
             }
             
@@ -340,12 +350,21 @@ class MQTTTestClient:
             print("未连接到MQTT Broker，无法发送配置回复")
             return
             
+        # 确保data中包含节点ID信息
+        if status == "success" and data.get("cmd_type") == "start_task":
+            # 确保响应中包含mac_address信息，以便API服务正确关联
+            if "mac_address" not in data:
+                data["mac_address"] = self.mac_address
+                
+            print(f"为任务启动回复添加节点信息: mac_address={self.mac_address}")
+            
         payload = {
             "message_id": message_id,
             "message_uuid": message_uuid,
             "status": status,
             "data": data,
-            "timestamp": int(time.time())
+            "timestamp": int(time.time()),
+            "mac_address": self.mac_address  # 添加mac_address到顶层，确保API服务可以识别
         }
         
         result = self.client.publish(
@@ -602,6 +621,7 @@ class MQTTTestClient:
             "port": 8002,  # 假设分析服务端口
             "hostname": self.hostname,
             "version": "1.0.0",
+            "is_active": status == "online",  # online状态设为True，其他状态设为False
             "capabilities": {
                 "max_tasks": 10,
                 "supported_models": ["yolov5", "yolov8", "efficientdet"],
@@ -612,6 +632,8 @@ class MQTTTestClient:
         # 构建连接状态消息
         payload = {
             "mac_address": self.mac_address,
+            "node_id": self.node_id,  # 添加节点ID
+            "client_id": self.client_id,  # 添加客户端ID
             "status": status,
             "node_type": self.service_type,
             "timestamp": int(time.time()),
@@ -645,8 +667,10 @@ class MQTTTestClient:
         payload = {
             "timestamp": int(time.time()),
             "status": "online",
+            "client_id": self.client_id,  # 添加client_id字段
             "node_id": self.node_id,
             "mac_address": self.mac_address,
+            "node_type": self.service_type,  # 添加node_type字段
             "load": resource
         }
         
