@@ -19,17 +19,28 @@ from routers import (
 )
 # 导入新的分析回调路由
 from routers.analysis_callback import router as analysis_callback_router
-from services.monitor import StreamMonitor
-from services.node_health_check import start_health_checker, stop_health_checker
+from services.stream.monitor import StreamMonitor
+from services.node.node_health_check import start_health_checker, stop_health_checker
 from shared.utils.logger import setup_logger
 # 导入MQTT相关服务
-from services.analysis_client import AnalysisClient
+from services.http.analysis_client import AnalysisClient
 # 导入新的MQTT节点路由
 from routers.mqtt_node import router as mqtt_node_router
 # 导入新的视频流播放路由
 from routers.stream_player import router as stream_player_router
 from fastapi.staticfiles import StaticFiles
 import os
+# 导入Redis管理器
+from core.redis_manager import RedisManager
+# 导入任务状态管理器
+from core.task_status_manager import TaskStatusManager
+# 导入任务重试队列
+from services.task.task_retry_queue import TaskRetryQueue
+# 导入MQTT消息处理
+from services.core.message_queue import MessageQueue
+from services.mqtt.mqtt_message_processor import MQTTMessageProcessor
+# 导入新的MQTT任务管理路由
+from routers.mqtt_task import router as mqtt_task_router
 
 logger = setup_logger(__name__)
 
@@ -64,145 +75,194 @@ app.include_router(callback_router)
 app.include_router(task_router)
 app.include_router(analysis_router)
 app.include_router(node_router)
-# 注册分析回调路由
-app.include_router(analysis_callback_router)
-# 注册MQTT节点路由
-app.include_router(mqtt_node_router)
-# 注册视频流播放路由
-app.include_router(stream_player_router)
+app.include_router(analysis_callback_router) # 分析回调路由
+app.include_router(mqtt_node_router) # MQTT节点路由
+app.include_router(stream_player_router) # 视频流播放路由
+app.include_router(mqtt_task_router) # MQTT任务管理路由
 
-# 创建视频源监控器
-stream_monitor = StreamMonitor()
+# 全局变量
+stream_monitor = None
 
-# 声明全局分析服务客户端
-analysis_client = None
+# Redis管理器
+redis_manager = None
+# 任务状态管理器
+task_status_manager = None
+# 任务重试队列
+task_retry_queue = None
+# MQTT消息处理器
+mqtt_message_processor = None
 
-def load_config():
-    """加载配置文件"""
-    try:
-        with open("config/config.yaml", "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
-    except Exception as e:
-        logger.error(f"加载配置文件失败: {e}")
-        return {}
-
-def show_service_banner(service_name: str):
-    """显示服务启动标识"""
-    config = load_config()
-    project_name = config.get('PROJECT', {}).get('name', 'MeekYOLO')
-    project_version = config.get('PROJECT', {}).get('version', '0.3.0')
-    
-    banner = f"""
-███╗   ███╗███████╗███████╗██╗  ██╗██╗   ██╗ ██████╗ ██╗      ██████╗     @{service_name}
-████╗ ████║██╔════╝██╔════╝██║ ██╔╝╚██╗ ██╔╝██╔═══██╗██║     ██╔═══██╗
-██╔████╔██║█████╗  █████╗  █████╔╝  ╚████╔╝ ██║   ██║██║     ██║   ██║
-██║╚██╔╝██║██╔══╝  ██╔══╝  ██╔═██╗   ╚██╔╝  ██║   ██║██║     ██║   ██║
-██║ ╚═╝ ██║███████╗███████╗██║  ██╗   ██║   ╚██████╔╝███████╗╚██████╔╝
-╚═╝     ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚══════╝ ╚═════╝ 
-{project_name} v{project_version}
-启动时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-    """
-    print(banner)
-
+# 启动处理
 @app.on_event("startup")
 async def startup_event():
-    """应用启动时的事件处理"""
-    logger.info("API服务启动...")
+    """应用启动时执行"""
+    global stream_monitor, redis_manager, task_status_manager, task_retry_queue, mqtt_message_processor
     
-    # 初始化数据库
     try:
-        from core.init_db import init_db
-        init_db()
-        logger.info("数据库初始化完成")
-    except Exception as e:
-        logger.error(f"数据库初始化失败: {e}")
-    
-    # 读取配置
-    comm_mode = settings.config.get('COMMUNICATION', {}).get('mode', 'http')
-    logger.info(f"通信模式: {comm_mode}")
-    
-    # 初始化分析客户端
-    app.state.analysis_client = AnalysisClient(config=settings.config)
-    
-    # 检查MQTT连接状态
-    if comm_mode == 'mqtt':
-        if not hasattr(app.state, 'analysis_client') or not app.state.analysis_client or not app.state.analysis_client.mqtt_connected:
-            logger.error("MQTT客户端连接失败! 请检查以下MQTT配置:")
-            logger.error(f"  - 服务器: {settings.config.get('MQTT', {}).get('broker_host')}:{settings.config.get('MQTT', {}).get('broker_port')}")
-            logger.error(f"  - 客户端ID: {settings.config.get('MQTT', {}).get('client_id')}")
-            logger.error(f"  - 用户名: {settings.config.get('MQTT', {}).get('username')}")
-            logger.error(f"  - 密码: {'已设置' if settings.config.get('MQTT', {}).get('password') else '未设置'}")
-            logger.error(f"  - 主题前缀: {settings.config.get('MQTT', {}).get('topic_prefix')}")
-            logger.warning("API服务将以受限模式运行，直到MQTT连接恢复")
-            
-            # 尝试再次连接
-            try:
-                if app.state.analysis_client and app.state.analysis_client.mqtt_client:
-                    logger.info("尝试重新连接MQTT...")
-                    app.state.analysis_client.mqtt_client.connect()
-                    if app.state.analysis_client.mqtt_connected:
-                        logger.info("MQTT重新连接成功!")
-                    else:
-                        logger.warning("MQTT重新连接失败，将在后台继续尝试")
-            except Exception as e:
-                logger.error(f"MQTT重新连接异常: {e}")
-        else:
-            logger.info("MQTT客户端连接成功!")
-    
-    # 初始化健康检查服务
-    try:
-        from services.node_health_check import start_health_checker
-        app.state.health_checker = await start_health_checker()
-        logger.info("节点健康检查服务启动成功")
+        logger.info("API服务启动中...")
         
-        # 执行首次健康检查
-        if comm_mode == 'mqtt':
-            logger.info("执行首次MQTT节点健康检查")
-            await app.state.health_checker.check_mqtt_nodes_health()
-        else:
-            logger.info("执行首次HTTP节点健康检查")
-            await app.state.health_checker.check_nodes_health()
-    except Exception as e:
-        logger.error(f"健康检查服务启动失败: {e}")
-        # 不中断启动过程，继续运行服务
-    
-    logger.info("API服务启动完成")
+        # 初始化Redis管理器
+        logger.info("初始化Redis管理器...")
+        redis_manager = RedisManager.get_instance()
+        
+        # 初始化并测试Redis连接
+        try:
+            # 执行ping测试
+            redis_alive = await redis_manager.ping()
+            if redis_alive:
+                logger.info("Redis连接测试成功")
+            else:
+                logger.warning("Redis连接测试失败，但不影响系统启动")
+        except Exception as e:
+            logger.error(f"Redis连接测试出错: {str(e)}")
+        
+        # 初始化任务状态管理器
+        logger.info("初始化任务状态管理器...")
+        task_status_manager = TaskStatusManager.get_instance()
+        await task_status_manager.start()
+        
+        # 初始化任务重试队列
+        logger.info("初始化任务重试队列...")
+        task_retry_queue = TaskRetryQueue.get_instance()
+        await task_retry_queue.start()
+        
+        # 初始化MQTT消息处理器
+        logger.info("初始化MQTT消息处理器...")
+        mqtt_message_processor = MQTTMessageProcessor.get_instance()
+        mqtt_message_processor.initialize()
 
+        # 获取通信模式
+        communication_mode = settings.config.get('COMMUNICATION', {}).get('mode', 'http')
+        logger.info(f"当前通信模式: {communication_mode}")
+
+        # 获取MQTT配置
+        mqtt_config = settings.config.get('MQTT', {})
+
+        # 如果使用MQTT通信，初始化MQTT客户端
+        if communication_mode.lower() == 'mqtt':
+            # 初始化MQTT客户端
+            from services.mqtt.mqtt_client import MQTTClient
+            mqtt_client = MQTTClient(mqtt_config)
+            
+            # 连接到MQTT Broker
+            logger.info(f"连接到MQTT Broker: {mqtt_config.get('broker_host')}:{mqtt_config.get('broker_port')}")
+            try:
+                connected = mqtt_client.connect()
+                if connected:
+                    logger.info("MQTT Broker连接成功")
+                    # 设置MQTT客户端到应用状态
+                    app.state.mqtt_client = mqtt_client
+                    
+                    # 初始化MQTT任务管理组件，共享同一个MQTT客户端实例
+                    logger.info("初始化MQTT任务管理组件...")
+                    
+                    # 将共享的MQTT客户端设置为全局客户端
+                    from services.mqtt.mqtt_client import get_mqtt_client
+                    get_mqtt_client(mqtt_config, external_client=mqtt_client)
+                    
+                    from services.task.task_priority_manager import get_task_priority_manager
+                    from services.core.smart_task_scheduler import get_smart_task_scheduler
+                    from services.mqtt.mqtt_task_manager import get_mqtt_task_manager
+                    
+                    # 获取任务优先级管理器实例 - 会自动初始化
+                    priority_manager = get_task_priority_manager()
+                    
+                    # 获取智能任务调度器实例 - 会自动初始化
+                    scheduler = get_smart_task_scheduler()
+                    
+                    # 获取MQTT任务管理器实例 - 会自动初始化并启动
+                    task_manager = get_mqtt_task_manager()
+                    
+                    # 同步节点信息
+                    logger.info("同步MQTT节点信息...")
+                    asyncio.create_task(scheduler.sync_nodes_from_db(force=True))
+                else:
+                    logger.error("MQTT Broker连接失败，将尝试使用HTTP模式")
+                    communication_mode = 'http'  # 降级到HTTP模式
+            except Exception as e:
+                logger.error(f"MQTT Broker连接错误: {e}")
+                communication_mode = 'http'  # 降级到HTTP模式
+        
+        # 创建分析服务客户端
+        analysis_client = AnalysisClient({
+            'COMMUNICATION': {'mode': communication_mode},
+            'MQTT': mqtt_config
+        }, mqtt_client=app.state.mqtt_client if hasattr(app.state, 'mqtt_client') else None)
+        app.state.analysis_client = analysis_client
+        
+        # 设置通信模式到应用状态
+        app.state.communication_mode = communication_mode
+        
+        # 启动视频源监控
+        logger.info("启动视频源监控...")
+        stream_monitor = StreamMonitor()
+        asyncio.create_task(stream_monitor.start())
+        
+        # 如果使用MQTT通信，启动节点健康检查
+        if communication_mode.lower() == 'mqtt':
+            logger.info("启动MQTT节点健康检查...")
+            await start_health_checker()
+            
+        logger.info("API服务启动完成")
+        
+    except Exception as e:
+        logger.error(f"API服务启动出错: {e}")
+        # 继续启动，不中断服务
+
+# 关闭处理
 @app.on_event("shutdown")
 async def shutdown_event():
-    """关闭事件"""
-    global analysis_client
+    """应用关闭时执行"""
+    global stream_monitor, redis_manager, task_status_manager, task_retry_queue
     
     try:
+        logger.info("API服务关闭中...")
+        
+        # 关闭视频源监控
+        if stream_monitor:
+            await stream_monitor.stop()
+        
+        # 关闭任务状态管理器
+        if task_status_manager:
+            await task_status_manager.stop()
+            
+        # 关闭任务重试队列
+        if task_retry_queue:
+            await task_retry_queue.stop()
+        
+        # 关闭Redis连接
+        if redis_manager:
+            await redis_manager.close()
+        
+        # 停止MQTT任务管理组件
+        logger.info("停止MQTT任务管理组件...")
+        try:
+            from services.mqtt.mqtt_task_manager import get_mqtt_task_manager
+            task_manager = get_mqtt_task_manager()
+            if task_manager:
+                await task_manager.stop()
+                logger.info("MQTT任务管理器已停止")
+        except Exception as e:
+            logger.error(f"停止MQTT任务管理器出错: {e}")
+        
+        # 如果使用MQTT通信，关闭MQTT客户端和节点健康检查
+        if hasattr(app.state, 'communication_mode') and app.state.communication_mode.lower() == 'mqtt':
+            logger.info("关闭MQTT节点健康检查...")
+            await stop_health_checker()
+            
+            if hasattr(app.state, 'mqtt_client'):
+                logger.info("断开MQTT Broker连接...")
+                app.state.mqtt_client.disconnect()
+        
         # 关闭分析服务客户端
-        if analysis_client:
-            await analysis_client.close()
-            logger.info("分析服务客户端已关闭")
+        if hasattr(app.state, 'analysis_client'):
+            logger.info("关闭分析服务客户端...")
+            await app.state.analysis_client.close()
         
-        # 停止视频源监控
-        await stream_monitor.stop()
-        logger.info("视频源监控服务已停止")
+        logger.info("API服务已完全关闭")
         
-        # 停止节点健康检查服务
-        stop_health_checker()
-        logger.info("节点健康检查服务已停止")
-        
-        # 停止所有视频流转换进程
-        from services.stream_player import stream_player_service
-        await stream_player_service.stop_all_conversions()
-        logger.info("所有视频流转换进程已停止")
     except Exception as e:
-        logger.error(f"服务停止失败: {str(e)}")
-
-# 健康检查
-@app.get("/health")
-async def health_check():
-    """健康检查接口"""
-    return {
-        "status": "healthy",
-        "name": "api",
-        "communication_mode": app.state.analysis_client.mode if hasattr(app.state, "analysis_client") else "unknown"
-    }
+        logger.error(f"API服务关闭出错: {e}")
 
 # 为依赖注入提供分析服务客户端
 @app.middleware("http")
@@ -211,3 +271,12 @@ async def add_analysis_client(request: Request, call_next):
     request.state.analysis_client = app.state.analysis_client
     response = await call_next(request)
     return response
+
+# 健康检查
+@app.get("/health")
+async def health_check():
+    """健康检查接口"""
+    return {
+        "status": "healthy",
+        "name": "api"
+    }

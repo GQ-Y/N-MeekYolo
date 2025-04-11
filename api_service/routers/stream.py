@@ -14,8 +14,8 @@ from typing import Optional
 from models.requests import StreamCreate, StreamUpdate, StreamStatus
 from models.responses import BaseResponse, StreamResponse
 from models.database import Stream
-from services.stream import StreamService
-from services.database import get_db
+from services.stream.stream import StreamService
+from services.core.database import get_db
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

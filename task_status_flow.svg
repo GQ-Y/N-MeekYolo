@@ -1,0 +1,235 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1000" height="1500" viewBox="0 0 1000 1500">
+  <style>
+    .title { font: bold 20px sans-serif; fill: #333; }
+    .subtitle { font: bold 16px sans-serif; fill: #333; }
+    .state { font: bold 14px sans-serif; fill: #fff; }
+    .state-box { fill: #4d7aff; stroke: #2952cc; stroke-width: 2; rx: 5; ry: 5; }
+    .event-box { fill: #ff7a4d; stroke: #cc5233; stroke-width: 2; rx: 15; ry: 15; }
+    .main-task { fill: #66cc66; stroke: #339933; stroke-width: 2; rx: 5; ry: 5; }
+    .sub-task { fill: #cc66cc; stroke: #993399; stroke-width: 2; rx: 5; ry: 5; }
+    .task-status-table { fill: #f8f9fa; stroke: #333; stroke-width: 1; }
+    .method-box { fill: #ffffcc; stroke: #999966; stroke-width: 2; rx: 5; ry: 5; }
+    .arrow { stroke: #666; stroke-width: 2; marker-end: url(#arrowhead); fill: none; }
+    .dashed-arrow { stroke: #666; stroke-width: 2; marker-end: url(#arrowhead); fill: none; stroke-dasharray: 5,5; }
+    .section-title { font: bold 18px sans-serif; fill: #333; }
+    .normal-text { font: 14px sans-serif; fill: #333; }
+    .small-text { font: 12px sans-serif; fill: #333; }
+    .header-cell { font: bold 14px sans-serif; fill: #333; }
+    text { font: 14px sans-serif; fill: #333; }
+  </style>
+  
+  <!-- 定义箭头标记 -->
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#666" />
+    </marker>
+  </defs>
+  
+  <!-- 标题 -->
+  <text x="500" y="30" class="title" text-anchor="middle">API服务任务状态变化流程图</text>
+  
+  <!-- 任务状态定义表格 -->
+  <text x="500" y="70" class="section-title" text-anchor="middle">任务状态定义</text>
+  
+  <!-- 主任务状态表 -->
+  <rect x="100" y="90" width="350" height="30" class="task-status-table" fill="#e6ffe6"/>
+  <rect x="100" y="120" width="350" height="30" class="task-status-table"/>
+  <rect x="100" y="150" width="350" height="30" class="task-status-table"/>
+  <rect x="100" y="180" width="350" height="30" class="task-status-table"/>
+  <rect x="100" y="210" width="350" height="30" class="task-status-table"/>
+  
+  <text x="275" y="110" class="header-cell" text-anchor="middle">主任务状态 (Task.status)</text>
+  <text x="120" y="140" class="small-text">0</text>
+  <text x="250" y="140" class="small-text">未启动 - 任务创建后的初始状态</text>
+  <text x="120" y="170" class="small-text">1</text>
+  <text x="250" y="170" class="small-text">运行中 - 有子任务正在运行</text>
+  <text x="120" y="200" class="small-text">2</text>
+  <text x="250" y="200" class="small-text">已停止 - 任务被手动停止或自动停止</text>
+  <text x="120" y="230" class="small-text">3</text>
+  <text x="250" y="230" class="small-text">已完成 - 所有子任务正常完成</text>
+  
+  <!-- 子任务状态表 -->
+  <rect x="550" y="90" width="350" height="30" class="task-status-table" fill="#ffe6ff"/>
+  <rect x="550" y="120" width="350" height="30" class="task-status-table"/>
+  <rect x="550" y="150" width="350" height="30" class="task-status-table"/>
+  <rect x="550" y="180" width="350" height="30" class="task-status-table"/>
+  <rect x="550" y="210" width="350" height="30" class="task-status-table"/>
+  
+  <text x="725" y="110" class="header-cell" text-anchor="middle">子任务状态 (SubTask.status)</text>
+  <text x="570" y="140" class="small-text">0</text>
+  <text x="700" y="140" class="small-text">未启动 - 子任务创建后的初始状态</text>
+  <text x="570" y="170" class="small-text">1</text>
+  <text x="700" y="170" class="small-text">运行中 - 子任务正在执行</text>
+  <text x="570" y="200" class="small-text">2</text>
+  <text x="700" y="200" class="small-text">已停止 - 子任务被手动停止</text>
+  <text x="570" y="230" class="small-text">3</text>
+  <text x="700" y="230" class="small-text">已完成/出错 - 子任务完成或出错</text>
+  
+  <!-- 任务创建阶段 -->
+  <text x="500" y="280" class="section-title" text-anchor="middle">任务创建阶段</text>
+  
+  <!-- 创建主任务 -->
+  <rect x="150" y="310" width="200" height="50" class="main-task" />
+  <text x="250" y="340" class="state" text-anchor="middle">主任务创建 (status=0)</text>
+  
+  <!-- 创建子任务 -->
+  <rect x="650" y="310" width="200" height="50" class="sub-task" />
+  <text x="750" y="340" class="state" text-anchor="middle">子任务创建 (status=0)</text>
+  
+  <!-- 方法标识 -->
+  <rect x="400" y="310" width="200" height="50" class="method-box" />
+  <text x="500" y="335" class="normal-text" text-anchor="middle">TaskCRUD.create_task()</text>
+  <text x="500" y="355" class="small-text" text-anchor="middle">AnalysisClient.analyze_*()</text>
+  
+  <!-- 连接箭头 -->
+  <path d="M350 335 L400 335" class="arrow" />
+  <path d="M600 335 L650 335" class="arrow" />
+  
+  <!-- 任务启动阶段 -->
+  <text x="500" y="400" class="section-title" text-anchor="middle">任务启动阶段</text>
+  
+  <!-- 启动任务流程 -->
+  <rect x="400" y="430" width="200" height="50" class="method-box" />
+  <text x="500" y="455" class="normal-text" text-anchor="middle">start_task()</text>
+  <text x="500" y="475" class="small-text" text-anchor="middle">发送MQTT任务到节点</text>
+  
+  <!-- 子任务状态变化 -->
+  <rect x="650" y="430" width="200" height="50" class="sub-task" />
+  <text x="750" y="460" class="state" text-anchor="middle">子任务状态 → 1 (运行中)</text>
+  
+  <!-- 主任务状态变化 -->
+  <rect x="150" y="430" width="200" height="50" class="main-task" />
+  <text x="250" y="460" class="state" text-anchor="middle">主任务状态 → 1 (运行中)</text>
+  
+  <!-- 连接箭头 -->
+  <path d="M600 455 L650 455" class="arrow" />
+  <path d="M400 455 L350 455" class="arrow" />
+  
+  <!-- 方法与状态更新 -->
+  <rect x="650" y="510" width="200" height="50" class="method-box" />
+  <text x="750" y="535" class="normal-text" text-anchor="middle">_handle_config_reply()</text>
+  <text x="750" y="555" class="small-text" text-anchor="middle">收到节点确认，更新状态</text>
+  
+  <path d="M750 480 L750 510" class="arrow" />
+  
+  <!-- 任务结果更新阶段 -->
+  <text x="500" y="600" class="section-title" text-anchor="middle">任务结果与状态更新阶段</text>
+  
+  <!-- 接收结果 -->
+  <rect x="650" y="630" width="200" height="50" class="method-box" />
+  <text x="750" y="655" class="normal-text" text-anchor="middle">_handle_task_result()</text>
+  <text x="750" y="675" class="small-text" text-anchor="middle">处理MQTT任务结果</text>
+  
+  <!-- 子任务状态变化 -->
+  <rect x="650" y="710" width="200" height="120" class="sub-task" />
+  <text x="750" y="735" class="state" text-anchor="middle">子任务状态更新：</text>
+  <text x="750" y="760" class="small-text" text-anchor="middle">completed → status=2 (已完成)</text>
+  <text x="750" y="785" class="small-text" text-anchor="middle">failed → status=3 (出错)</text>
+  <text x="750" y="810" class="small-text" text-anchor="middle">running → status=1 (继续运行)</text>
+  
+  <!-- 主任务状态更新 -->
+  <rect x="150" y="710" width="200" height="120" class="main-task" />
+  <text x="250" y="735" class="state" text-anchor="middle">主任务状态更新：</text>
+  <text x="250" y="760" class="small-text" text-anchor="middle">根据子任务状态计算</text>
+  <text x="250" y="785" class="small-text" text-anchor="middle">通过update_task_status_</text>
+  <text x="250" y="810" class="small-text" text-anchor="middle">from_subtasks()</text>
+  
+  <!-- 链接 -->
+  <path d="M750 680 L750 710" class="arrow" />
+  <path d="M650 770 L400 770" class="arrow" />
+  
+  <rect x="400" y="740" width="200" height="60" class="method-box" />
+  <text x="500" y="765" class="normal-text" text-anchor="middle">update_task_status_</text>
+  <text x="500" y="785" class="normal-text" text-anchor="middle">from_subtasks()</text>
+  
+  <path d="M400 770 L350 770" class="arrow" />
+  
+  <!-- 任务停止阶段 -->
+  <text x="500" y="870" class="section-title" text-anchor="middle">任务停止阶段</text>
+  
+  <!-- 停止任务方法 -->
+  <rect x="400" y="900" width="200" height="50" class="method-box" />
+  <text x="500" y="925" class="normal-text" text-anchor="middle">stop_task()</text>
+  <text x="500" y="945" class="small-text" text-anchor="middle">接收用户停止请求</text>
+  
+  <!-- 子任务状态变化 -->
+  <rect x="650" y="900" width="200" height="50" class="sub-task" />
+  <text x="750" y="930" class="state" text-anchor="middle">子任务状态 → 2 (已停止)</text>
+  
+  <!-- 主任务状态变化 -->
+  <rect x="150" y="900" width="200" height="50" class="main-task" />
+  <text x="250" y="930" class="state" text-anchor="middle">主任务状态 → 2 (已停止)</text>
+  
+  <!-- 发送MQTT停止 -->
+  <rect x="650" y="980" width="200" height="50" class="method-box" />
+  <text x="750" y="1005" class="normal-text" text-anchor="middle">publish_task_control()</text>
+  <text x="750" y="1025" class="small-text" text-anchor="middle">发送MQTT停止命令</text>
+  
+  <!-- 连接箭头 -->
+  <path d="M600 925 L650 925" class="arrow" />
+  <path d="M400 925 L350 925" class="arrow" />
+  <path d="M750 950 L750 980" class="arrow" />
+  
+  <!-- 主任务状态管理逻辑 -->
+  <text x="500" y="1070" class="section-title" text-anchor="middle">主任务状态更新逻辑</text>
+  
+  <!-- 状态计算规则 -->
+  <rect x="200" y="1100" width="600" height="280" class="task-status-table" fill="#f8f9fa"/>
+  
+  <text x="500" y="1130" class="header-cell" text-anchor="middle">update_task_status_from_subtasks() 状态计算规则</text>
+  
+  <text x="220" y="1170" class="normal-text">1. 统计子任务各状态数量：running_count, completed_count, error_count, stopped_count</text>
+  <text x="220" y="1200" class="normal-text">2. 更新主任务状态按以下规则：</text>
+  <text x="240" y="1230" class="normal-text">· 如果 running_count > 0：主任务状态 = 1 (运行中)</text>
+  <text x="240" y="1260" class="normal-text">· 如果 completed_count = total_subtasks：主任务状态 = 3 (已完成)</text>
+  <text x="240" y="1290" class="normal-text">· 如果 error_count > 0 且 running_count = 0：主任务状态 = 4 (出错)</text>
+  <text x="240" y="1320" class="normal-text">· 如果 stopped_count > 0 且 running_count = 0：主任务状态 = 2 (已停止)</text>
+  <text x="240" y="1350" class="normal-text">· 其他情况：主任务状态不变</text>
+  
+  <!-- 健康检查与任务迁移相关 -->
+  <text x="500" y="1420" class="section-title" text-anchor="middle">健康检查与任务迁移导致的状态变化</text>
+  
+  <!-- 离线处理 -->
+  <rect x="150" y="1450" width="200" height="50" class="method-box" />
+  <text x="250" y="1475" class="normal-text" text-anchor="middle">_handle_mqtt_node_offline()</text>
+  <text x="250" y="1495" class="small-text" text-anchor="middle">节点离线处理</text>
+  
+  <!-- MQTT节点离线 -->
+  <rect x="150" y="1530" width="200" height="50" class="event-box" />
+  <text x="250" y="1560" class="state" text-anchor="middle">MQTT节点离线</text>
+  
+  <!-- 子任务迁移 -->
+  <rect x="400" y="1450" width="200" height="50" class="sub-task" />
+  <text x="500" y="1475" class="state" text-anchor="middle">子任务迁移到新节点</text>
+  <text x="500" y="1495" class="small-text" text-anchor="middle">状态保持为1(运行中)</text>
+  
+  <!-- 子任务重置 -->
+  <rect x="650" y="1450" width="200" height="50" class="sub-task" />
+  <text x="750" y="1475" class="state" text-anchor="middle">子任务重置</text>
+  <text x="750" y="1495" class="small-text" text-anchor="middle">状态变为0(未启动)</text>
+  
+  <!-- 心跳超时 -->
+  <rect x="400" y="1530" width="200" height="50" class="event-box" />
+  <text x="500" y="1560" class="state" text-anchor="middle">心跳超时</text>
+  
+  <!-- 连接箭头 -->
+  <path d="M250 1450 L250 1530" class="dashed-arrow" />
+  <path d="M500 1530 L500 1500" class="dashed-arrow" />
+  <path d="M350 1475 L400 1475" class="arrow" />
+  <path d="M600 1475 L650 1475" class="arrow" />
+  <path d="M500 1530 L250 1530" class="dashed-arrow" />
+  
+  <!-- 图例 -->
+  <rect x="800" y="1520" width="20" height="20" class="main-task" />
+  <text x="830" y="1535" class="small-text">主任务</text>
+  
+  <rect x="800" y="1550" width="20" height="20" class="sub-task" />
+  <text x="830" y="1565" class="small-text">子任务</text>
+  
+  <rect x="900" y="1520" width="20" height="20" class="method-box" />
+  <text x="930" y="1535" class="small-text">方法</text>
+  
+  <rect x="900" y="1550" width="20" height="20" class="event-box" />
+  <text x="930" y="1565" class="small-text">事件</text>
+</svg> 

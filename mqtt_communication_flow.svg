@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="800" height="950" viewBox="0 0 800 950">
+  <style>
+    .title { font: bold 20px sans-serif; fill: #333; }
+    .box { fill: #f8f9fa; stroke: #495057; stroke-width: 2; rx: 5; ry: 5; }
+    .broker { fill: #e6f3ff; stroke: #0066cc; stroke-width: 2; rx: 5; ry: 5; }
+    .api { fill: #e6ffe6; stroke: #006600; stroke-width: 2; rx: 5; ry: 5; }
+    .analysis { fill: #ffe6e6; stroke: #990000; stroke-width: 2; rx: 5; ry: 5; }
+    .subtitle { font: bold 16px sans-serif; fill: #333; }
+    .label { font: 14px sans-serif; fill: #333; }
+    .arrow { stroke: #666; stroke-width: 2; marker-end: url(#arrowhead); }
+    .arrow-api { stroke: #006600; stroke-width: 2; marker-end: url(#arrowhead-api); }
+    .arrow-analysis { stroke: #990000; stroke-width: 2; marker-end: url(#arrowhead-analysis); }
+    .flow-label { font: 12px sans-serif; fill: #333; }
+    .topic-label { font: italic 12px sans-serif; fill: #6c757d; }
+  </style>
+  
+  <!-- 定义箭头标记 -->
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#666" />
+    </marker>
+    <marker id="arrowhead-api" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#006600" />
+    </marker>
+    <marker id="arrowhead-analysis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#990000" />
+    </marker>
+  </defs>
+  
+  <!-- 标题 -->
+  <text x="400" y="30" class="title" text-anchor="middle">API服务与分析服务之间的MQTT通信流程图</text>
+  
+  <!-- MQTT Broker -->
+  <rect x="300" y="60" width="200" height="50" class="broker" />
+  <text x="400" y="90" class="subtitle" text-anchor="middle">MQTT Broker</text>
+  
+  <!-- API服务 -->
+  <rect x="50" y="160" width="200" height="700" class="api" />
+  <text x="150" y="185" class="subtitle" text-anchor="middle">API服务</text>
+  
+  <!-- API内部组件 -->
+  <rect x="75" y="210" width="150" height="60" class="box" />
+  <text x="150" y="245" class="label" text-anchor="middle">AnalysisClient</text>
+  
+  <rect x="75" y="290" width="150" height="60" class="box" />
+  <text x="150" y="325" class="label" text-anchor="middle">MQTTClient</text>
+  
+  <!-- 分析服务 -->
+  <rect x="550" y="160" width="200" height="700" class="analysis" />
+  <text x="650" y="185" class="subtitle" text-anchor="middle">分析服务</text>
+  
+  <!-- 分析服务内部组件 -->
+  <rect x="575" y="210" width="150" height="60" class="box" />
+  <text x="650" y="245" class="label" text-anchor="middle">MQTTAnalyzerService</text>
+  
+  <rect x="575" y="290" width="150" height="60" class="box" />
+  <text x="650" y="325" class="label" text-anchor="middle">MQTTClient</text>
+  
+  <!-- 连接与初始化 -->
+  <!-- API服务启动连接 -->
+  <path d="M150 370 L150 400 L300 400" class="arrow-api" />
+  <text x="185" y="390" class="flow-label">1. 连接Broker</text>
+  
+  <!-- 分析服务启动连接 -->
+  <path d="M650 370 L650 400 L500 400" class="arrow-analysis" />
+  <text x="560" y="390" class="flow-label">2. 连接Broker</text>
+  
+  <!-- 分析服务发布状态信息 -->
+  <path d="M650 420 L650 440 L400 440" class="arrow-analysis" />
+  <text x="560" y="430" class="flow-label">3. 发布节点在线状态</text>
+  <text x="470" y="450" class="topic-label">{topic_prefix}connection</text>
+  
+  <!-- API服务订阅状态消息 -->
+  <path d="M225 440 L300 440" class="arrow-api" />
+  <text x="240" y="430" class="flow-label">4. 订阅节点状态</text>
+  
+  <!-- 节点上线更新 -->
+  <path d="M400 455 L150 455" class="arrow" />
+  <text x="270" y="475" class="flow-label">5. API服务接收节点上线通知</text>
+  
+  <!-- 图像分析任务流程 -->
+  <text x="400" y="505" class="subtitle" text-anchor="middle">图像分析任务流程</text>
+  <path d="M150 525 L400 525" class="arrow-api" />
+  <text x="220" y="515" class="flow-label">6. 发送图像分析任务</text>
+  <text x="280" y="535" class="topic-label">{topic_prefix}{node_mac}/request_setting</text>
+  
+  <path d="M400 525 L650 525" class="arrow" />
+  <text x="525" y="515" class="flow-label">7. 节点接收分析请求</text>
+  
+  <path d="M650 545 L400 545" class="arrow-analysis" />
+  <text x="560" y="565" class="flow-label">8. 发送分析确认</text>
+  <text x="480" y="535" class="topic-label">{topic_prefix}node_config_reply</text>
+  
+  <path d="M400 545 L150 545" class="arrow" />
+  <text x="270" y="565" class="flow-label">9. API服务接收确认</text>
+  
+  <path d="M650 585 L400 585" class="arrow-analysis" />
+  <text x="560" y="605" class="flow-label">10. 发送分析结果</text>
+  <text x="480" y="575" class="topic-label">{topic_prefix}{node_mac}/result</text>
+  
+  <path d="M400 585 L150 585" class="arrow" />
+  <text x="270" y="605" class="flow-label">11. API服务接收结果</text>
+  
+  <!-- 视频/流分析任务流程 -->
+  <text x="400" y="645" class="subtitle" text-anchor="middle">视频/流分析任务流程</text>
+  <path d="M150 665 L400 665" class="arrow-api" />
+  <text x="220" y="655" class="flow-label">12. 发送流分析任务</text>
+  <text x="280" y="675" class="topic-label">{topic_prefix}{node_mac}/request_setting</text>
+  
+  <path d="M400 665 L650 665" class="arrow" />
+  <text x="525" y="655" class="flow-label">13. 节点接收流请求</text>
+  
+  <path d="M650 685 L400 685" class="arrow-analysis" />
+  <text x="560" y="705" class="flow-label">14. 发送接收确认</text>
+  <text x="480" y="675" class="topic-label">{topic_prefix}node_config_reply</text>
+  
+  <path d="M400 685 L150 685" class="arrow" />
+  <text x="270" y="705" class="flow-label">15. API服务接收确认</text>
+  
+  <path d="M650 725 L400 725" class="arrow-analysis" />
+  <text x="560" y="745" class="flow-label">16. 持续发送流分析结果</text>
+  <text x="480" y="715" class="topic-label">{topic_prefix}{node_mac}/result</text>
+  
+  <path d="M400 725 L150 725" class="arrow" />
+  <text x="270" y="745" class="flow-label">17. API服务接收结果</text>
+  
+  <!-- 任务停止流程 -->
+  <text x="400" y="785" class="subtitle" text-anchor="middle">任务停止流程</text>
+  <path d="M150 805 L400 805" class="arrow-api" />
+  <text x="220" y="795" class="flow-label">18. 发送停止任务命令</text>
+  <text x="280" y="815" class="topic-label">{topic_prefix}{node_mac}/request_setting</text>
+  
+  <path d="M400 805 L650 805" class="arrow" />
+  <text x="525" y="795" class="flow-label">19. 节点接收停止命令</text>
+  
+  <path d="M650 825 L400 825" class="arrow-analysis" />
+  <text x="560" y="845" class="flow-label">20. 发送停止确认</text>
+  <text x="480" y="815" class="topic-label">{topic_prefix}node_config_reply</text>
+  
+  <path d="M400 825 L150 825" class="arrow" />
+  <text x="270" y="845" class="flow-label">21. API服务接收停止确认</text>
+  
+  <!-- 心跳与状态监控 -->
+  <text x="400" y="885" class="subtitle" text-anchor="middle">心跳与状态监控</text>
+  <path d="M650 905 L400 905" class="arrow-analysis" />
+  <text x="560" y="925" class="flow-label">22. 定期发送心跳包</text>
+  <text x="480" y="895" class="topic-label">{topic_prefix}{node_mac}/heartbeat</text>
+  
+  <path d="M400 905 L150 905" class="arrow" />
+  <text x="270" y="925" class="flow-label">23. API服务更新节点状态</text>
+</svg> 

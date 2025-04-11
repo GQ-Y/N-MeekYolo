@@ -1,0 +1,4 @@
+requirements.lock
+__pycache__/
+__pycache__/*
+*.log

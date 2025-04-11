@@ -12,8 +12,8 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 from typing import List
 from models.responses import BaseResponse, ModelResponse
-from services.model import ModelService
-from services.database import get_db
+from services.core.model import ModelService
+from services.core.database import get_db
 from models.database import Model
 from shared.utils.logger import setup_logger
 

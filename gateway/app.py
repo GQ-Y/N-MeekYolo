@@ -18,14 +18,27 @@ from discovery.service_registry import service_registry
 from router.api_router import router
 from routers.admin import router as admin_router
 from routers.auth import router as auth_router
-from core.models import StandardResponse
+from routers.oauth import router as oauth_router
+from routers.subscription import router as subscription_router
+from routers.node import router as node_router
+from routers.task import router as task_router
+from routers.billing import router as billing_router
+from routers.notification import router as notification_router
+from routers.system import router as system_router
+from routers.user import router as user_router
+from core.schemas import StandardResponse
 from core.exceptions import GatewayException
 import time
 import uuid
-from routers import auth, system, user
+import logging.config
+from core.config import settings
+from core.models.base import Base
+from core.database import engine
+from core.logging_config import setup_logging
 
-# 配置日志
-logger = setup_logger(__name__)
+# --- 应用日志配置 ---
+setup_logging()
+logger = logging.getLogger(__name__)
 
 def show_service_banner(service_name: str):
     """显示服务启动标识"""
@@ -87,7 +100,7 @@ class HTTPValidationError(BaseModel):
 
 # 创建FastAPI应用
 app = FastAPI(
-    title="MeekYolo Gateway",
+    title=settings.PROJECT_NAME,
     description="""
     API网关服务
     
@@ -119,12 +132,19 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(RequestLoggingMiddleware)
 
 # 注册路由
+logger.info("开始加载路由...")
 app.include_router(auth_router)  # 添加认证路由
 app.include_router(admin_router)
 app.include_router(router)
-app.include_router(auth.router)
-app.include_router(system.router)
-app.include_router(user.router)  # 添加用户路由
+app.include_router(oauth_router)
+app.include_router(subscription_router)
+app.include_router(node_router)
+app.include_router(task_router)
+app.include_router(billing_router)
+app.include_router(notification_router)
+app.include_router(system_router)
+app.include_router(user_router)  # 使用正确的别名 user_router
+logger.info("所有路由加载完成")
 
 # 挂载静态文件
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -191,17 +211,21 @@ async def custom_swagger_ui_html():
 
 @app.on_event("startup")
 async def startup_event():
-    """应用启动时的初始化"""
-    show_service_banner("gateway")
-    logger.info("Starting API Gateway...")
-    
-    # 启动服务健康检查
+    """应用启动时执行"""
+    logger.info("应用启动，开始初始化...")
+    # 启动后台服务发现与健康检查任务
+    # 注意：asyncio.create_task 用于在后台运行协程
     asyncio.create_task(service_registry.start_health_check())
+    logger.info("后台健康检查任务已启动")
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """应用关闭时的清理"""
-    logger.info("Shutting down API Gateway...")
+    """应用关闭时执行"""
+    logger.info("应用关闭，开始清理...")
+    # 停止后台服务发现与健康检查任务
+    await service_registry.stop()
+    logger.info("后台健康检查任务已请求停止")
+    # 可以添加其他清理逻辑，例如关闭数据库连接池 (如果需要)
 
 @app.get("/health")
 async def health_check():
@@ -210,4 +234,9 @@ async def health_check():
 
 @app.get("/")
 async def root():
-    return {"message": "Welcome to MeekYolo Gateway"} 
+    return {"message": "Welcome to MeekYolo Gateway"}
+
+if __name__ == "__main__":
+    import uvicorn
+    logger.info("使用 uvicorn 启动应用...")
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True) 

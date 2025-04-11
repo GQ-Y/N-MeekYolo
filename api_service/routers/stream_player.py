@@ -7,8 +7,8 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 from typing import Optional
 from models.responses import BaseResponse
-from services.database import get_db
-from services.stream_player import StreamPlayerService
+from services.core.database import get_db
+from services.stream.stream_player import StreamPlayerService
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

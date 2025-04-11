@@ -514,7 +514,7 @@ async def start_task(
     logger.info(f"任务 {task_id} ({task.name}) 准备启动 {len(not_started_subtasks)} 个子任务")
     
     # 导入分析服务
-    from services.analysis import AnalysisService
+    from services.http.analysis import AnalysisService
     analysis_service = AnalysisService()
     
     # 构建系统回调URL - API服务接收回调的地址
@@ -591,7 +591,6 @@ async def start_task(
                 result = None
                 if comm_mode == "mqtt":
                     # 使用应用级别的MQTT客户端而不是创建新的
-                    from fastapi import FastAPI
                     from app import app as fastapi_app
                     
                     if not hasattr(fastapi_app.state, "analysis_client") or not fastapi_app.state.analysis_client:
@@ -816,15 +815,16 @@ async def stop_task(
     
     if not task:
         return False, "任务不存在"
-    
+
     # 检查任务状态
-    if task.status != 1:  # 只有运行中的任务(1)可以停止
-        return False, f"任务状态为 {task.status}，不是运行中状态，无法停止"
-    
-    # 导入分析服务
-    from services.analysis import AnalysisService
+    if task.status == 2:  # 如果任务已经是已停止状态(2)，则不执行任何操作
+        logger.info(f"任务 {task_id} 已经是已停止状态，无需再次停止")
+        return False, f"任务 {task_id} 已经是已停止状态，无需再次停止"
+
+    # 导入 AnalysisService
+    from services.http.analysis import AnalysisService
     analysis_service = AnalysisService()
-    
+
     # 更新任务状态
     task.status = 2  # 已停止状态(2)
     task.active_subtasks = 0

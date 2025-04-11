@@ -90,4 +90,54 @@ class InvalidTokenException(AuthenticationException):
 class UserExistsException(AuthenticationException):
     """用户已存在"""
     def __init__(self):
-        super().__init__(message="已存在用户，系统只允许一个用户", code=409) 
+        super().__init__(message="已存在用户，系统只允许一个用户", code=409)
+
+# 添加通用的 NotFoundException
+class NotFoundException(GatewayException):
+    """资源未找到通用异常"""
+    def __init__(self, resource: str = "Resource"):
+        # 允许自定义未找到的资源名称
+        super().__init__(
+            message=f"{resource} not found",
+            code=404
+        )
+
+# 添加 InvalidInputException
+class InvalidInputException(GatewayException):
+    """无效输入通用异常"""
+    def __init__(self, message: str = "Invalid input provided"):
+        # 默认使用 400 Bad Request
+        super().__init__(
+            message=message,
+            code=400
+        )
+
+# 添加 AlreadyExistsException
+class AlreadyExistsException(GatewayException):
+    """资源已存在通用异常"""
+    def __init__(self, resource: str = "Resource"):
+        # 默认使用 409 Conflict
+        super().__init__(
+            message=f"{resource} already exists",
+            code=409
+        )
+
+# 添加 ForbiddenException
+class ForbiddenException(GatewayException):
+    """权限不足通用异常"""
+    def __init__(self, message: str = "Permission denied"):
+        # 默认使用 403 Forbidden
+        super().__init__(
+            message=message,
+            code=403
+        )
+
+# 添加 PermissionDeniedException
+class PermissionDeniedException(GatewayException):
+    """操作权限被拒绝通用异常"""
+    def __init__(self, message: str = "Operation permission denied"):
+        # 通常也使用 403 Forbidden
+        super().__init__(
+            message=message,
+            code=403
+        ) 

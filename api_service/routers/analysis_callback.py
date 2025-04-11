@@ -10,7 +10,7 @@ import uuid
 import time
 import json
 from models.responses import BaseResponse
-from services.database import get_db
+from services.core.database import get_db
 from shared.utils.logger import setup_logger
 from models.database import SubTask
 

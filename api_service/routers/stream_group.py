@@ -13,8 +13,8 @@ from sqlalchemy.orm import Session
 from typing import Optional
 from models.requests import StreamGroupCreate, StreamGroupUpdate
 from models.responses import BaseResponse
-from services.stream_group import StreamGroupService
-from services.database import get_db
+from services.stream.stream_group import StreamGroupService
+from services.core.database import get_db
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

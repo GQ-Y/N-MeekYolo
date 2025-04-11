@@ -13,10 +13,10 @@ from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
 from models.responses import BaseResponse, TaskDetailResponse, SubTaskResponse
 from models.requests import TaskCreate, TaskUpdate
-from services.database import get_db
+from services.core.database import get_db
 from crud import task as task_crud
 from shared.utils.logger import setup_logger
-from services.model import ModelService
+from services.core.model import ModelService
 from datetime import datetime
 
 logger = setup_logger(__name__)

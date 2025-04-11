@@ -15,7 +15,7 @@ from typing import List, Optional
 from models.requests import CallbackCreate, CallbackUpdate, CreateCallbackRequest, UpdateCallbackRequest
 from models.responses import BaseResponse
 from crud import callback
-from services.database import get_db
+from services.core.database import get_db
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)

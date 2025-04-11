@@ -6,8 +6,9 @@ from fastapi import APIRouter, Request, Depends
 from fastapi.responses import JSONResponse
 from typing import Optional, Any, Dict
 from shared.utils.logger import setup_logger
-from discovery.service_registry import service_registry
-from core.models import StandardResponse, RouteRequest
+from discovery.service_registry import service_registry, ServiceInfo
+from core.schemas import StandardResponse, RouteRequest
+from core.models.user import User
 from core.auth import JWTBearer, Auth
 from core.exceptions import (
     GatewayException,
@@ -19,6 +20,9 @@ from core.exceptions import (
 import aiohttp
 import uuid
 import asyncio
+from sqlalchemy.orm import Session
+from core.database import get_db
+from core.models.admin import RegisteredService
 
 logger = setup_logger(__name__)
 
@@ -35,13 +39,14 @@ router = APIRouter(
     }
 )
 
-async def route_request(route_req: RouteRequest, request: Request, user_data: Dict = None) -> StandardResponse:
+async def route_request(route_req: RouteRequest, request: Request, db: Session, current_user: User = None) -> StandardResponse:
     """通用请求路由处理
     
     Args:
         route_req: 路由请求对象，包含目标服务、路径、方法等信息
         request: FastAPI请求对象
-        user_data: 用户数据，从JWTBearer获取
+        db: SQLAlchemy 数据库会话
+        current_user: 当前认证的用户对象 (如果需要)
         
     Returns:
         StandardResponse: 标准响应对象
@@ -56,12 +61,12 @@ async def route_request(route_req: RouteRequest, request: Request, user_data: Di
     request_id = str(uuid.uuid4())
     try:
         # 获取服务信息
-        service = await service_registry.get_service(route_req.service)
+        service = service_registry.get_service(route_req.service, db=db)
         if not service:
             raise ServiceNotFoundException(route_req.service)
             
-        if service.status != "healthy":
-            raise ServiceUnhealthyException(route_req.service)
+        if service.status != RegisteredService.STATUS_HEALTHY:
+            raise ServiceUnhealthyException(f"{route_req.service} (Status: {service.status_name})")
             
         # 获取服务URL
         service_url = service.url
@@ -76,8 +81,8 @@ async def route_request(route_req: RouteRequest, request: Request, user_data: Di
         
         # 转发请求
         try:
-            # 增加超时时间到60秒
-            timeout = aiohttp.ClientTimeout(total=60)
+            # 增加超时时间到120秒
+            timeout = aiohttp.ClientTimeout(total=120)
             
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 try:
@@ -119,17 +124,17 @@ async def route_request(route_req: RouteRequest, request: Request, user_data: Di
                         )
                 except asyncio.TimeoutError:
                     # 处理超时异常，返回超时信息而非抛出异常
-                    logger.error(f"Request to {route_req.service} timed out after 60 seconds: {target_url}")
+                    logger.error(f"Request to {route_req.service} timed out after 120 seconds: {target_url}")
                     return StandardResponse(
                         requestId=request_id,
                         path=request.url.path,
                         success=False,
                         code=504,  # Gateway Timeout
-                        message=f"请求超时: 服务 {route_req.service} 响应时间超过60秒",
+                        message=f"请求超时: 服务 {route_req.service} 响应时间超过120秒",
                         data={
                             "service": route_req.service,
                             "url": target_url,
-                            "timeout": 60
+                            "timeout": 120
                         }
                     )
                 except aiohttp.ClientError as e:
@@ -212,16 +217,18 @@ async def get_current_user(auth_header = Depends(JWTBearer())):
 async def handle_route_request(
     route_req: RouteRequest, 
     request: Request,
-    user_data: Dict = Depends(get_current_user)  # 使用自定义依赖
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user) # 现在依赖返回 User 对象
 ) -> StandardResponse:
     """统一的路由处理入口
     
     Args:
         route_req: 路由请求对象，包含目标服务、路径、方法等信息
         request: FastAPI请求对象
-        user_data: 用户数据，从Token中获取
+        db: SQLAlchemy 数据库会话
+        current_user: 当前认证的用户对象
         
     Returns:
         StandardResponse: 标准响应对象
     """
-    return await route_request(route_req, request, user_data) 
+    return await route_request(route_req=route_req, request=request, db=db, current_user=current_user) 

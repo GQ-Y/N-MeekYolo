@@ -11,7 +11,7 @@ from fastapi import APIRouter, Request, Depends
 from typing import List, Dict, Any
 from models.requests import ImageAnalysisRequest, VideoAnalysisRequest, StreamAnalysisRequest
 from models.responses import BaseResponse
-from services.analysis_client import AnalysisClient
+from services.http.analysis_client import AnalysisClient
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
