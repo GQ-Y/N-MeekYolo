@@ -6,3 +6,4 @@ data/*
 logs/*
 scripts
 run.sh
+venv/*

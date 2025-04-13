@@ -86,13 +86,28 @@ init_environment() {
     local force=$1
     echo -e "${YELLOW}正在初始化环境...${NC}"
     
+    # 检查是否安装了 python3-venv
+    if ! command -v python3 -m venv &> /dev/null; then
+        echo -e "${RED}错误: python3-venv 未安装${NC}"
+        echo -e "${YELLOW}请先安装 python3-venv:${NC}"
+        echo -e "Ubuntu/Debian: sudo apt-get install python3-venv"
+        echo -e "CentOS/RHEL: sudo yum install python3-venv"
+        echo -e "macOS: brew install python3"
+        return 1
+    fi
+    
     for service_info in "${SERVICES[@]}"; do
         local name=$(get_service_name "$service_info")
         echo -e "\n${CYAN}正在初始化 $name...${NC}"
         cd "$PROJECT_ROOT/$name"
         
+        # 虚拟环境目录
+        local venv_dir="venv"
+        
         # 检查是否强制重新初始化
         if [ "$force" = "force" ]; then
+            echo -e "${YELLOW}强制重新初始化，删除旧的虚拟环境...${NC}"
+            rm -rf "$venv_dir"
             rm -f requirements.lock
         fi
         
@@ -101,6 +116,22 @@ init_environment() {
             echo -e "${GREEN}$name 已经初始化过了 (发现 requirements.lock)${NC}"
             continue
         fi
+        
+        # 创建虚拟环境
+        echo -e "${WHITE}创建虚拟环境...${NC}"
+        python3 -m venv "$venv_dir"
+        
+        if [ ! -d "$venv_dir" ]; then
+            echo -e "${RED}创建虚拟环境失败${NC}"
+            continue
+        fi
+        
+        # 激活虚拟环境并安装依赖
+        echo -e "${WHITE}激活虚拟环境并安装依赖...${NC}"
+        source "$venv_dir/bin/activate"
+        
+        # 升级 pip
+        python -m pip install --upgrade pip
         
         # 安装依赖
         if [ -f "requirements.txt" ]; then
@@ -113,6 +144,9 @@ init_environment() {
         else
             echo -e "${RED}未找到 $name 的 requirements.txt 文件${NC}"
         fi
+        
+        # 退出虚拟环境
+        deactivate
     done
 }
 
@@ -426,7 +460,18 @@ start_services() {
             cd "$PROJECT_ROOT/$selected_service"
             mkdir -p logs
             
+            # 检查虚拟环境
+            if [ ! -d "venv" ]; then
+                echo -e "${RED}错误: 虚拟环境不存在，请先初始化环境${NC}"
+                echo -e "\n${YELLOW}按回车键继续...${NC}"
+                read
+                return
+            fi
+            
+            # 激活虚拟环境
+            source "venv/bin/activate"
             PYTHONPATH="$PROJECT_ROOT/$selected_service" uvicorn app:app --host 0.0.0.0 --port $port
+            deactivate
             
             # 服务停止后返回菜单
             echo -e "\n${YELLOW}服务已停止，按回车键继续...${NC}"
@@ -450,7 +495,14 @@ start_services() {
             cd "$PROJECT_ROOT/$name"
             mkdir -p logs
             
-            PYTHONPATH="$PROJECT_ROOT/$name" nohup uvicorn app:app --host 0.0.0.0 --port $port > logs/service.log 2>&1 &
+            # 检查虚拟环境
+            if [ ! -d "venv" ]; then
+                echo -e "${RED}错误: $name 的虚拟环境不存在，请先初始化环境${NC}"
+                continue
+            fi
+            
+            # 使用虚拟环境中的 Python
+            PYTHONPATH="$PROJECT_ROOT/$name" nohup venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port $port > logs/service.log 2>&1 &
             echo $! > logs/service.pid
             echo -e "${GREEN}$name 已在后台启动${NC}"
             sleep 1
