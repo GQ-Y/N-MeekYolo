@@ -6,6 +6,7 @@ import json
 import time
 import asyncio
 import threading
+import enum
 from typing import Dict, List, Any, Optional, Set, Tuple
 from datetime import datetime
 from sqlalchemy.orm import Session
@@ -15,6 +16,14 @@ from models.database import Task, SubTask
 from shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+class StatusFlag(enum.Enum):
+    """任务状态标识"""
+    PENDING = 0   # 未启动
+    RUNNING = 1   # 运行中
+    STOPPED = 2   # 已停止
+    COMPLETED = 3 # 已完成
+    ERROR = 4     # 出错
 
 class TaskStatusManager:
     """
@@ -284,6 +293,7 @@ class TaskStatusManager:
     async def _update_task_in_database(self, db: Session, task_id: int, subtask_updates: Dict[str, int]):
         """
         在数据库中更新任务状态
+        严格遵循MQTT响应机制更新状态
         
         Args:
             db: 数据库会话
@@ -323,36 +333,29 @@ class TaskStatusManager:
             # 获取总子任务数
             total_subtasks = sum(counters.values())
             
-            # 更新主任务状态
+            # 更新主任务状态 - 严格按照MQTT响应模式
+            logger.debug(f"任务 {task_id} 当前状态: {task.status}, 计算状态: {main_status}, 运行中子任务: {active_subtasks}/{total_subtasks}")
+            
+            # 更新任务状态
             task.status = main_status
+            
+            # 更新活跃子任务数量
             task.active_subtasks = active_subtasks
             task.total_subtasks = total_subtasks
-            
-            # 添加错误信息
-            error_count = counters.get(4, 0)  # 状态为4表示出错
-            completed_count = counters.get(3, 0)  # 状态为3表示已完成
-            stopped_count = counters.get(2, 0)  # 状态为2表示已停止
-            
-            # 根据状态添加错误信息
-            if main_status == 1:  # 运行中
-                if error_count > 0:
-                    task.error_message = f"部分子任务执行失败 ({error_count}/{total_subtasks})"
-                else:
-                    task.error_message = None
-            elif main_status == 3:  # 已完成
-                task.error_message = "所有子任务已正常完成"
-                task.completed_at = datetime.now()
-            elif main_status == 4:  # 出错
-                task.error_message = f"任务执行失败，有 {error_count}/{total_subtasks} 个子任务出错"
-            elif main_status == 2:  # 已停止
-                if error_count > 0:
-                    task.error_message = f"任务已停止，有 {error_count}/{total_subtasks} 个子任务出错"
-                else:
-                    task.error_message = "任务已停止"
-                    
             task.updated_at = datetime.now()
             
-            logger.debug(f"更新任务 {task_id} 状态为 {main_status}，活跃子任务: {active_subtasks}/{total_subtasks}")
+            # 根据主任务状态更新错误消息
+            if main_status == 2 and active_subtasks == 0:
+                # 所有子任务都不是运行中状态，且主任务为停止状态
+                task.error_message = "所有子任务已停止，任务已完成"
+                task.completed_at = datetime.now()
+                logger.info(f"任务 {task_id} 所有子任务已停止，已更新主任务状态为已停止")
+            elif main_status == 1:
+                # 主任务运行中
+                if task.error_message == "所有子任务已停止，任务已完成":
+                    task.error_message = None  # 清除之前的停止消息
+            
+            logger.debug(f"更新任务 {task_id} 状态为 {task.status}，活跃子任务: {active_subtasks}/{total_subtasks}")
             
         except Exception as e:
             logger.error(f"更新任务 {task_id} 状态到数据库失败: {str(e)}")
@@ -361,6 +364,9 @@ class TaskStatusManager:
     def _calculate_main_status(self, counters: Dict[int, int]) -> int:
         """
         根据子任务状态计数计算主任务状态
+        遵循严格的MQTT响应机制：
+        - 如果有任何运行中的子任务，主任务状态为运行中(1)
+        - 如果没有运行中的子任务，主任务状态为已停止(2)
         
         Args:
             counters: 状态计数字典
@@ -368,29 +374,15 @@ class TaskStatusManager:
         Returns:
             int: 主任务状态
         """
-        # 获取各状态的计数
-        running_count = counters.get(1, 0)  # 运行中
-        stopped_count = counters.get(2, 0)  # 已停止
-        completed_count = counters.get(3, 0)  # 已完成
-        error_count = counters.get(4, 0)  # 出错
-        total_count = sum(counters.values())
+        # 获取运行中的子任务数量
+        running_count = counters.get(1, 0)  # 状态为1表示运行中
         
-        # 计算主任务状态
         if running_count > 0:
             # 只要有运行中的子任务，主任务状态为运行中
             return 1
-        elif completed_count == total_count:
-            # 所有子任务都完成，主任务状态为已完成
-            return 3
-        elif error_count > 0:
-            # 有错误子任务且没有运行中的子任务，主任务状态为出错
-            return 4
-        elif stopped_count > 0:
-            # 有停止的子任务且没有运行中的子任务，主任务状态为已停止
-            return 2
         else:
-            # 其他情况，主任务状态为未启动
-            return 0
+            # 如果没有运行中的子任务，主任务状态为已停止
+            return 2
             
     async def _get_task_status_counters(self, task_id: int) -> Dict[int, int]:
         """

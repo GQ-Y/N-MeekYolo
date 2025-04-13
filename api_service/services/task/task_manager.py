@@ -256,13 +256,7 @@ class TaskManager:
                 if task.status == 1: # 运行中
                     logger.info(f"任务 {task_id} 已经在运行中")
                     return True, "任务已在运行中"
-                if task.status == 2: # 已停止
-                     logger.warning(f"任务 {task_id} 已停止，无法启动")
-                     return False, "任务已停止，无法启动"
-                if task.status == 3: # 已完成
-                     logger.warning(f"任务 {task_id} 已完成，无法启动")
-                     return False, "任务已完成，无法启动"
-
+                
                 logger.info(f"开始启动任务 {task_id}")
                 
                 # 获取需要启动的子任务（状态为0：未启动）
@@ -273,29 +267,9 @@ class TaskManager:
 
                 if not subtasks_to_start:
                     logger.info(f"任务 {task_id} 没有需要启动的子任务")
-                    # 检查是否所有子任务都已完成或出错
-                    all_subtasks = db_session.query(SubTask).filter(SubTask.task_id == task_id).all()
-                    if all(s.status in [3, 4] for s in all_subtasks): # 3:完成, 4:出错
-                         task.status = 3 if all(s.status == 3 for s in all_subtasks) else 4
-                         db_session.commit()
-                         await self.status_manager.sync_from_database(task_id) # 更新缓存
-                         logger.info(f"任务 {task_id} 所有子任务已处理，更新主任务状态为 {task.status}")
-                         return True, "任务所有子任务已处理"
-                    elif all(s.status == 2 for s in all_subtasks): # 2:已停止
-                        task.status = 2
-                        db_session.commit()
-                        await self.status_manager.sync_from_database(task_id)
-                        logger.info(f"任务 {task_id} 所有子任务已停止，更新主任务状态为 {task.status}")
-                        return True, "任务所有子任务已停止"
-                    else:
-                        # 可能有子任务正在运行中，或者状态不一致
-                        logger.warning(f"任务 {task_id} 状态异常，没有未启动的子任务，但主任务状态不是运行/完成/停止")
-                        # 强制同步一次状态
-                        await self.status_manager.sync_from_database(task_id)
-                        task_status_info = await self.status_manager.get_task_status(task_id)
-                        task.status = task_status_info.get("status", task.status)
-                        db_session.commit()
-                        return False, "任务状态异常，已尝试同步"
+                    # 不再根据子任务状态修改主任务状态，主任务仍保持为运行中
+                    db_session.commit()
+                    return True, "任务启动成功，无需要启动的子任务"
 
                 logger.info(f"任务 {task_id} 有 {len(subtasks_to_start)} 个子任务需要启动")
 
@@ -303,8 +277,8 @@ class TaskManager:
                 mqtt_client = await self.get_mqtt_client()
                 if not mqtt_client or not mqtt_client.is_connected():
                     logger.error(f"启动任务 {task_id} 失败：MQTT客户端未连接")
-                    # 可以在这里将任务标记为错误或等待状态
-                    task.status = 4 # 出错
+                    # 这种情况下仍然设置为停止，因为任务无法启动
+                    task.status = 2 # 已停止
                     task.error_message = "MQTT客户端未连接"
                     db_session.commit()
                     await self.status_manager.sync_from_database(task_id)
@@ -339,18 +313,16 @@ class TaskManager:
 
                     logger.info(f"为子任务 {subtask_id} 分配到节点 {node.id}")
                     
-                    # 更新子任务的节点信息
+                    # 注意：这里不直接更新子任务状态，只是准备发送
                     subtask.node_id = node.id
-                    subtask.analysis_task_id = f"subtask_{subtask_id}_{uuid.uuid4().hex[:8]}" # 生成唯一分析任务ID
-                    subtask.started_at = datetime.now()
+                    subtask.analysis_task_id = str(subtask_id) # 使用子任务ID作为分析任务ID
                     db_session.flush() # 确保节点ID等信息写入
 
                     # 构建任务配置
                     task_config = self._build_subtask_config(subtask, task, node)
 
-                    # 发送任务到节点
-                    # 注意：这里可以选择等待节点确认，或直接发送后依赖状态更新
-                    # 为了提高吞吐量，我们先直接发送，通过MQTT消息更新状态
+                    # 发送任务到节点，不直接修改子任务状态
+                    # 子任务状态将由MQTT消息响应后更新
                     success = mqtt_client.publish(
                         topic=f"{mqtt_client.config['topic_prefix']}/{node.mac_address}/task",
                         payload={
@@ -363,54 +335,40 @@ class TaskManager:
                     )
 
                     if success:
-                        # 更新子任务状态为运行中 (本地先更新，等待节点确认)
-                        # 使用 status_manager 更新，触发批处理
-                        await self.status_manager.update_subtask_status(task_id, subtask_id, 1)
+                        # 仅记录发送成功，不直接更新状态
                         successful_starts += 1
-                        logger.info(f"子任务 {subtask_id} 已发送到节点 {node.id}")
+                        logger.info(f"子任务 {subtask_id} 已发送到节点 {node.id}，等待节点响应")
                     else:
                         logger.error(f"发送子任务 {subtask_id} 到节点 {node.id} 失败")
                         # 将节点信息清除，等待下次分配
                         subtask.node_id = None
                         subtask.analysis_task_id = None
-                        subtask.started_at = None
                         # 无需更新状态，保持为0（未启动）
                         # 释放之前占用的节点资源
                         await self.node_manager.release_node(node.id, subtask_type_str)
                         failed_starts += 1
                 
                 db_session.commit()
-                logger.info(f"任务 {task_id} 启动完成: 成功启动 {successful_starts} 个子任务，失败 {failed_starts} 个")
+                logger.info(f"任务 {task_id} 启动完成: 成功发送 {successful_starts} 个子任务，失败 {failed_starts} 个")
                 
-                # 如果有失败的子任务，主任务可能需要标记为部分失败或继续运行
-                if failed_starts > 0 and successful_starts == 0:
-                     task.status = 4 # 如果一个都没成功启动，标记为错误
-                     task.error_message = f"所有 {failed_starts} 个子任务启动失败"
-                     db_session.commit()
-                     await self.status_manager.sync_from_database(task_id) # 强制同步状态
-                     return False, "所有子任务启动失败"
-                elif failed_starts > 0:
-                     task.error_message = f"部分子任务启动失败 ({failed_starts}/{len(subtasks_to_start)})"
-                     db_session.commit()
-                     # 状态仍然是运行中(1)
-                     
-                return True, f"任务启动完成，成功 {successful_starts}，失败 {failed_starts}"
+                # 无论子任务发送情况如何，主任务状态保持为运行中(1)
+                # 移除根据子任务启动结果修改主任务状态的逻辑
+                return True, f"任务启动完成，已发送 {successful_starts} 个子任务，失败 {failed_starts} 个"
 
             except Exception as e:
                 db_session.rollback()
                 logger.error(f"启动任务 {task_id} 时发生错误: {str(e)}")
                 import traceback
                 logger.error(traceback.format_exc())
-                # 尝试将任务标记为错误
+                # 仅将主任务标记为停止
                 try:
                     task = db_session.query(Task).filter(Task.id == task_id).first()
                     if task:
-                         task.status = 4
+                         task.status = 2  # 已停止
                          task.error_message = f"启动任务时出错: {str(e)}"
                          db_session.commit()
-                         await self.status_manager.sync_from_database(task_id)
                 except Exception as finalize_e:
-                     logger.error(f"标记任务 {task_id} 为错误状态时失败: {finalize_e}")
+                     logger.error(f"标记任务 {task_id} 为已停止状态时失败: {finalize_e}")
                      
                 return False, f"启动任务时出错: {str(e)}"
             finally:
@@ -494,81 +452,100 @@ class TaskManager:
                     logger.info(f"任务 {task_id} 状态为 {current_status}，无需取消")
                     return True, f"任务已{('停止' if current_status == 2 else '完成')}"
                     
-                # 更新主任务状态为已停止 (2)
-                task.status = 2
-                task.stopped_at = datetime.now()
+                # 1. 更新任务状态为已停止
+                task.status = 2  # 已停止
+                task.completed_at = datetime.now()
                 if user_initiated:
-                    task.error_message = "任务由用户手动停止"
+                    task.error_message = "任务被用户取消"
                 else:
                     task.error_message = "任务被系统取消"
                 
-                # 查找正在运行的子任务 (状态 1)
-                running_subtasks = db_session.query(SubTask).filter(
-                    SubTask.task_id == task_id,
-                    SubTask.status == 1
+                # 提交主任务状态变更
+                db_session.commit()
+                
+                # 查找所有子任务，无论状态如何
+                subtasks = db_session.query(SubTask).filter(
+                    SubTask.task_id == task_id
                 ).all()
                 
-                logger.info(f"任务 {task_id} 有 {len(running_subtasks)} 个运行中的子任务需要停止")
+                logger.info(f"任务 {task_id} 有 {len(subtasks)} 个子任务，将向其发送停止命令")
 
                 # 获取MQTT客户端
                 mqtt_client = await self.get_mqtt_client()
                 if not mqtt_client or not mqtt_client.is_connected():
-                     logger.warning(f"MQTT客户端未连接，无法向节点发送停止命令，仅更新数据库状态")
-                     # 即使MQTT未连接，也要继续更新数据库状态并将子任务标记为停止
+                     logger.warning(f"MQTT客户端未连接，无法向节点发送停止命令")
+                     return True, "任务已标记为已停止，但MQTT客户端未连接，无法发送停止命令到节点"
 
-                stopped_count = 0
-                for subtask in running_subtasks:
+                # 只发送停止命令，不修改子任务状态（由节点响应后更新）
+                command_sent_count = 0
+                subtasks_without_node = 0
+                subtasks_without_analysis_id = 0
+                nodes_not_found = 0
+                nodes_without_mac = 0
+                
+                for subtask in subtasks:
                     node_id = subtask.node_id
                     analysis_task_id = subtask.analysis_task_id # 节点侧的任务ID
                     
-                    # 1. 向节点发送停止命令 (如果MQTT可用)
-                    if mqtt_client and mqtt_client.is_connected() and node_id and analysis_task_id:
-                        node = db_session.query(Node).filter(Node.id == node_id).first()
-                        if node and node.mac_address:
-                            logger.info(f"向节点 {node.id} ({node.mac_address}) 发送停止子任务 {subtask.id} (分析ID: {analysis_task_id}) 的命令")
-                            # 发送停止命令，不强制等待响应
-                            mqtt_client.publish(
-                                topic=f"{mqtt_client.config['topic_prefix']}/{node.mac_address}/command",
-                                payload={
-                                    "command": "stop_subtask",
-                                    "params": {"subtask_id": analysis_task_id},
-                                    "timestamp": time.time()
-                                },
-                                qos=1
-                            )
-                        else:
-                            logger.warning(f"无法找到子任务 {subtask.id} 关联的节点 {node_id} 或节点MAC地址")
-
-                    # 2. 更新子任务状态为停止 (2) - 使用状态管理器
-                    await self.status_manager.update_subtask_status(task_id, subtask.id, 2)
-                    
-                    # 3. 释放节点资源
-                    if node_id:
-                        subtask_type_str = "stream"
-                        if subtask.type == 1: subtask_type_str = "image"
-                        elif subtask.type == 2: subtask_type_str = "video"
-                        await self.node_manager.release_node(node_id, subtask_type_str)
-                        logger.info(f"已释放子任务 {subtask.id} 占用的节点 {node_id} 资源")
+                    # 添加详细的诊断日志
+                    if not node_id:
+                        logger.warning(f"子任务 {subtask.id} 没有关联的节点，无法发送停止命令")
+                        subtasks_without_node += 1
+                        continue
                         
-                    stopped_count += 1
-
-                # 处理非运行状态的子任务（例如未启动0, 出错4），也标记为停止2
-                other_subtasks = db_session.query(SubTask).filter(
-                    SubTask.task_id == task_id,
-                    SubTask.status.in_([0, 4]) # 0:未启动, 4:出错
-                ).all()
-                for subtask in other_subtasks:
-                    await self.status_manager.update_subtask_status(task_id, subtask.id, 2)
-                    stopped_count += 1
-
-                # 提交数据库更改
-                db_session.commit()
+                    if not analysis_task_id:
+                        logger.warning(f"子任务 {subtask.id} 没有分析任务ID，无法发送停止命令")
+                        subtasks_without_analysis_id += 1
+                        continue
+                    
+                    # 只有有节点关联的任务才发送停止命令
+                    node = db_session.query(Node).filter(Node.id == node_id).first()
+                    if not node:
+                        logger.warning(f"子任务 {subtask.id} 关联的节点 {node_id} 在数据库中找不到")
+                        nodes_not_found += 1
+                        continue
+                        
+                    if not node.mac_address:
+                        logger.warning(f"子任务 {subtask.id} 关联的节点 {node_id} 没有MAC地址")
+                        nodes_without_mac += 1
+                        continue
+                        
+                    logger.info(f"向节点 {node.id} ({node.mac_address}) 发送停止子任务 {subtask.id} (分析ID: {analysis_task_id}) 的命令")
+                    # 发送停止命令，不强制等待响应
+                    mqtt_client.publish(
+                        topic=f"{mqtt_client.config['topic_prefix']}/{node.mac_address}/command",
+                        payload={
+                            "command": "stop_subtask",
+                            "params": {"subtask_id": analysis_task_id},
+                            "timestamp": time.time()
+                        },
+                        qos=1
+                    )
+                    command_sent_count += 1
                 
-                # 确保状态管理器执行一次批处理以更新主任务状态
-                await self.status_manager._perform_batch_update()
-
-                logger.info(f"任务 {task_id} 已成功取消，共停止 {stopped_count} 个子任务")
-                return True, "任务已成功取消"
+                # 添加诊断信息到日志
+                logger.info(f"任务 {task_id} 已成功取消，停止命令统计：")
+                logger.info(f"总子任务数: {len(subtasks)}")
+                logger.info(f"发送停止命令: {command_sent_count}")
+                logger.info(f"无节点关联: {subtasks_without_node}")
+                logger.info(f"无分析任务ID: {subtasks_without_analysis_id}")
+                logger.info(f"节点不存在: {nodes_not_found}")
+                logger.info(f"节点无MAC地址: {nodes_without_mac}")
+                
+                if command_sent_count == 0:
+                    # 如果没有发送停止命令，提供更明确的返回消息
+                    if subtasks_without_node > 0:
+                        return True, f"任务已标记为已停止，但没有关联节点的子任务无法发送停止命令 ({subtasks_without_node}/{len(subtasks)})"
+                    elif subtasks_without_analysis_id > 0:
+                        return True, f"任务已标记为已停止，但没有分析任务ID的子任务无法发送停止命令 ({subtasks_without_analysis_id}/{len(subtasks)})"
+                    elif nodes_not_found > 0:
+                        return True, f"任务已标记为已停止，但找不到关联节点的子任务无法发送停止命令 ({nodes_not_found}/{len(subtasks)})"
+                    elif nodes_without_mac > 0:
+                        return True, f"任务已标记为已停止，但节点没有MAC地址的子任务无法发送停止命令 ({nodes_without_mac}/{len(subtasks)})"
+                    else:
+                        return True, "任务已标记为已停止，但无法发送停止命令"
+                
+                return True, f"任务已成功取消，已发送 {command_sent_count} 个停止命令到节点"
 
             except Exception as e:
                 db_session.rollback()

@@ -1,5 +1,5 @@
 """
-任务 CRUD 操作
+任务相关操作
 """
 from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional, Dict, Any, Tuple
@@ -610,10 +610,10 @@ async def start_task(
                     
                     # 确保分析任务ID为纯数字格式
                     if not subtask.analysis_task_id:
-                        # 生成分析任务ID: 使用主任务ID
-                        analysis_task_id = str(task_id)
+                        # 使用子任务ID作为分析任务ID
+                        analysis_task_id = str(subtask.id)
                         subtask.analysis_task_id = analysis_task_id
-                        logger.info(f"为子任务 {subtask.id} 设置分析任务ID为主任务ID: {analysis_task_id}")
+                        logger.info(f"为子任务 {subtask.id} 设置分析任务ID为子任务ID: {analysis_task_id}")
                     else:
                         analysis_task_id = subtask.analysis_task_id
                     
@@ -804,7 +804,9 @@ async def stop_task(
     db: Session,
     task_id: int
 ) -> Tuple[bool, str]:
-    """停止任务"""
+    """
+    停止任务 - 发送停止命令，不直接更新任务状态，而是由MQTT回调处理
+    """
     # 使用 joinedload 获取任务及其关联数据
     task = db.query(Task)\
         .options(
@@ -816,73 +818,187 @@ async def stop_task(
     if not task:
         return False, "任务不存在"
 
-    # 检查任务状态
-    if task.status == 2:  # 如果任务已经是已停止状态(2)，则不执行任何操作
-        logger.info(f"任务 {task_id} 已经是已停止状态，无需再次停止")
-        return False, f"任务 {task_id} 已经是已停止状态，无需再次停止"
-
+    # 查找所有子任务，不管它们当前的状态如何
+    subtasks = task.sub_tasks
+    
+    # 记录子任务数量，用于日志
+    total_subtasks = len(subtasks)
+    # 原来只选择运行中的子任务，现在我们选择所有子任务
+    # running_subtasks = [subtask for subtask in subtasks if subtask.status == 1]
+    # running_count = len(running_subtasks)
+    
+    # 修改为选择所有子任务，无论状态如何
+    all_subtasks = subtasks
+    running_count = len([subtask for subtask in subtasks if subtask.status == 1])
+    
+    logger.info(f"任务 {task_id} 包含 {total_subtasks} 个子任务，其中 {running_count} 个处于运行中状态")
+    logger.info(f"无论状态如何，都将尝试停止所有 {total_subtasks} 个子任务")
+    
     # 导入 AnalysisService
     from services.http.analysis import AnalysisService
     analysis_service = AnalysisService()
 
-    # 更新任务状态
-    task.status = 2  # 已停止状态(2)
-    task.active_subtasks = 0
-    # 设置明确的错误消息，表明是用户手动停止的任务
-    task.error_message = "任务由用户手动停止"
+    # 获取Redis实例，用于设置停止请求标记
+    from core.redis_manager import RedisManager
+    redis = RedisManager.get_instance()
+
+    # 在Redis中记录一个全局的停止请求标记，无论是否有运行中的子任务
+    global_stop_key = f"global_stop_request:{task_id}"
+    await redis.set_value(global_stop_key, "1", ex=1800)  # 30分钟过期
+    logger.info(f"已设置任务 {task_id} 的全局停止请求标记")
     
-    # 逐个停止子任务
-    stopped_count = 0
-    for subtask in task.sub_tasks:
-        if subtask.status == 1:  # 只停止运行中的子任务(1)
-            try:
-                # 更新子任务状态
-                subtask.status = 2  # 已停止状态(2)
-                subtask.completed_at = datetime.now()
-                subtask.error_message = "子任务由用户手动停止"
-                
-                # 如果有节点，更新节点任务计数
-                if subtask.node_id:
-                    node = db.query(Node).filter(Node.id == subtask.node_id).first()
-                    if node and node.stream_task_count > 0:
-                        node.stream_task_count -= 1
-                
-                # 如果有mqtt节点，也要更新mqtt节点任务计数
-                if subtask.mqtt_node_id:
-                    mqtt_node = db.query(MQTTNode).filter(MQTTNode.id == subtask.mqtt_node_id).first()
-                    if mqtt_node and mqtt_node.task_count > 0:
-                        mqtt_node.task_count -= 1
-                        logger.info(f"减少MQTT节点 {mqtt_node.mac_address} 的任务计数")
-                
-                # 如果有分析任务ID，调用分析服务停止任务
-                if subtask.analysis_task_id:
-                    try:
-                        if subtask.node_id:
-                            # 传递节点ID，确保使用正确的节点停止任务
-                            await analysis_service.stop_task(subtask.analysis_task_id, subtask.node_id)
-                            logger.info(f"已停止子任务 {subtask.id} 的分析任务 {subtask.analysis_task_id}")
-                        elif subtask.mqtt_node_id:
-                            # 传递分析任务ID，由analysis_service判断使用哪种方式停止任务
-                            logger.info(f"尝试停止MQTT子任务 {subtask.id}，分析任务ID: {subtask.analysis_task_id}")
-                            await analysis_service.stop_task(subtask.analysis_task_id)
-                            logger.info(f"已停止MQTT子任务 {subtask.id} 的分析任务 {subtask.analysis_task_id}")
-                        else:
-                            # 如果既没有node_id也没有mqtt_node_id，只传递分析任务ID
-                            await analysis_service.stop_task(subtask.analysis_task_id)
-                            logger.info(f"已停止子任务 {subtask.id} 的分析任务 {subtask.analysis_task_id}")
-                    except Exception as e:
-                        logger.error(f"停止子任务 {subtask.id} 的分析任务失败: {str(e)}")
-                        # 虽然停止分析任务可能失败，但我们仍认为子任务已停止
-                
-                stopped_count += 1
-                
-            except Exception as e:
-                logger.error(f"停止子任务 {subtask.id} 失败: {str(e)}")
-                continue
+    # 发送停止命令的计数
+    stop_commands_sent = 0
     
+    # 对所有子任务发送停止命令，无论其当前状态
+    for subtask in all_subtasks:
+        try:
+            # 检查是否需要重置状态
+            if subtask.status == 2:  # 已停止状态
+                # 但我们仍然要发送停止命令，这可能意味着任务实际上仍在运行
+                # 为了保证后续MQTT回调处理能正确更新状态，我们先重置状态为运行中
+                logger.warning(f"子任务 {subtask.id} 状态为已停止(2)，但仍将发送停止命令。重置状态为运行中(1)以确保正确处理")
+                subtask.status = 1  # 将状态重置为运行中
+                subtask.stopped_at = None  # 清除停止时间
+                subtask.error_message = "状态已重置为运行中，等待停止命令确认"
+                # 确保在Redis中也正确设置状态
+                from core.task_status_manager import StatusFlag
+                key = f"task_status:{subtask.id}"
+                await redis.hset_dict(key, {"status": StatusFlag.RUNNING.value})
+                logger.info(f"已将子任务 {subtask.id} 状态重置为运行中(1)，以确保停止命令能被正确处理")
+            
+            # 在Redis中设置停止请求标记，30分钟过期
+            stop_request_key = f"pending_stop_request:{subtask.id}"
+            await redis.set_value(stop_request_key, "1", ex=1800)
+            logger.info(f"已为子任务 {subtask.id}（状态:{subtask.status}）设置停止请求标记")
+            
+            # 对所有子任务发送停止命令，无论当前状态
+            if subtask.analysis_task_id:
+                try:
+                    # 发送停止命令
+                    if subtask.node_id:
+                        # HTTP模式：传递节点ID，确保使用正确的节点停止任务
+                        await analysis_service.stop_task(subtask.analysis_task_id, subtask.node_id)
+                        logger.info(f"已发送停止命令给HTTP子任务 {subtask.id}（状态:{subtask.status}）的分析任务 {subtask.analysis_task_id}")
+                        stop_commands_sent += 1
+                    elif subtask.mqtt_node_id:
+                        # MQTT模式：传递分析任务ID，由analysis_service判断使用哪种方式停止任务
+                        logger.info(f"尝试停止MQTT子任务 {subtask.id}（状态:{subtask.status}），分析任务ID: {subtask.analysis_task_id}")
+                        await analysis_service.stop_task(subtask.analysis_task_id)
+                        logger.info(f"已发送停止命令给MQTT子任务 {subtask.id}（状态:{subtask.status}）的分析任务 {subtask.analysis_task_id}")
+                        stop_commands_sent += 1
+                    else:
+                        # 如果既没有node_id也没有mqtt_node_id，只传递分析任务ID
+                        await analysis_service.stop_task(subtask.analysis_task_id)
+                        logger.info(f"已发送停止命令给子任务 {subtask.id}（状态:{subtask.status}）的分析任务 {subtask.analysis_task_id}")
+                        stop_commands_sent += 1
+                except Exception as e:
+                    logger.error(f"发送停止命令给子任务 {subtask.id}（状态:{subtask.status}）的分析任务失败: {str(e)}")
+                    # 清除停止请求标记
+                    await redis.delete_key(stop_request_key)
+                    logger.info(f"由于发送失败，已清除子任务 {subtask.id} 的停止请求标记")
+        except Exception as e:
+            logger.error(f"处理子任务 {subtask.id}（状态:{subtask.status}）停止过程失败: {str(e)}")
+    
+    # 任务状态更新由MQTT响应处理逻辑负责，确保状态更新和实际任务停止保持一致
     db.commit()
     
-    return True, f"成功停止 {stopped_count}/{len(task.sub_tasks)} 个子任务"
+    # 如果有设置停止请求标记的子任务，启动一个后台任务检查是否在合理时间内停止
+    if running_count > 0:
+        try:
+            # 创建一个异步任务，在一定时间后检查子任务状态
+            # 注意：这里使用asyncio.create_task而不是直接await，以避免阻塞当前函数
+            from config.constants import TASK_STOP_TIMEOUT
+            import asyncio
+            
+            check_timeout = 30  # 默认超时时间（秒）
+            if hasattr(settings, 'TASK_STOP_TIMEOUT'):
+                check_timeout = settings.TASK_STOP_TIMEOUT
+            
+            # 创建异步任务检查停止状态
+            asyncio.create_task(
+                _check_task_stop_timeout(task_id, [s.id for s in all_subtasks], check_timeout)
+            )
+            logger.info(f"已创建后台任务，将在 {check_timeout} 秒后检查任务 {task_id} 的停止状态")
+        except Exception as e:
+            logger.error(f"创建超时检查任务失败: {str(e)}")
+    
+    if running_count == 0:
+        return True, "已设置停止请求标记，等待确认"
+    else:
+        return True, f"已发送 {stop_commands_sent} 个停止命令到节点，等待节点响应"
+
+async def _check_task_stop_timeout(task_id: int, subtask_ids: List[int], timeout: int = 30):
+    """
+    检查任务是否在指定超时时间内停止，如果没有则强制更新状态
+    
+    Args:
+        task_id: 主任务ID
+        subtask_ids: 子任务ID列表
+        timeout: 超时时间（秒）
+    """
+    import asyncio
+    from datetime import datetime
+    
+    logger.info(f"任务 {task_id} 停止超时检查启动，将等待 {timeout} 秒")
+    
+    # 等待指定的超时时间
+    await asyncio.sleep(timeout)
+    
+    # 超时后检查任务状态
+    from core.database import SessionLocal
+    from models.database import SubTask, Task, MQTTNode
+    
+    db = SessionLocal()
+    try:
+        # 查询任务的当前状态
+        task = db.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            logger.warning(f"超时检查时未找到任务 {task_id}，可能已被删除")
+            return
+        
+        # 查询所有待检查的子任务
+        uncompleted_subtasks = db.query(SubTask).filter(
+            SubTask.id.in_(subtask_ids),
+            SubTask.status == 1  # 仍在运行中的子任务
+        ).all()
+        
+        if not uncompleted_subtasks:
+            logger.info(f"任务 {task_id} 的所有子任务已正常停止，无需强制更新")
+            return
+        
+        # 如果还有未完成的子任务，则强制更新其状态
+        logger.warning(f"任务 {task_id} 的 {len(uncompleted_subtasks)} 个子任务在 {timeout} 秒内未停止，将强制更新状态")
+        
+        for subtask in uncompleted_subtasks:
+            logger.info(f"强制更新子任务 {subtask.id} 的状态为已停止")
+            subtask.status = 2  # 已停止状态
+            subtask.completed_at = datetime.now()
+            subtask.error_message = f"停止命令超时，系统强制更新状态"
+            
+            # 更新MQTT节点任务计数
+            if subtask.mqtt_node_id:
+                mqtt_node = db.query(MQTTNode).filter(MQTTNode.id == subtask.mqtt_node_id).first()
+                if mqtt_node and mqtt_node.task_count > 0:
+                    mqtt_node.task_count -= 1
+                    logger.info(f"减少MQTT节点 {mqtt_node.mac_address} 的任务计数")
+        
+        # 更新主任务的统计信息
+        result, msg = update_task_status_from_subtasks(db, task_id)
+        if result:
+            logger.info(f"成功更新任务 {task_id} 的统计信息: {msg}")
+        else:
+            logger.error(f"更新任务 {task_id} 的统计信息失败: {msg}")
+        
+        # 提交更改
+        db.commit()
+        logger.info(f"已强制更新任务 {task_id} 及其子任务的状态")
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"超时检查和强制更新任务 {task_id} 状态时出错: {str(e)}")
+    finally:
+        db.close()
 
 def update_subtask_status(
     db: Session,
@@ -920,7 +1036,8 @@ def update_task_status_from_subtasks(
     task_id: int
 ) -> Tuple[bool, str]:
     """
-    根据子任务状态更新主任务状态
+    仅根据子任务状态更新主任务的subtask统计信息，不修改主任务状态
+    主任务状态只受人为控制
     
     Args:
         db: 数据库会话
@@ -938,66 +1055,35 @@ def update_task_status_from_subtasks(
         
         # 检查子任务数量
         if total_subtasks == 0:
-            # 没有子任务，主任务状态为未启动(0)
-            task.status = 0
+            # 没有子任务，但不修改主任务状态
             task.active_subtasks = 0
             task.total_subtasks = 0
             db.commit()
             return True, "任务没有子任务"
         
-        # 当前子任务状态计数
+        # 简化：只关注运行中状态，其他状态统一处理为已停止
         running_count = 0  # 运行中的子任务数
-        completed_count = 0  # 已完成的子任务数
-        error_count = 0  # 出错的子任务数
-        stopped_count = 0  # 已停止的子任务数
         
-        # 统计子任务状态
+        # 统计运行中的子任务状态
         for subtask in subtasks:
             if subtask.status == 1:  # 运行中
                 running_count += 1
-            elif subtask.status == 2:  # 已停止
-                stopped_count += 1
-            elif subtask.status == 3:  # 已完成
-                completed_count += 1
-            elif subtask.status == 4:  # 出错
-                error_count += 1
         
-        # 更新主任务状态
+        # 更新任务基本信息
         task.total_subtasks = total_subtasks
-        
-        # 修正active_subtasks为实际运行中的子任务数量
         task.active_subtasks = running_count
         
-        # 确保active_subtasks不会超过total_subtasks
-        if task.active_subtasks > task.total_subtasks:
-            logger.warning(f"任务 {task_id} 活跃子任务数 {task.active_subtasks} 超过总子任务数 {task.total_subtasks}，强制修正")
-            task.active_subtasks = task.total_subtasks
+        # 不再根据子任务状态更新主任务状态
+        # 主任务状态只受人为控制（启动和停止操作）
         
-        # 根据子任务状态确定主任务状态
-        if running_count > 0:
-            # 只要有运行中的子任务，主任务状态为运行中(1)
-            task.status = 1
-        elif completed_count == total_subtasks:
-            # 所有子任务都完成，主任务状态为已完成(3)
-            task.status = 3
-            task.completed_at = datetime.now()
-        elif error_count > 0 and running_count == 0:
-            # 有错误子任务且没有运行中的子任务，主任务状态为出错(4)
-            task.status = 4
-        elif stopped_count > 0 and running_count == 0:
-            # 有停止的子任务且没有运行中的子任务，主任务状态为已停止(2)
-            task.status = 2
-        else:
-            # 其他情况，主任务状态不变
-            pass
-        
-        # 更新任务状态
+        # 提交更改
         db.commit()
         
-        return True, f"已更新任务状态: status={task.status}, active={task.active_subtasks}, total={task.total_subtasks}"
+        return True, f"已更新任务统计: active={task.active_subtasks}, total={task.total_subtasks}"
     except Exception as e:
         db.rollback()
-        return False, f"更新任务状态失败: {str(e)}"
+        logger.error(f"更新任务统计失败: {str(e)}")
+        return False, f"更新任务统计失败: {str(e)}"
 
 def normalize_task_status(status: int) -> int:
     """

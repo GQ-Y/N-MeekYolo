@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 from fastapi import APIRouter, Depends, HTTPException, Body, Query, BackgroundTasks
 from pydantic import BaseModel
 
@@ -11,7 +11,7 @@ from services.task.task_priority_manager import get_task_priority_manager
 from services.core.smart_task_scheduler import get_smart_task_scheduler
 
 router = APIRouter(
-    prefix="/api/mqtt/tasks",
+    prefix="/api/v1/mqtt-tasks",
     tags=["MQTT任务管理"]
 )
 
@@ -40,13 +40,13 @@ class TaskStatusResponse(BaseModel):
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     node_info: Optional[Dict[str, Any]] = None
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: Optional[Any] = None
     priority: Optional[int] = None
     attempts: Optional[int] = None
 
 class QueueStatusResponse(BaseModel):
     total_tasks: int
-    queues: Dict[str, int]
+    queues: Dict[Union[str, int], int]
     oldest_task_age: Optional[float] = None
     newest_task_age: Optional[float] = None
 
@@ -56,6 +56,10 @@ class SchedulerStatusResponse(BaseModel):
     task_types: List[str]
     last_sync: float
     queue_status: QueueStatusResponse
+
+class TaskStatusRequest(BaseModel):
+    task_id: str
+    subtask_id: str
 
 # 路由定义
 @router.post("/dispatch", response_model=Dict[str, Any])
@@ -124,10 +128,9 @@ async def cancel_task(
         
     return result
 
-@router.get("/status/{task_id}/{subtask_id}", response_model=TaskStatusResponse)
+@router.post("/status", response_model=TaskStatusResponse)
 async def get_task_status(
-    task_id: str,
-    subtask_id: str,
+    request: TaskStatusRequest,
     task_manager: MQTTTaskManager = Depends(get_mqtt_task_manager)
 ):
     """
@@ -137,11 +140,49 @@ async def get_task_status(
     - task_id: 任务ID
     - subtask_id: 子任务ID
     """
+    result = await task_manager.get_task_status(request.task_id, request.subtask_id)
+    
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    
+    # 确保metadata是字典类型
+    if result.get("metadata") is not None and not isinstance(result["metadata"], dict):
+        try:
+            # 尝试将metadata转换为字典
+            result["metadata"] = dict(result["metadata"]) if result["metadata"] else {}
+        except (TypeError, ValueError):
+            # 如果无法转换，则设置为空字典
+            result["metadata"] = {}
+        
+    return result
+
+@router.get("/status", response_model=TaskStatusResponse)
+async def get_task_status_by_query(
+    task_id: str = Query(..., description="任务ID"),
+    subtask_id: str = Query(..., description="子任务ID"),
+    task_manager: MQTTTaskManager = Depends(get_mqtt_task_manager)
+):
+    """
+    获取任务状态（使用查询参数）
+    
+    参数:
+    - task_id: 任务ID
+    - subtask_id: 子任务ID
+    """
     result = await task_manager.get_task_status(task_id, subtask_id)
     
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
-        
+    
+    # 确保metadata是字典类型
+    if result.get("metadata") is not None and not isinstance(result["metadata"], dict):
+        try:
+            # 尝试将metadata转换为字典
+            result["metadata"] = dict(result["metadata"]) if result["metadata"] else {}
+        except (TypeError, ValueError):
+            # 如果无法转换，则设置为空字典
+            result["metadata"] = {}
+    
     return result
 
 @router.get("/queue/status", response_model=QueueStatusResponse)
@@ -151,7 +192,13 @@ async def get_queue_status(
     """
     获取任务队列状态
     """
-    return await priority_manager.get_queue_status()
+    result = await priority_manager.get_queue_status()
+    
+    # 确保queues的键是字符串类型
+    if "queues" in result:
+        result["queues"] = {str(k): v for k, v in result["queues"].items()}
+    
+    return result
 
 @router.get("/scheduler/status", response_model=SchedulerStatusResponse)
 async def get_scheduler_status(
@@ -160,7 +207,13 @@ async def get_scheduler_status(
     """
     获取任务调度器状态
     """
-    return await task_scheduler.get_scheduler_status()
+    result = await task_scheduler.get_scheduler_status()
+    
+    # 确保queue_status中的queues键是字符串类型
+    if "queue_status" in result and "queues" in result["queue_status"]:
+        result["queue_status"]["queues"] = {str(k): v for k, v in result["queue_status"]["queues"].items()}
+    
+    return result
 
 @router.post("/scheduler/sync-nodes", response_model=Dict[str, Any])
 async def sync_nodes(
@@ -172,9 +225,12 @@ async def sync_nodes(
     await task_scheduler.sync_nodes_from_db(force=True)
     return {"success": True, "message": "节点信息已同步"}
 
+class ProcessPendingRequest(BaseModel):
+    batch_size: int = 10
+
 @router.post("/process-pending", response_model=Dict[str, Any])
 async def process_pending_tasks(
-    batch_size: int = Query(10, description="一次处理的最大任务数量"),
+    request: ProcessPendingRequest,
     task_manager: MQTTTaskManager = Depends(get_mqtt_task_manager)
 ):
     """
@@ -183,7 +239,7 @@ async def process_pending_tasks(
     参数:
     - batch_size: 一次处理的最大任务数量
     """
-    processed = await task_manager._process_pending_tasks(batch_size)
+    processed = await task_manager._process_pending_tasks(request.batch_size)
     return {
         "success": True, 
         "processed_count": processed,

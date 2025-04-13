@@ -1,26 +1,31 @@
+"""
+MQTT客户端
+"""
 import json
 import time
 import uuid
+import ssl
 import logging
-from typing import Dict, Any, Callable, List, Optional, Tuple
-from paho.mqtt import client as mqtt_client
-from sqlalchemy.orm import Session
+import signal
+import threading
+import asyncio
+from typing import Dict, Any, List, Callable, Optional, Tuple, Set
+from datetime import datetime
+from paho.mqtt import client as mqtt
 from core.database import SessionLocal
+from models.database import MQTTNode, SubTask
+from sqlalchemy.orm import Session
 from crud.mqtt_node import MQTTNodeCRUD
 from crud.task import TaskCRUD
-from models.database import MQTTNode, SubTask  # 显式导入MQTTNode模型
 import socket
 import platform
 import psutil
-import traceback  # 添加traceback模块用于打印详细错误
-import asyncio
-from datetime import datetime
-import ssl
-import threading
+import traceback
 from shared.utils.logger import setup_logger
 from .mqtt_message_processor import MQTTMessageProcessor
 
-logger = setup_logger(__name__)
+# 设置logger
+logger = logging.getLogger(__name__)
 
 class MQTTClient:
     """
@@ -61,11 +66,11 @@ class MQTTClient:
         self.is_api_service = self.client_id.startswith('api_service-')
         
         # 兼容paho-mqtt 2.0版本
-        self.client = mqtt_client.Client(
+        self.client = mqtt.Client(
             client_id=self.client_id,
-            callback_api_version=mqtt_client.CallbackAPIVersion.VERSION1,  # 使用旧版API
+            callback_api_version=mqtt.CallbackAPIVersion.VERSION1,  # 使用旧版API
             clean_session=True,
-            protocol=mqtt_client.MQTTv311,
+            protocol=mqtt.MQTTv311,
             transport="tcp"
         )
         
@@ -276,17 +281,29 @@ class MQTTClient:
     
     def _on_message(self, client, userdata, msg):
         """
-        消息接收回调函数
+        MQTT消息回调函数
         """
         try:
+            # 记录接收到的消息
             topic = msg.topic
-            payload = json.loads(msg.payload.decode())
+            payload = msg.payload.decode('utf-8')
             
-            logger.debug(f"接收到消息: Topic={topic}, Payload={payload}")
+            # 对大消息做日志截断
+            log_payload = payload
+            if len(log_payload) > 200:
+                log_payload = log_payload[:200] + "..."
+            logger.debug(f"接收到消息: 主题={topic}, 负载={log_payload}")
             
-            # 检查是否是等待的响应
-            if isinstance(payload, dict) and "message_id" in payload:
-                message_id = payload["message_id"]
+            # 尝试解析JSON
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                logger.warning(f"接收到非JSON消息: {payload}")
+                
+            # 检查是否是消息响应
+            if isinstance(payload, dict) and 'message_id' in payload:
+                message_id = payload.get('message_id')
+                logger.debug(f"消息ID: {message_id}")
                 
                 with self.lock:
                     if message_id in self.waiting_messages:
@@ -296,13 +313,32 @@ class MQTTClient:
                         self.waiting_messages[message_id].set()
                         return
             
+            # 处理新的cmd_reply响应格式
+            if isinstance(payload, dict) and payload.get('response_type') == 'cmd_reply':
+                message_uuid = payload.get('message_uuid')
+                logger.info(f"接收到命令响应消息: {json.dumps(payload, ensure_ascii=False)[:200]}...")
+                
+                # 将消息放入处理队列
+                from services.mqtt.mqtt_message_processor import MQTTMessageProcessor
+                processor = MQTTMessageProcessor.get_instance()
+                processor.add_message(topic, payload, self._handle_config_reply)
+                logger.info(f"cmd_reply消息已加入处理队列，等待处理: {message_uuid}")
+                return
+            
             # 处理节点连接消息
             if topic == f"{self.config['topic_prefix']}connection":
                 self._handle_connection(topic, payload)
             
             # 处理节点配置回复
             elif topic == f"{self.config['topic_prefix']}device_config_reply":
-                self._handle_config_reply(payload)
+                # 不再直接使用asyncio.create_task()
+                # 改用将消息放入队列或使用现有的asyncio事件循环处理
+                from services.mqtt.mqtt_message_processor import MQTTMessageProcessor
+                processor = MQTTMessageProcessor.get_instance()
+                
+                # 将消息加入处理队列，而不是直接调用异步处理
+                processor.add_message(topic, payload, self._handle_config_reply)
+                logger.debug(f"设备配置回复消息已加入处理队列，等待处理: {payload.get('message_uuid', 'unknown')}")
             
             # 处理心跳消息（特殊处理）
             elif "/status" in topic and isinstance(payload, dict) and payload.get('type') == 'heartbeat':
@@ -325,6 +361,15 @@ class MQTTClient:
                     logger.error(f"处理主题回调时出错: {e}")
         except Exception as e:
             logger.error(f"处理消息时出错: {e}")
+            logger.error(traceback.format_exc())
+    
+    # 添加一个异步包装方法，用于调用实际的异步处理函数
+    async def _handle_config_reply_async(self, payload: Dict[str, Any]):
+        """异步包装方法，用于安全地调用_handle_config_reply"""
+        try:
+            await self._handle_config_reply(payload)
+        except Exception as e:
+            logger.error(f"异步处理配置回复时出错: {e}")
             logger.error(traceback.format_exc())
     
     def _get_matched_handlers(self, topic: str) -> List[Callable]:
@@ -563,7 +608,7 @@ class MQTTClient:
             logger.error(f"处理节点断开连接失败：{e}")
             logger.error(traceback.format_exc())
     
-    def _handle_config_reply(self, payload: Dict[str, Any]):
+    async def _handle_config_reply(self, payload: Dict[str, Any]):
         """
         处理节点配置回复消息
         """
@@ -577,6 +622,7 @@ class MQTTClient:
             message_id = payload.get('message_id')
             message_uuid = payload.get('message_uuid')
             status = payload.get('status')
+            mac_address = payload.get('mac_address')
             
             if message_uuid:
                 # 保存响应到等待队列
@@ -585,47 +631,85 @@ class MQTTClient:
                 
                 # 处理任务指令响应
                 if payload.get('data', {}).get('cmd_type') == 'start_task':
+                    # 启动任务响应处理
                     task_data = payload.get('data', {})
                     task_id = task_data.get('task_id')
                     subtask_id = task_data.get('subtask_id')
                     
                     if task_id and subtask_id:
-                        # 更新数据库中的子任务状态
+                        logger.info(f"处理启动任务响应: task_id={task_id}, subtask_id={subtask_id}, 状态: {status}")
+                        
+                        # 导入数据库模型
+                        from core.database import SessionLocal
+                        from models.database import SubTask, MQTTNode
+                        from crud.task import update_task_status_from_subtasks
+                        
                         db = SessionLocal()
                         try:
-                            # 通过subtask_id作为ID直接查找子任务
-                            logger.info(f"查找子任务: subtask_id={subtask_id}")
+                            # 查询子任务
                             subtask = None
-                            
-                            # 检查subtask_id是否为纯数字
-                            if subtask_id.isdigit():
-                                subtask = db.query(SubTask).filter(SubTask.id == int(subtask_id)).first()
+                            try:
+                                # 首先尝试通过subtask_id作为ID查找
+                                logger.info(f"尝试通过ID查找子任务: {subtask_id}")
+                                if subtask_id.isdigit():
+                                    subtask = db.query(SubTask).filter(SubTask.id == int(subtask_id)).first()
+                                
                                 if subtask:
-                                    logger.info(f"找到子任务: {subtask.id}")
+                                    logger.info(f"找到子任务: ID={subtask.id}, analysis_task_id={subtask.analysis_task_id}")
                                 else:
-                                    logger.warning(f"未找到子任务: subtask_id={subtask_id}")
-                            else:
-                                logger.warning(f"子任务ID不是纯数字: {subtask_id}，无法查询数据库")
+                                    logger.warning(f"无法找到子任务: {subtask_id}，可能已被删除或ID不匹配")
+                            except ValueError:
+                                logger.warning(f"无效的子任务ID格式: {subtask_id}")
+                                return
                             
                             if subtask:
                                 if status == 'success':
-                                    # 任务被节点成功接收，更新状态为运行中
-                                    logger.info(f"MQTT节点接收任务成功: task_id={task_id}, subtask_id={subtask_id}")
-                                    subtask.status = 1  # 运行中状态
-                                    subtask.started_at = datetime.now()
-                                    subtask.error_message = None
+                                    # 获取task_status、type和analysis_type字段
+                                    task_status = task_data.get('task_status')
+                                    task_type = task_data.get('type')  # stream/image/video
+                                    analysis_type = task_data.get('analysis_type')  # detection/segmentation
                                     
-                                    # 关联MQTT节点到子任务
-                                    mac_address = payload.get('mac_address')
-                                    if mac_address:
-                                        mqtt_node = db.query(MQTTNode).filter(MQTTNode.mac_address == mac_address).first()
-                                        if mqtt_node:
-                                            logger.info(f"关联MQTT节点 {mac_address} 到子任务 {subtask_id}")
-                                            subtask.mqtt_node_id = mqtt_node.id
-                                            # 更新节点任务计数
-                                            mqtt_node.task_count += 1
-                                        else:
-                                            logger.warning(f"未找到MAC地址为 {mac_address} 的MQTT节点")
+                                    logger.info(f"启动任务响应详情: task_status={task_status}, type={task_type}, analysis_type={analysis_type}")
+                                    
+                                    # 只有在task_status为1时才表示任务真正启动成功
+                                    if task_status == 1:
+                                        # 任务被节点成功接收，更新状态为运行中
+                                        logger.info(f"MQTT节点成功启动任务: task_id={task_id}, subtask_id={subtask_id}, task_status=1")
+                                        subtask.status = 1  # 运行中状态
+                                        subtask.started_at = datetime.now()
+                                        subtask.error_message = None
+                                        
+                                        # 保存任务类型和分析类型
+                                        if task_type:
+                                            # 记录task_type信息到日志
+                                            logger.info(f"接收到任务类型信息：{task_type}，子任务ID: {subtask.id}")
+                                            # 由于没有元数据字段，只记录日志不修改数据库
+                                            
+                                        if analysis_type:
+                                            # 直接更新子任务的analysis_type字段
+                                            subtask.analysis_type = analysis_type
+                                            logger.info(f"子任务 {subtask.id} 分析类型已更新: {analysis_type}")
+                                        
+                                        # 确保设置analysis_task_id用于后续停止任务
+                                        if not subtask.analysis_task_id:
+                                            # 直接使用子任务ID的字符串形式，保持简单一致
+                                            subtask.analysis_task_id = str(subtask.id)
+                                            logger.info(f"设置子任务 {subtask_id} 的analysis_task_id={subtask.id} (使用子任务ID)")
+                                        
+                                        # 关联MQTT节点到子任务
+                                        if mac_address:
+                                            mqtt_node = db.query(MQTTNode).filter(MQTTNode.mac_address == mac_address).first()
+                                            if mqtt_node:
+                                                logger.info(f"关联MQTT节点 {mac_address} 到子任务 {subtask_id}")
+                                                subtask.mqtt_node_id = mqtt_node.id
+                                                # 更新节点任务计数
+                                                mqtt_node.task_count += 1
+                                            else:
+                                                logger.warning(f"未找到MAC地址为 {mac_address} 的MQTT节点")
+                                    else:
+                                        # task_status不为1，可能是处理中或失败
+                                        logger.warning(f"MQTT节点任务未成功启动: task_id={task_id}, subtask_id={subtask_id}, task_status={task_status}")
+                                        subtask.error_message = f"任务启动状态异常: {task_status}"
                                 else:
                                     # 任务被节点拒绝，记录错误信息
                                     error_msg = task_data.get('message', '节点拒绝任务')
@@ -633,23 +717,206 @@ class MQTTClient:
                                     subtask.error_message = f"节点拒绝任务: {error_msg}"
                                 
                                 db.commit()
+                                logger.info(f"更新子任务状态完成: {subtask.id}, 当前状态: {subtask.status}")
                                 
-                                # 更新主任务状态
-                                from crud.task import update_task_status_from_subtasks
-                                update_task_status_from_subtasks(db, subtask.task_id)
+                                # 更新主任务状态和检查所有子任务状态
+                                self._check_and_update_main_task(db, subtask.task_id, "处理启动任务响应")
                             else:
-                                logger.warning(f"未找到子任务记录: task_id={task_id}, subtask_id={subtask_id}")
-                        except Exception as e:
-                            logger.error(f"更新子任务状态失败: {e}")
-                            logger.error(traceback.format_exc())
+                                logger.warning(f"处理启动任务响应时找不到子任务: {subtask_id}")
                         finally:
                             db.close()
-                
+                        
                 # 如果是任务指令回复且失败，需要处理任务重新分配
-                if status == 'error' and payload.get('data', {}).get('cmd_type') == 'start_task':
+                if status == 'error':
                     self._handle_task_failure(payload)
+                # 处理停止任务指令响应
+                elif payload.get('data', {}).get('cmd_type') == 'stop_task':
+                    # 停止任务响应处理
+                    task_data = payload.get('data', {})
+                    task_id = task_data.get('task_id')
+                    subtask_id = task_data.get('subtask_id')
+                    task_status = task_data.get('task_status')  # 获取task_status字段
+                    
+                    if task_id and subtask_id:
+                        logger.info(f"处理停止任务响应: task_id={task_id}, subtask_id={subtask_id}, 状态: {status}, task_status: {task_status}")
+                        
+                        # 导入数据库模型
+                        from core.database import SessionLocal
+                        from models.database import SubTask, MQTTNode, Task
+                        from crud.task import update_task_status_from_subtasks
+                        
+                        db = SessionLocal()
+                        try:
+                            # 查询子任务
+                            subtask = None
+                            try:
+                                # 首先尝试通过subtask_id作为ID查找
+                                logger.info(f"尝试通过ID查找子任务: {subtask_id}")
+                                if subtask_id.isdigit():
+                                    subtask = db.query(SubTask).filter(SubTask.id == int(subtask_id)).first()
+                                
+                                # 如果找不到，可能subtask_id是analysis_task_id，尝试用analysis_task_id查找
+                                if not subtask:
+                                    logger.info(f"通过ID未找到子任务，尝试通过analysis_task_id查找: {subtask_id}")
+                                    subtask = db.query(SubTask).filter(SubTask.analysis_task_id == subtask_id).first()
+                                
+                                if subtask:
+                                    logger.info(f"找到子任务: ID={subtask.id}, analysis_task_id={subtask.analysis_task_id}, 当前状态: {subtask.status}")
+                                else:
+                                    logger.warning(f"无法找到子任务: {subtask_id}，可能已被删除或ID不匹配")
+                            except ValueError:
+                                logger.warning(f"无效的子任务ID格式: {subtask_id}")
+                                return
+                            
+                            if subtask:
+                                # 检查任务的task_status
+                                logger.info(f"处理停止任务响应: task_id={task_id}, subtask_id={subtask_id}, 状态: {status}, task_status={task_status}，当前子任务状态：{subtask.status}")
+                                
+                                if task_status == -1:
+                                    # 节点未找到任务，任务可能已经完成或不存在于节点上
+                                    logger.info(f"节点上未找到任务 {task_id}/{subtask_id}，直接清理状态")
+                                    
+                                    # 检查是否有Redis中待处理的停止请求
+                                    from core.redis_manager import RedisManager
+                                    redis = RedisManager.get_instance()
+                                    stop_request_key = f"pending_stop_request:{subtask.id}"
+                                    
+                                    # 同步获取Redis中的停止请求标记
+                                    has_stop_request = False
+                                    try:
+                                        # 使用同步方法代替异步方法
+                                        has_stop_request = redis.exists_key_sync(stop_request_key)
+                                        logger.info(f"子任务 {subtask.id} Redis停止请求标记状态: {has_stop_request}")
+                                    except Exception as e:
+                                        logger.error(f"同步检查Redis中的停止请求标记失败: {e}")
+                                        has_stop_request = False
+                                    
+                                    # 如果当前子任务状态是运行中(1)或者有停止请求，都将子任务标记为已停止
+                                    if subtask.status == 1 or has_stop_request:
+                                        logger.info(f"子任务 {subtask_id} 当前状态: {subtask.status}，停止请求标记: {has_stop_request}，将更新为已停止状态")
+                                        
+                                        # 将子任务状态更新为已停止
+                                        subtask.status = 2  # 已停止状态
+                                        subtask.completed_at = datetime.now()
+                                        subtask.error_message = "节点上找不到此任务，已标记为停止"
+                                        
+                                        # 更新MQTT节点任务计数
+                                        if subtask.mqtt_node_id:
+                                            mqtt_node = db.query(MQTTNode).filter(MQTTNode.id == subtask.mqtt_node_id).first()
+                                            if mqtt_node and mqtt_node.task_count > 0:
+                                                mqtt_node.task_count -= 1
+                                                logger.info(f"减少MQTT节点 {mqtt_node.mac_address} 的任务计数")
+                                        
+                                        db.commit()
+                                        logger.info(f"子任务 {subtask_id} 已更新为已停止状态 (task_status=-1)")
+                                    else:
+                                        logger.info(f"子任务 {subtask_id} 已经是停止状态或无需处理，当前状态: {subtask.status}")
+                                    
+                                    # 清除Redis中的停止请求标记
+                                    if has_stop_request:
+                                        try:
+                                            # 使用同步方法删除Redis键
+                                            redis.delete_key_sync(stop_request_key)
+                                            logger.info(f"已同步清除子任务 {subtask.id} 的停止请求标记 (task_status=-1)")
+                                        except Exception as e:
+                                            logger.error(f"同步清除子任务 {subtask.id} 的停止请求标记失败: {e}")
+                                    
+                                    # 更新主任务状态
+                                    self._check_and_update_main_task(db, subtask.task_id, "处理task_status=-1任务")
+                                elif task_status == 0:
+                                    # 节点正在处理停止请求，只记录日志不更改状态
+                                    logger.info(f"节点正在处理任务 {task_id}/{subtask_id} 的停止请求，等待完成")
+                                    
+                                elif task_status == 1:
+                                    # 节点已成功停止任务，更新状态
+                                    logger.info(f"节点已成功停止任务 {task_id}/{subtask_id}")
+                                    
+                                    # 检查这是否是对用户显式停止命令的响应
+                                    # 从Redis中检查是否有该子任务的待处理停止请求
+                                    from core.redis_manager import RedisManager
+                                    redis = RedisManager.get_instance()
+                                    stop_request_key = f"pending_stop_request:{subtask.id}"
+                                    
+                                    # 获取Redis中的停止请求标记
+                                    has_stop_request = False
+                                    try:
+                                        # 使用同步方法代替异步方法
+                                        has_stop_request = redis.exists_key_sync(stop_request_key)
+                                    except Exception as e:
+                                        logger.error(f"同步检查Redis中的停止请求标记失败: {e}")
+                                        has_stop_request = False
+                                    
+                                    # 只处理用户明确请求的停止命令响应，或者当前状态为运行中的任务
+                                    if has_stop_request or subtask.status == 1:
+                                        # 更新子任务状态为已停止
+                                        subtask.status = 2  # 已停止状态
+                                        subtask.completed_at = datetime.now()
+                                        subtask.error_message = "子任务已被节点成功停止"
+                                        
+                                        # 如果有mqtt节点，更新mqtt节点任务计数
+                                        if subtask.mqtt_node_id:
+                                            mqtt_node = db.query(MQTTNode).filter(MQTTNode.id == subtask.mqtt_node_id).first()
+                                            if mqtt_node and mqtt_node.task_count > 0:
+                                                mqtt_node.task_count -= 1
+                                                logger.info(f"减少MQTT节点 {mqtt_node.mac_address} 的任务计数")
+                                        
+                                        db.commit()
+                                        logger.info(f"子任务 {subtask_id} 已更新为已停止状态")
+                                        
+                                        # 清除Redis中的停止请求标记
+                                        if has_stop_request:
+                                            try:
+                                                # 使用同步方法删除Redis键
+                                                redis.delete_key_sync(stop_request_key)
+                                                logger.info(f"已同步清除子任务 {subtask.id} 的停止请求标记")
+                                            except Exception as e:
+                                                logger.error(f"同步清除子任务 {subtask.id} 的停止请求标记失败: {e}")
+                                        
+                                        # 更新主任务状态
+                                        self._check_and_update_main_task(db, subtask.task_id, "处理task_status=1任务")
+                                    else:
+                                        logger.warning(f"忽略子任务 {subtask_id} 的停止响应，因为没有对应的停止请求且任务状态不是运行中 (当前状态: {subtask.status})")
+                                else:
+                                    logger.warning(f"处理停止任务响应时找不到子任务: {subtask_id}")
+                                
+                                # 如果找不到子任务但有task_id且task_status=-1，尝试查找主任务然后创建一个临时子任务
+                                if task_id and task_status == -1:
+                                    try:
+                                        # 查找主任务
+                                        main_task = db.query(Task).filter(Task.id == task_id).first()
+                                        if main_task:
+                                            logger.info(f"找到主任务 {task_id}，但找不到子任务 {subtask_id}，尝试创建临时子任务并标记为已停止")
+                                            
+                                            # 创建一个临时子任务并标记为已停止
+                                            subtask = SubTask(
+                                                task_id=main_task.id,
+                                                status=2,  # 已停止状态
+                                                completed_at=datetime.now(),
+                                                error_message=f"响应中未找到此任务，已创建临时子任务并标记为停止"
+                                            )
+                                            db.add(subtask)
+                                            db.commit()
+                                            db.refresh(subtask)
+                                            
+                                            logger.info(f"已创建并标记为已停止状态的临时子任务: {subtask.id}")
+                                            
+                                            # 更新主任务状态
+                                            self._check_and_update_main_task(db, main_task.id, "处理找不到子任务的task_status=-1响应")
+                                        else:
+                                            logger.warning(f"处理停止任务响应时找不到主任务: {task_id}")
+                                    except Exception as e:
+                                        logger.error(f"尝试为找不到的子任务创建临时记录失败: {e}")
+                                        logger.error(traceback.format_exc())
+                        finally:
+                            db.close()
+                else:
+                    # 其他类型的命令响应
+                    cmd_type = payload.get('data', {}).get('cmd_type')
+                    logger.debug(f"收到其他类型的命令响应: {cmd_type}, UUID: {message_uuid}")
+            else:
+                logger.warning(f"接收到的响应消息中没有message_uuid: {payload}")
         except Exception as e:
-            logger.error(f"处理配置回复消息失败: {e}")
+            logger.error(f"处理节点配置回复消息失败: {str(e)}")
             logger.error(traceback.format_exc())
     
     def _handle_node_status(self, topic: str, payload: Dict[str, Any]):
@@ -736,7 +1003,7 @@ class MQTTClient:
                             gpu_usage = payload.get('gpu_usage', 0),
                             task_count = payload.get('task_count', 0),
                             max_tasks = payload.get('max_tasks', 4),
-                            is_active = payload.get('is_active', True)
+                            is_active=True  # 默认激活
                         )
                         
                         db.add(node)
@@ -814,8 +1081,9 @@ class MQTTClient:
                     if status == 'completed':
                         subtask.status = 2  # 已完成
                         subtask.completed_at = datetime.now()
-                    elif status == 'failed':
-                        subtask.status = 3  # 失败
+                    elif status == 'stopped' or status == 'failed':  # 注意这里添加了对'failed'的处理
+                        subtask.status = 2  # 已停止
+                        subtask.completed_at = datetime.now()
                         subtask.error_message = payload.get('message', '任务执行失败')
                     elif status == 'running' or status == 'success':  # 注意这里增加了对'success'的处理
                         # 状态是运行中或成功，但子任务状态是未启动(0)，则更新为运行中(1)
@@ -830,8 +1098,7 @@ class MQTTClient:
                     logger.info(f"子任务 {subtask_id} 状态已更新: {status}")
                     
                     # 更新主任务状态
-                    from crud.task import update_task_status_from_subtasks
-                    update_task_status_from_subtasks(db, subtask.task_id)
+                    self._check_and_update_main_task(db, subtask.task_id, "处理任务结果")
                 else:
                     logger.warning(f"未找到子任务记录: subtask_id={subtask_id}")
             finally:
@@ -842,21 +1109,28 @@ class MQTTClient:
     
     async def _handle_node_offline(self, db: Session, mac_address: str):
         """
-        处理节点离线情况，自动转移该节点的任务到其他节点
+        处理节点离线情况，将所有运行在该节点上的子任务标记为已停止
         
         Args:
             db: 数据库会话
             mac_address: 节点MAC地址
         """
         try:
-            logger.info(f"处理节点 {mac_address} 离线，开始任务自动转移流程...")
+            logger.info(f"处理节点 {mac_address} 离线事件...")
             
             # 查找节点
             node = db.query(MQTTNode).filter(MQTTNode.mac_address == mac_address).first()
             if not node:
                 logger.warning(f"未找到离线节点: {mac_address}")
                 return
-                
+            
+            # 更新节点状态
+            node.status = 'offline'
+            node.last_active = datetime.now()
+            if not node.node_metadata:
+                node.node_metadata = {}
+            node.node_metadata['offline_time'] = int(time.time())
+            
             # 查找该节点上运行的子任务
             running_subtasks = db.query(SubTask).filter(
                 SubTask.mqtt_node_id == node.id,
@@ -864,148 +1138,48 @@ class MQTTClient:
             ).all()
             
             if not running_subtasks:
-                logger.info(f"节点 {mac_address} 没有运行中的子任务，无需转移")
-                return
-                
-            logger.info(f"节点 {mac_address} 有 {len(running_subtasks)} 个运行中的子任务需要转移")
-            
-            # 查找可用的其他在线节点
-            available_nodes = db.query(MQTTNode).filter(
-                MQTTNode.status == "online",
-                MQTTNode.is_active == True,
-                MQTTNode.mac_address != mac_address,  # 排除当前离线节点
-                MQTTNode.task_count < MQTTNode.max_tasks
-            ).order_by(MQTTNode.task_count).all()
-            
-            if not available_nodes:
-                logger.warning(f"没有可用的在线节点，所有子任务将重置为未启动状态等待后续分配")
-                # 将子任务重置为未启动状态，等待有节点在线时再分配
-                for subtask in running_subtasks:
-                    subtask.status = 0  # 未启动
-                    subtask.mqtt_node_id = None  # 清除节点关联
-                    subtask.started_at = None
-                    subtask.error_message = f"节点 {mac_address} 离线，等待重新分配"
-                    
-                    # 同时更新关联的主任务active_subtasks计数
-                    task = subtask.task
-                    if task and task.active_subtasks > 0:
-                        task.active_subtasks -= 1
-                
+                logger.info(f"节点 {mac_address} 没有运行中的子任务，无需处理")
                 db.commit()
-                logger.info(f"已重置 {len(running_subtasks)} 个子任务为未启动状态")
                 return
             
-            # 开始任务转移
-            transferred_count = 0
-            failed_count = 0
+            logger.info(f"节点 {mac_address} 有 {len(running_subtasks)} 个运行中的子任务将被标记为已停止")
             
+            # 获取受影响的任务ID列表
+            affected_task_ids = set()
+            
+            # 将所有子任务标记为已停止状态
             for subtask in running_subtasks:
-                try:
-                    # 获取子任务关联的主任务信息
-                    task = subtask.task
-                    if not task:
-                        logger.warning(f"子任务 {subtask.id} 没有关联的主任务，跳过转移")
-                        continue
-                    
-                    # 获取子任务使用的模型和流信息
-                    model = subtask.model
-                    stream = subtask.stream
-                    
-                    if not model or not stream:
-                        logger.warning(f"子任务 {subtask.id} 缺少模型或流信息，跳过转移")
-                        continue
-                    
-                    # 使用轮询方式选择节点
-                    target_node = available_nodes[transferred_count % len(available_nodes)]
-                    
-                    logger.info(f"准备将子任务 {subtask.id} 从节点 {mac_address} 转移到节点 {target_node.mac_address}")
-                    
-                    # 构建任务配置
-                    task_config = {
-                        "source": {
-                            "type": "stream",
-                            "urls": [stream.url]
-                        },
-                        "config": {
-                            "model_code": model.code,
-                            "analysis_type": subtask.analysis_type,
-                            "analysis_interval": task.analysis_interval,  # 新增分析间隔
-                            **(subtask.config or {})
-                        },
-                        "result_config": {
-                            "save_result": task.save_result,
-                            "save_images": task.save_images,  # 新增保存图像字段
-                            "callback_topic": f"meek/{target_node.mac_address}/result"  # 目标节点已存在
-                        }
-                    }
-                    
-                    # 发送任务消息到新节点
-                    success = await self.send_task_to_node(
-                        mac_address=target_node.mac_address,
-                        task_id=str(task.id),
-                        subtask_id=str(subtask.id),
-                        config=task_config,
-                        wait_for_response=False
-                    )
-                    
-                    if isinstance(success, tuple):
-                        success = success[0]  # 如果返回元组，取第一个元素作为成功标志
-                    
-                    if success:
-                        # 更新子任务信息
-                        subtask.mqtt_node_id = target_node.id
-                        subtask.status = 1  # 保持运行中状态
-                        subtask.error_message = f"已从节点 {mac_address} 自动转移到节点 {target_node.mac_address}"
-                        
-                        # 更新目标节点任务计数
-                        target_node.task_count += 1
-                        target_node.stream_task_count += 1
-                        
-                        transferred_count += 1
-                        logger.info(f"成功将子任务 {subtask.id} 转移到节点 {target_node.mac_address}")
-                    else:
-                        # 转移失败，重置子任务状态
-                        subtask.status = 0  # 未启动
-                        subtask.mqtt_node_id = None
-                        subtask.started_at = None
-                        subtask.error_message = f"从节点 {mac_address} 转移失败，等待重新分配"
-                        
-                        # 更新主任务active_subtasks计数
-                        if task.active_subtasks > 0:
-                            task.active_subtasks -= 1
-                        
-                        failed_count += 1
+                subtask.status = 2  # 已停止状态
+                subtask.completed_at = datetime.now()
+                subtask.error_message = f"节点 {mac_address} 已离线，任务自动停止"
                 
-                except Exception as e:
-                    logger.error(f"转移子任务 {subtask.id} 时出错: {e}")
-                    logger.error(traceback.format_exc())
-                    
-                    # 转移出错，重置子任务状态
-                    subtask.status = 0  # 未启动
-                    subtask.mqtt_node_id = None
-                    subtask.started_at = None
-                    subtask.error_message = f"从节点 {mac_address} 转移出错: {str(e)}"
-                    
-                    # 更新主任务active_subtasks计数
-                    task = subtask.task
-                    if task and task.active_subtasks > 0:
-                        task.active_subtasks -= 1
-                    
-                    failed_count += 1
+                # 记录主任务ID，用于后续更新主任务状态
+                if subtask.task_id:
+                    affected_task_ids.add(subtask.task_id)
             
-            # 更新离线节点的任务计数
-            node.task_count = max(0, node.task_count - (transferred_count + failed_count))
-            node.stream_task_count = max(0, node.stream_task_count - (transferred_count + failed_count))
+            # 更新节点任务计数为0
+            node.task_count = 0
+            node.stream_task_count = 0
             
+            # 提交更改
             db.commit()
-            logger.info(f"节点 {mac_address} 的任务转移完成: 成功={transferred_count}, 失败={failed_count}")
+            logger.info(f"已将节点 {mac_address} 的 {len(running_subtasks)} 个子任务标记为已停止")
             
+            # 更新受影响的主任务状态
+            for task_id in affected_task_ids:
+                try:
+                    logger.info(f"更新任务 {task_id} 的状态")
+                    self._check_and_update_main_task(db, task_id, "处理节点离线")
+                except Exception as te:
+                    logger.error(f"更新任务 {task_id} 状态失败: {te}")
+        
         except Exception as e:
-            logger.error(f"处理节点离线任务转移失败: {e}")
-            logger.error(traceback.format_exc())    
+            logger.error(f"处理节点离线事件失败: {e}")
+            logger.error(traceback.format_exc())
+    
     def _handle_task_failure(self, payload: Dict[str, Any]):
         """
-        处理任务执行失败的情况
+        处理任务执行失败的情况，将子任务标记为已停止
         """
         try:
             data = payload.get('data', {})
@@ -1018,31 +1192,48 @@ class MQTTClient:
                 
             logger.info(f"处理任务执行失败: task_id={task_id}, subtask_id={subtask_id}")
             
-            # 更新子任务状态，等待重新分配
+            # 更新子任务状态为已停止
             db = SessionLocal()
             try:
-                # 查找子任务 - 通过subtask_id作为ID直接查找
+                # 查找子任务 - 首先尝试通过ID查找
                 logger.info(f"查找失败的子任务: subtask_id={subtask_id}")
                 subtask = None
                 
-                # 检查subtask_id是否为纯数字
+                # 首先尝试直接通过ID查找
                 if subtask_id.isdigit():
                     subtask = db.query(SubTask).filter(SubTask.id == int(subtask_id)).first()
-                    if subtask:
-                        logger.info(f"找到失败的子任务: {subtask.id}")
-                    else:
-                        logger.warning(f"未找到失败的子任务: subtask_id={subtask_id}")
-                else:
-                    logger.warning(f"子任务ID不是纯数字: {subtask_id}，无法查询数据库")
+                
+                # 如果找不到，尝试通过analysis_task_id查找
+                if not subtask:
+                    subtask = db.query(SubTask).filter(SubTask.analysis_task_id == subtask_id).first()
                 
                 if subtask:
-                    subtask.status = 0  # 未启动
-                    subtask.mqtt_node_id = None  # 清除节点关联
-                    subtask.error_message = data.get('message', '任务执行失败，等待重新分配')
+                    logger.info(f"找到失败的子任务: {subtask.id}")
+                    
+                    # 将子任务标记为已停止
+                    subtask.status = 2  # 已停止状态
+                    subtask.completed_at = datetime.now()
+                    subtask.error_message = data.get('message', '任务执行失败')
+                    
+                    # 如果有MQTT节点关联，更新节点任务计数
+                    if subtask.mqtt_node_id:
+                        mqtt_node = db.query(MQTTNode).filter(MQTTNode.id == subtask.mqtt_node_id).first()
+                        if mqtt_node and mqtt_node.task_count > 0:
+                            mqtt_node.task_count -= 1
+                    
+                    # 提交更改
                     db.commit()
-                    logger.info(f"子任务 {subtask_id} 已重置为未启动状态，等待重新分配")
+                    logger.info(f"已将子任务 {subtask.id} 标记为已停止")
+                    
+                    # 更新主任务状态
+                    from crud.task import update_task_status_from_subtasks
+                    if subtask.task_id:
+                        self._check_and_update_main_task(db, subtask.task_id, "处理任务失败")
                 else:
                     logger.warning(f"未找到失败的子任务: subtask_id={subtask_id}")
+            except Exception as e:
+                logger.error(f"处理任务失败时更新状态出错: {e}")
+                logger.error(traceback.format_exc())
             finally:
                 db.close()
         except Exception as e:
@@ -1568,6 +1759,117 @@ class MQTTClient:
                 break
                 
         logger.info("MQTT重连线程已结束")
+
+    def _update_main_task_if_all_subtasks_stopped(self, db: Session, task_id: int) -> None:
+        """
+        检查并更新主任务状态，当所有子任务都已停止时
+        
+        Args:
+            db: 数据库会话
+            task_id: 主任务ID
+        """
+        try:
+            if not task_id:
+                logger.warning(f"无效的任务ID: {task_id}")
+                return
+                
+            # 导入Task模型
+            from models.database import Task
+            
+            # 查询主任务并验证其存在性
+            main_task = db.query(Task).filter(Task.id == task_id).first()
+            if not main_task:
+                logger.warning(f"找不到主任务: {task_id}")
+                return
+                
+            # 查询同一主任务下的所有子任务
+            same_task_subtasks = db.query(SubTask).filter(SubTask.task_id == task_id).all()
+            
+            # 检查Redis中是否有全局停止请求标记
+            from core.redis_manager import RedisManager
+            redis = RedisManager.get_instance()
+            global_stop_key = f"global_stop_request:{task_id}"
+            has_global_stop_request = False
+            try:
+                has_global_stop_request = redis.exists_key_sync(global_stop_key)
+            except Exception as e:
+                logger.error(f"检查全局停止请求标记失败: {e}")
+            
+            # 如果有全局停止请求或没有子任务，将主任务状态设置为已停止
+            if has_global_stop_request or not same_task_subtasks:
+                logger.info(f"主任务 {task_id} 有全局停止请求标记或没有子任务，将状态设置为已停止")
+                
+                if main_task.status != 2:  # 如果不是已停止状态
+                    main_task.status = 2  # 设置为已停止状态
+                    main_task.completed_at = datetime.now()
+                    main_task.updated_at = datetime.now()
+                    main_task.error_message = "任务由用户手动停止"
+                    db.commit()
+                    logger.info(f"已将主任务 {task_id} 的状态更新为已停止 (有全局停止请求或无子任务)")
+                    
+                    # 清除全局停止请求标记
+                    if has_global_stop_request:
+                        try:
+                            redis.delete_key_sync(global_stop_key)
+                            logger.info(f"已清除主任务 {task_id} 的全局停止请求标记")
+                        except Exception as e:
+                            logger.error(f"清除全局停止请求标记失败: {e}")
+                            
+                return
+            
+            logger.info(f"主任务 {task_id} 有 {len(same_task_subtasks)} 个子任务，检查是否所有子任务都已停止")
+            
+            # 调试输出所有子任务的状态
+            for sub in same_task_subtasks:
+                logger.info(f"子任务状态: ID={sub.id}, status={sub.status}, node_id={sub.mqtt_node_id}")
+                
+            all_stopped = True
+            running_count = 0
+            
+            # 检查是否所有子任务都已停止
+            for sub in same_task_subtasks:
+                if sub.status == 1:  # 状态为运行中
+                    all_stopped = False
+                    running_count += 1
+                    logger.info(f"发现运行中的子任务: ID={sub.id}, node_id={sub.mqtt_node_id}")
+            
+            if all_stopped:
+                logger.info(f"主任务 {task_id} 的所有子任务均已停止，确认将主任务状态更新为已停止")
+                
+                # 更新主任务状态
+                if main_task.status != 2:
+                    main_task.status = 2  # 设置为已停止状态
+                    main_task.completed_at = datetime.now()
+                    main_task.updated_at = datetime.now()
+                    db.commit()
+                    logger.info(f"已将主任务 {task_id} 的状态更新为已停止")
+                else:
+                    logger.info(f"主任务 {task_id} 已经是停止状态，无需更新")
+            else:
+                logger.info(f"主任务 {task_id} 仍有 {running_count} 个子任务在运行中，不更新主任务状态")
+        except Exception as e:
+            logger.error(f"检查和更新主任务状态失败: {e}")
+            logger.error(traceback.format_exc())
+
+    def _check_and_update_main_task(self, db: Session, task_id: int, msg: str = "") -> None:
+        """在处理停止任务响应后，调用该方法检查是否所有子任务已停止并更新主任务状态"""
+        try:
+            if not task_id:
+                logger.warning(f"无效的任务ID: {task_id}, {msg}")
+                return
+                
+            logger.info(f"检查主任务 {task_id} 的所有子任务状态: {msg}")
+            
+            # 首先更新任务统计信息
+            from crud.task import update_task_status_from_subtasks
+            update_result = update_task_status_from_subtasks(db, task_id)
+            logger.info(f"已更新任务 {task_id} 的统计信息: {update_result}, {msg}")
+            
+            # 然后检查并更新主任务状态
+            self._update_main_task_if_all_subtasks_stopped(db, task_id)
+        except Exception as e:
+            logger.error(f"检查和更新主任务状态时发生错误: {e}, {msg}")
+            logger.error(traceback.format_exc())
 
 # 全局MQTT客户端实例
 _mqtt_client = None

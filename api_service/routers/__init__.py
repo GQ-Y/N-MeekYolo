@@ -9,6 +9,9 @@ from .task import router as task_router
 from .analysis import router as analysis_router
 from .node import router as node_router
 from .stream_player import router as stream_player_router
+from .mqtt_node import router as mqtt_node_router
+from .mqtt_task import router as mqtt_task_router
+from .analysis_callback import router as analysis_callback_router
 
 __all__ = [
     'stream_router',
@@ -18,5 +21,8 @@ __all__ = [
     'task_router',
     'analysis_router',
     'node_router',
-    'stream_player_router'
+    'stream_player_router',
+    'mqtt_node_router',
+    'mqtt_task_router',
+    'analysis_callback_router'
 ] 

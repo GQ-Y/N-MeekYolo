@@ -173,6 +173,10 @@ async def startup_event():
                     # 获取MQTT任务管理器实例 - 会自动初始化并启动
                     task_manager = get_mqtt_task_manager()
                     
+                    # 在异步上下文中启动任务管理器
+                    logger.info("启动MQTT任务管理器...")
+                    asyncio.create_task(task_manager.start())
+                    
                     # 同步节点信息
                     logger.info("同步MQTT节点信息...")
                     asyncio.create_task(scheduler.sync_nodes_from_db(force=True))

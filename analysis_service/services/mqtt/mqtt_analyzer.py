@@ -203,11 +203,47 @@ class MQTTAnalyzerService(BaseAnalyzerService):
                         "stream_url": url # 也直接存储 stream_url
                     }
                 logger.info(f"[{subscriber_id}] 分析协程已创建并添加到 active_tasks")
+                
+                # 确保任务真正启动
+                try:
+                    # 等待短暂时间，确保任务已开始执行
+                    await asyncio.sleep(0.5)
+                    
+                    # 验证任务是否仍在运行（没有被取消或完成）
+                    if analysis_task.done():
+                        # 任务已完成，检查是否有异常
+                        if analysis_task.exception():
+                            error_msg = f"任务启动后立即失败: {analysis_task.exception()}"
+                            logger.error(f"[{subscriber_id}] {error_msg}")
+                            if confirmation_topic:
+                                await self._async_send_cmd_reply(message_id, message_uuid, confirmation_topic, "error",
+                                                              data={"error_message": error_msg, "task_id": task_id, "subtask_id": subtask_id, "cmd_type": "start_task"})
+                            return False
+                except Exception as e:
+                    logger.warning(f"[{subscriber_id}] 验证任务启动状态时出错: {e}，继续发送成功响应")
 
                 # 4. 发送成功确认回复 (异步)
                 if confirmation_topic:
-                    await self._async_send_cmd_reply(message_id, message_uuid, confirmation_topic, "success",
-                                                  data={"message": "任务已接受并启动", "task_id": task_id, "subtask_id": subtask_id}) # 使用 subscriber_id
+                    # 获取源类型和任务类型
+                    source_type = source.get("type", "stream")
+                    task_type = config.get("task_type", analysis_type) or "detection"
+                    
+                    # 构建完整的响应数据
+                    response_data = {
+                        "cmd_type": "start_task",
+                        "message": "任务已接受并启动",
+                        "task_id": task_id,
+                        "subtask_id": subtask_id,
+                        "task_status": 1,  # 1表示任务成功启动
+                        "type": source_type  # 使用源类型（stream/video/image）
+                    }
+                    
+                    # 如果有设置task_type，添加到响应中
+                    if task_type and task_type != source_type:
+                        response_data["analysis_type"] = task_type
+                        
+                    await self._async_send_cmd_reply(message_id, message_uuid, confirmation_topic, "success", data=response_data)
+                    logger.info(f"[{subscriber_id}] 已发送任务启动成功响应，任务类型: {source_type}, 分析类型: {task_type}")
                 return True # 表示协程内部启动成功
 
             except Exception as e:
@@ -255,15 +291,43 @@ class MQTTAnalyzerService(BaseAnalyzerService):
                                                    data={"error_message": error_msg, "task_id": task_id, "subtask_id": subtask_id})
             return False
 
-    async def _async_send_cmd_reply(self, message_id, message_uuid, topic, status, data=None):
-        """辅助函数，用于异步发送命令回复"""
+    async def _async_send_cmd_reply(self, message_id, message_uuid, topic, status, message=None, data=None):
+        """辅助函数，用于异步发送命令回复
+        
+        Args:
+            message_id: 消息ID
+            message_uuid: 消息UUID
+            topic: 主题
+            status: 状态
+            message: 回复消息
+            data: 回复数据
+        """
         # 注意: 这假设 self.mqtt_client._send_cmd_reply 本身是线程安全的
         # 或者需要一个真正的异步发送方法
         try:
+            # 确保data是一个字典并包含task_id和subtask_id（如果data中已有则保留）
+            if data is None:
+                data = {}
+            elif not isinstance(data, dict):
+                data = {"original_data": data}
+            
+            # 添加额外消息
+            if message and status == "error" and "message" not in data:
+                data["message"] = message
+                
+            # 确保有cmd_type字段
+            if "cmd_type" not in data and "task_id" in data and "subtask_id" in data:
+                data["cmd_type"] = data.get("cmd_type", "start_task")
+                
+            # 添加任务状态字段（如果没有）
+            if "task_status" not in data and status == "success" and "task_id" in data:
+                data["task_status"] = 1  # 默认为1表示成功启动
+            
             loop = asyncio.get_running_loop()
             # 在 executor 中运行同步的发送方法以避免阻塞
-            await loop.run_in_executor(None, self.mqtt_client._send_cmd_reply,
-                                       message_id, message_uuid, topic, status, data)
+            await loop.run_in_executor(None, 
+                                      lambda: self.mqtt_client._send_cmd_reply(
+                                          message_id, message_uuid, topic, status, None, data))
         except Exception as e:
              logger.error(f"异步发送命令回复到 {topic} 时出错: {e}", exc_info=True)
 
@@ -316,13 +380,47 @@ class MQTTAnalyzerService(BaseAnalyzerService):
                          del self.mqtt_client.active_tasks[subscriber_id]
                          logger.info(f"[{subscriber_id}] 已从 active_tasks 移除")
                  
-                 # 4. 发送最终的 stopped 状态
-                 try:
-                     self.mqtt_client._send_task_status(subscriber_id, subscriber_id, "stopped")
-                 except Exception as send_e:
-                     logger.error(f"[{subscriber_id}] 发送最终 stopped 状态失败: {send_e}")
+                 # 4. 发送最终状态
+                 # 如果任务是因为被取消而结束，发送完成的停止状态(task_status=1)
+                 if was_in_pending_stop:
+                     try:
+                         # 获取原始task_id，如果存在
+                         original_task_id = task_info.get('original_task_id', subscriber_id)
+                         
+                         # 先发送标准的stopped状态消息，使用原始task_id
+                         self.mqtt_client._send_task_status(original_task_id, subscriber_id, "stopped")
+                         logger.info(f"[{subscriber_id}] 已发送标准停止状态，使用原始task_id={original_task_id}")
+                         
+                         # 如果有message_id、message_uuid和confirmation_topic，发送带task_status=1的响应
+                         if 'message_id' in task_info and 'message_uuid' in task_info and 'confirmation_topic' in task_info:
+                             reply_data = {
+                                 "cmd_type": "stop_task",
+                                 "task_id": original_task_id,  # 使用原始task_id，而不是subscriber_id
+                                 "subtask_id": subscriber_id,
+                                 "task_status": 1,
+                                 "message": "任务已停止",
+                                 "timestamp": int(time.time())
+                             }
+                             self.mqtt_client._send_cmd_reply(
+                                 task_info['message_id'], 
+                                 task_info['message_uuid'], 
+                                 task_info['confirmation_topic'], 
+                                 "success", 
+                                 data=reply_data
+                             )
+                             logger.info(f"[{subscriber_id}] 已发送任务已停止响应 (task_status=1)，使用原始task_id={original_task_id}")
+                     except Exception as send_e:
+                         logger.error(f"[{subscriber_id}] 发送最终状态失败: {send_e}", exc_info=True)
                  
-                 logger.info(f"[{subscriber_id}] 清理完成 (因启动时已被请求停止)")
+                 # 从active_tasks中移除任务
+                 with self.mqtt_client.active_tasks_lock:
+                      if subscriber_id in self.mqtt_client.active_tasks:
+                          del self.mqtt_client.active_tasks[subscriber_id]
+                          logger.info(f"[{subscriber_id}] 已从 active_tasks 移除")
+                      else:
+                          logger.warning(f"[{subscriber_id}] 清理时未在 active_tasks 找到")
+                 
+                 logger.info(f"[{subscriber_id}] 清理完成")
              return # 结束协程
 
         # --- 正常执行逻辑 --- 
@@ -447,8 +545,10 @@ class MQTTAnalyzerService(BaseAnalyzerService):
             logger.info(f"[{subscriber_id}] 分析协程结束，执行清理")
             
             # 1. 从 pending_stop_requests 移除 (确保无论如何都尝试移除)
+            was_in_pending_stop = False
             with self.mqtt_client.pending_stop_requests_lock:
                 if subscriber_id in self.mqtt_client.pending_stop_requests:
+                    was_in_pending_stop = True
                     self.mqtt_client.pending_stop_requests.remove(subscriber_id)
                     logger.debug(f"[{subscriber_id}] 已从待停止集合移除")
             
@@ -465,50 +565,51 @@ class MQTTAnalyzerService(BaseAnalyzerService):
             # 3. 从 active_tasks 移除
             with self.mqtt_client.active_tasks_lock:
                  if subscriber_id in self.mqtt_client.active_tasks:
+                     # 获取task_info以获取更多信息(如message_id, message_uuid, confirmation_topic等)
+                     task_info = self.mqtt_client.active_tasks.get(subscriber_id, {})
+                     # 删除任务
                      del self.mqtt_client.active_tasks[subscriber_id]
                      logger.info(f"[{subscriber_id}] 已从 active_tasks 移除")
 
-            # 4. 发送最终状态 (如果任务是因为被取消而结束，发送 stopped；否则不发送，因为成功或错误状态已在 try/except 中发送了。
-            # 检查任务是否被取消 (CancelledError 会跳过 except 块直接进入 finally)
-            # 或者检查是否是因为启动时就被请求停止 (前面已处理并返回)
-            # 这里需要一种方法判断是否是外部调用 cancel() 导致的 finally
-            # 一个简单的方法是检查任务对象自身的状态，但这需要传递 task 对象
-            # 另一种方法是在 cancel 请求时设置一个标志，但需要传递 MQTTAnalyzerService 实例
-            # 最简单的方法可能是在 _handle_stop_task_cmd 成功调用 cancel 后，再设置一个标记到 task_data 里
-            # 这里暂时采用一种简单策略：如果在 pending_stop_requests 里 *曾经* 出现过，就发 stopped
-            # (上面已处理启动时的情况，所以这里只处理运行中被停止的情况)
+            # 4. 发送最终状态
+            # 如果任务是因为被取消而结束，发送完成的停止状态(task_status=1)
+            if was_in_pending_stop:
+                try:
+                    # 获取原始task_id，如果存在
+                    original_task_id = task_info.get('original_task_id', subscriber_id)
+                    
+                    # 先发送标准的stopped状态消息，使用原始task_id
+                    self.mqtt_client._send_task_status(original_task_id, subscriber_id, "stopped")
+                    logger.info(f"[{subscriber_id}] 已发送标准停止状态，使用原始task_id={original_task_id}")
+                    
+                    # 如果有message_id、message_uuid和confirmation_topic，发送带task_status=1的响应
+                    if 'message_id' in task_info and 'message_uuid' in task_info and 'confirmation_topic' in task_info:
+                        reply_data = {
+                            "cmd_type": "stop_task",
+                            "task_id": original_task_id,  # 使用原始task_id，而不是subscriber_id
+                            "subtask_id": subscriber_id,
+                            "task_status": 1,
+                            "message": "任务已停止",
+                            "timestamp": int(time.time())
+                        }
+                        self.mqtt_client._send_cmd_reply(
+                            task_info['message_id'], 
+                            task_info['message_uuid'], 
+                            task_info['confirmation_topic'], 
+                            "success", 
+                            data=reply_data
+                        )
+                        logger.info(f"[{subscriber_id}] 已发送任务已停止响应 (task_status=1)，使用原始task_id={original_task_id}")
+                except Exception as send_e:
+                    logger.error(f"[{subscriber_id}] 发送最终状态失败: {send_e}", exc_info=True)
             
-            # --- 重新思考：最终状态发送逻辑 --- 
-            # 只有当任务是因为被取消(外部stop命令)而进入 finally 时，才发送 'stopped' 状态。
-            # 如果是正常完成或内部错误，状态已经在 try/except 中发送了。
-            # asyncio.CancelledError 会直接跳到 finally。我们可以捕获它。
-            
-            # ---- 更新 finally 逻辑 ----
-            is_cancelled = False
-            try:
-                 # 这段代码理论上不会执行，因为 CancelledError 会跳过它
-                 pass
-            except asyncio.CancelledError: # CancelledError 应该在 try 块内部被捕获，而不是 finally
-                 is_cancelled = True
-                 logger.info(f"[{subscriber_id}] 检测到任务被取消 (可能由停止命令触发)")
-            # ---- 这个方法不行，finally 无法捕获 try 块内的 CancelledError ----
-
-            # ---- 替代方案：依赖 pending_stop_requests ----
-            # 在 finally 开始时检查是否仍在 pending_stop_requests (如果启动时检查未通过)
-            send_stopped_status = False
-            with self.mqtt_client.pending_stop_requests_lock: 
-                # 如果在 finally 开始时仍在集合中，说明是运行中被停止
-                if subscriber_id in self.mqtt_client.pending_stop_requests:
-                     send_stopped_status = True 
-                     # 移除它 (如果前面检查未移除)
-                     self.mqtt_client.pending_stop_requests.remove(subscriber_id)
-                     logger.debug(f"[{subscriber_id}] 在 finally 块中检测到并移除待停止标记")
-            
-            if send_stopped_status:
-                 try:
-                     self.mqtt_client._send_task_status(subscriber_id, subscriber_id, "stopped")
-                 except Exception as send_e:
-                     logger.error(f"[{subscriber_id}] 发送最终 stopped 状态失败: {send_e}")
+            # 从active_tasks中移除任务
+            with self.mqtt_client.active_tasks_lock:
+                 if subscriber_id in self.mqtt_client.active_tasks:
+                     del self.mqtt_client.active_tasks[subscriber_id]
+                     logger.info(f"[{subscriber_id}] 已从 active_tasks 移除")
+                 else:
+                     logger.warning(f"[{subscriber_id}] 清理时未在 active_tasks 找到")
             
             logger.info(f"[{subscriber_id}] 清理完成")
 
@@ -876,7 +977,7 @@ class MQTTAnalyzerService(BaseAnalyzerService):
         subtask_id = command.get("subtask_id") # 通常使用 subtask_id 作为唯一标识
         target_id = subtask_id if subtask_id else task_id
 
-        logger.info(f"收到停止任务请求: {target_id}")
+        logger.info(f"收到停止任务请求: {task_id}/{subtask_id}")
 
         task_info = None
         task_handle = None
@@ -887,41 +988,105 @@ class MQTTAnalyzerService(BaseAnalyzerService):
              if task_info:
                   task_handle = task_info.get("task_handle")
                   stream_url_to_unsub = task_info.get("stream_url") # 获取关联的URL
+                  # 存储原始task_id，确保用于回复消息
+                  task_info['original_task_id'] = task_id
+                  # 存储消息相关信息，用于最终状态回复
+                  message_id = command.get('message_id')
+                  message_uuid = command.get('message_uuid')
+                  confirmation_topic = command.get('confirmation_topic')
+                  if message_id and message_uuid and confirmation_topic:
+                      task_info['message_id'] = message_id
+                      task_info['message_uuid'] = message_uuid
+                      task_info['confirmation_topic'] = confirmation_topic
              
         if task_handle and isinstance(task_handle, asyncio.Task) and not task_handle.done():
              logger.info(f"正在取消任务: {target_id}")
+             # 先发送task_status=0的响应，表示正在处理停止请求
+             if 'message_id' in task_info and 'message_uuid' in task_info and 'confirmation_topic' in task_info:
+                 reply_data = {
+                     "cmd_type": "stop_task",
+                     "task_id": task_id,  # 使用原始task_id
+                     "subtask_id": subtask_id,
+                     "task_status": 0,  # 0表示正在处理
+                     "message": "正在处理结束任务",
+                     "timestamp": int(time.time())
+                 }
+                 self.mqtt_client._send_cmd_reply(
+                     task_info['message_id'], 
+                     task_info['message_uuid'], 
+                     task_info['confirmation_topic'], 
+                     "success", 
+                     data=reply_data
+                 )
+                 logger.info(f"已发送正在处理停止请求响应 (task_status=0): {task_id}/{subtask_id}")
+             
+             # 取消任务
              task_handle.cancel()
              
-             # --- 可选：等待任务实际取消完成 (带超时) ---
-             # try:
-             #     await asyncio.wait_for(task_handle, timeout=2.0)
-             # except asyncio.TimeoutError:
-             #     logger.warning(f"等待任务 {target_id} 取消超时")
-             # except asyncio.CancelledError:
-             #     logger.info(f"任务 {target_id} 已成功取消")
-             # except Exception as wait_e:
-             #      logger.error(f"等待任务 {target_id} 取消时出错: {wait_e}")
-             # --------------------------------------------
+             # 等待任务实际取消完成 (带超时)
+             try:
+                 await asyncio.wait_for(task_handle, timeout=5.0)
+                 logger.info(f"任务 {target_id} 已成功等待取消完成")
+             except asyncio.TimeoutError:
+                 logger.warning(f"等待任务 {target_id} 取消超时，但仍继续处理")
+             except asyncio.CancelledError:
+                 logger.info(f"任务 {target_id} 已成功取消")
+             except Exception as wait_e:
+                 logger.error(f"等待任务 {target_id} 取消时出错: {wait_e}")
              
-             # --- 移除 active_tasks 应由任务自身的 finally 块处理 ---
-             # # 从活动任务字典中移除
-             # with self.mqtt_client.active_tasks_lock:
-             #     if target_id in self.mqtt_client.active_tasks:
-             #         del self.mqtt_client.active_tasks[target_id]
-             #         logger.info(f"任务 {target_id} 已从 active_tasks 移除")
-             # ----------------------------------------------------------
+             # 手动清理资源：确保释放流资源
+             if stream_url_to_unsub:
+                 try:
+                     from services.streams.stream_manager import StreamManager
+                     stream_manager = StreamManager.get_instance()
+                     await stream_manager.unsubscribe(stream_url_to_unsub, target_id)
+                     logger.info(f"已手动取消订阅流: {stream_url_to_unsub}, 订阅者: {target_id}")
+                 except Exception as unsub_e:
+                     logger.error(f"手动取消订阅流时出错: {unsub_e}")
              
-             # 发送成功状态 (表示停止请求已被处理)
+             # 确保任务从active_tasks中移除
+             with self.mqtt_client.active_tasks_lock:
+                 if target_id in self.mqtt_client.active_tasks:
+                     # 不删除task_info，我们需要其中的消息ID等信息
+                     # 只将状态标记为已停止
+                     self.mqtt_client.active_tasks[target_id]['status'] = 'stopped'
+                     logger.info(f"已将任务 {target_id} 在active_tasks中标记为stopped状态")
+             
+             # 发送已停止状态
              await self.mqtt_client._send_task_status(task_id, subtask_id, "stopped")
-             logger.info(f"已发送任务停止状态: {target_id}")
+             logger.info(f"已发送任务停止状态: {task_id}/{subtask_id}")
+             
         elif task_info:
              logger.warning(f"任务 {target_id} 已完成或句柄无效，无法取消")
-             # 即使任务已完成，也尝试发送停止状态
+             # 即使任务已完成，也尝试发送停止状态，确保使用原始task_id
              await self.mqtt_client._send_task_status(task_id, subtask_id, "stopped")
+             
+             # 清理相关资源
+             with self.mqtt_client.active_tasks_lock:
+                 if target_id in self.mqtt_client.active_tasks:
+                     self.mqtt_client.active_tasks[target_id]['status'] = 'stopped'
+                     logger.info(f"已将已完成任务 {target_id} 在active_tasks中标记为stopped状态")
         else:
              logger.warning(f"未找到活动任务: {target_id}，无法停止")
-             # 可以选择发送错误状态或忽略
-             await self.mqtt_client._send_task_status(task_id, subtask_id, "error", error_message="Task not found")
+             # 发送错误状态或任务不存在状态，确保使用原始task_id
+             # 我们发送task_status=-1，表示节点上找不到此任务
+             if 'message_id' in command and 'message_uuid' in command and 'confirmation_topic' in command:
+                 reply_data = {
+                     "cmd_type": "stop_task",
+                     "task_id": task_id,
+                     "subtask_id": subtask_id,
+                     "task_status": -1,  # -1表示任务不存在
+                     "message": "未找到任务",
+                     "timestamp": int(time.time())
+                 }
+                 self.mqtt_client._send_cmd_reply(
+                     command.get('message_id'), 
+                     command.get('message_uuid'), 
+                     command.get('confirmation_topic'), 
+                     "success", 
+                     data=reply_data
+                 )
+                 logger.info(f"已发送任务不存在响应 (task_status=-1): {task_id}/{subtask_id}")
 
     async def _handle_get_task_status(self, command):
         """处理获取任务状态命令"""
@@ -990,54 +1155,78 @@ class MQTTAnalyzerService(BaseAnalyzerService):
             })
 
     def _handle_image_task(self, task_id, subtask_id, source, config, result_config, message_id=None, message_uuid=None, confirmation_topic=None):
-        error_msg = "图像分析功能 (MQTT) 尚未实现"
-        logger.error(f"[{task_id}/{subtask_id}] {error_msg}")
-        if confirmation_topic:
-            self.mqtt_client._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error",
-                                            data={"error_message": error_msg, "task_id": task_id, "subtask_id": subtask_id})
-        return False
-
+        """处理图片分析任务 (实际使用流分析处理器流量处理)"""
+        logger.info(f"处理图片分析任务: {task_id}/{subtask_id}")
+        # 目前图片也使用流分析的方式处理，所以直接委托给_handle_stream_task
+        # 但设置特定的type="image"
+        success = self._handle_stream_task(task_id, subtask_id, source, config, result_config, message_id, message_uuid, confirmation_topic)
+        return success
+    
     def _handle_video_task(self, task_id, subtask_id, source, config, result_config, message_id=None, message_uuid=None, confirmation_topic=None):
-        error_msg = "视频分析功能 (MQTT) 尚未实现"
-        logger.error(f"[{task_id}/{subtask_id}] {error_msg}")
-        if confirmation_topic:
-            self.mqtt_client._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error",
-                                            data={"error_message": error_msg, "task_id": task_id, "subtask_id": subtask_id})
-        return False
+        """处理视频分析任务 (实际使用流分析处理器流量处理)"""
+        logger.info(f"处理视频分析任务: {task_id}/{subtask_id}")
+        # 目前视频也使用流分析的方式处理，所以直接委托给_handle_stream_task
+        # 但设置特定的type="video"
+        success = self._handle_stream_task(task_id, subtask_id, source, config, result_config, message_id, message_uuid, confirmation_topic)
+        return success
 
     def _handle_segmentation_task(self, task_id, subtask_id, source, config, result_config, message_id=None, message_uuid=None, confirmation_topic=None):
+        """处理分割任务，可能会使用流处理或图像处理"""
+        logger.info(f"处理分割任务: {task_id}/{subtask_id}")
+        
         # 分割任务也可能通过流处理，检查 source 类型
-        source_type = source.get("type", "")
-        if source_type == "stream":
-            # 对于流式分割，调用流处理器，并确保 analysis_type 正确
-            config['analysis_type'] = 'segmentation' # 强制设置分析类型
-            logger.info(f"[{task_id}/{subtask_id}] 将流式分割任务路由到 _handle_stream_task")
-            return self._handle_stream_task(task_id, subtask_id, source, config, result_config, message_id, message_uuid, confirmation_topic)
+        source_type = source.get("type", "unknown")
+        
+        # 设置任务类型为"segmentation"
+        config["task_type"] = "segmentation"
+        
+        # 将分割任务交给流分析处理器处理，但指定type为segmentation
+        if source_type in ["stream", "video", "image"]:
+            source["type"] = source_type  # 确保保留原始源类型
+            success = self._handle_stream_task(task_id, subtask_id, source, config, result_config, message_id, message_uuid, confirmation_topic)
+            return success
         else:
-            # 对于非流式分割（如图像、视频）
-            error_msg = "非流式分割功能 (MQTT) 尚未实现"
+            error_msg = f"分割任务不支持的源类型: {source_type}"
             logger.error(f"[{task_id}/{subtask_id}] {error_msg}")
             if confirmation_topic:
                 self.mqtt_client._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error",
-                                                data={"error_message": error_msg, "task_id": task_id, "subtask_id": subtask_id})
+                                        data={
+                                            "error_message": error_msg, 
+                                            "task_id": task_id, 
+                                            "subtask_id": subtask_id,
+                                            "cmd_type": "start_task",
+                                            "type": "segmentation"
+                                        })
             return False
-
+    
     def _handle_detection_task(self, task_id, subtask_id, source, config, result_config, message_id=None, message_uuid=None, confirmation_topic=None):
+        """处理检测任务，可能会使用流处理或图像处理"""
+        logger.info(f"处理检测任务: {task_id}/{subtask_id}")
+        
         # 检测任务也可能通过流处理
-        source_type = source.get("type", "")
-        if source_type == "stream":
-             # 对于流式检测，调用流处理器
-            config['analysis_type'] = 'detection' # 确保分析类型正确
-            logger.info(f"[{task_id}/{subtask_id}] 将流式检测任务路由到 _handle_stream_task")
-            return self._handle_stream_task(task_id, subtask_id, source, config, result_config, message_id, message_uuid, confirmation_topic)
+        source_type = source.get("type", "unknown")
+        
+        # 设置任务类型为"detection"
+        config["task_type"] = "detection"
+        
+        # 将检测任务交给流分析处理器处理，但指定type为detection
+        if source_type in ["stream", "video", "image"]:
+            source["type"] = source_type  # 确保保留原始源类型
+            success = self._handle_stream_task(task_id, subtask_id, source, config, result_config, message_id, message_uuid, confirmation_topic)
+            return success
         else:
-            # 对于非流式检测（如图像、视频）
-            error_msg = "非流式检测功能 (MQTT) 尚未实现"
+            error_msg = f"检测任务不支持的源类型: {source_type}"
             logger.error(f"[{task_id}/{subtask_id}] {error_msg}")
             if confirmation_topic:
                 self.mqtt_client._send_cmd_reply(message_id, message_uuid, confirmation_topic, "error",
-                                                data={"error_message": error_msg, "task_id": task_id, "subtask_id": subtask_id})
-            return False 
+                                        data={
+                                            "error_message": error_msg, 
+                                            "task_id": task_id, 
+                                            "subtask_id": subtask_id,
+                                            "cmd_type": "start_task",
+                                            "type": "detection"
+                                        })
+            return False
 
     # --- 新增方法 --- 
     def _get_analyzer(self, analysis_type: str) -> Optional[Union[YOLODetector, YOLOSegmentor]]:

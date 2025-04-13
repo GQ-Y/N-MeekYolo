@@ -153,7 +153,7 @@ class ResultProcessor:
             # 确定子任务的新状态
             new_status = 3 # 默认为已完成 (3)
             if status_code != 200 or error_message:
-                new_status = 4 # 出错 (4)
+                new_status = 2 # 已停止 (2)
                 subtask.error_message = error_message or f"节点报告错误 (状态码: {status_code})"
                 logger.error(f"子任务 {subtask_id} 执行出错: {subtask.error_message}")
             else:
@@ -209,7 +209,7 @@ class ResultProcessor:
                      SubTask.analysis_task_id == subtask_analysis_id
                  ).first()
                  if subtask:
-                      await self.status_manager.update_subtask_status(task_id, subtask.id, 4) # 标记为出错
+                      await self.status_manager.update_subtask_status(task_id, subtask.id, 2) # 标记为已停止
                       subtask.error_message = f"结果处理失败: {str(e)}"
                       db_session.commit()
             except Exception as final_e:

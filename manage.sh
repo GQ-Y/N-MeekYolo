@@ -27,6 +27,12 @@ SERVICES=(
     "cloud_service:8004"
 )
 
+# 数据库服务列表 (需要进行数据库迁移的服务)
+DB_SERVICES=(
+    "gateway"
+    "api_service"
+)
+
 # 获取服务端口
 get_service_port() {
     local service_info=$1
@@ -110,18 +116,270 @@ init_environment() {
     done
 }
 
+# 数据库迁移
+migrate_database() {
+    local action=$1  # upgrade 或 downgrade
+    local service=$2 # 服务名称，如果为空则处理所有服务
+    
+    echo -e "${YELLOW}正在执行数据库迁移...${NC}"
+    
+    # 如果指定了服务名称，只处理该服务
+    if [ -n "$service" ]; then
+        if [[ " ${DB_SERVICES[@]} " =~ " ${service} " ]]; then
+            _migrate_single_service "$service" "$action"
+        else
+            echo -e "${RED}错误: $service 不是有效的数据库服务${NC}"
+            return 1
+        fi
+    else
+        # 处理所有数据库服务
+        for db_service in "${DB_SERVICES[@]}"; do
+            _migrate_single_service "$db_service" "$action"
+        done
+    fi
+}
+
+# 迁移单个服务的数据库
+_migrate_single_service() {
+    local service=$1
+    local action=$2
+    
+    echo -e "\n${CYAN}正在处理 $service 的数据库迁移...${NC}"
+    cd "$PROJECT_ROOT/$service"
+    
+    # 检查 alembic 配置是否存在
+    if [ ! -f "alembic.ini" ]; then
+        echo -e "${RED}错误: $service 中未找到 alembic.ini${NC}"
+        return 1
+    fi
+    
+    # 执行迁移
+    case "$action" in
+        "upgrade")
+            echo -e "${WHITE}正在升级数据库...${NC}"
+            alembic upgrade head
+            ;;
+        "downgrade")
+            echo -e "${WHITE}正在回滚数据库...${NC}"
+            alembic downgrade base
+            ;;
+        *)
+            echo -e "${RED}错误: 无效的迁移操作 $action${NC}"
+            return 1
+            ;;
+    esac
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}$service 数据库迁移成功${NC}"
+    else
+        echo -e "${RED}$service 数据库迁移失败${NC}"
+        return 1
+    fi
+}
+
+# 显示数据库状态
+show_database_status() {
+    echo -e "${YELLOW}数据库状态:${NC}"
+    
+    for service in "${DB_SERVICES[@]}"; do
+        echo -e "\n${CYAN}检查 $service 数据库状态...${NC}"
+        cd "$PROJECT_ROOT/$service"
+        
+        if [ -f "alembic.ini" ]; then
+            echo -e "${WHITE}当前版本:${NC}"
+            alembic current
+            echo -e "${WHITE}历史记录:${NC}"
+            alembic history
+        else
+            echo -e "${RED}错误: 未找到 alembic.ini${NC}"
+        fi
+    done
+}
+
+# 显示系统安装菜单
+show_install_menu() {
+    echo -e "\n${YELLOW}┌────────────────────────────────────────────┐${NC}"
+    echo -e "${YELLOW}│${NC}            系统安装与环境配置            ${YELLOW}│${NC}"
+    echo -e "${YELLOW}└────────────────────────────────────────────┘${NC}"
+    echo -e "\n${CYAN}可用操作:${NC}"
+    echo -e "${WHITE}1. 🔧 初始化环境${NC}"
+    echo -e "   └─ 首次安装时使用，配置基础环境和依赖"
+    echo -e "${WHITE}2. 🔄 重新初始化环境${NC}"
+    echo -e "   └─ 环境出现问题时使用，完全重置并重新安装"
+    echo -e "${WHITE}0. ↩️  返回主菜单${NC}"
+    echo -e "   └─ 返回到主操作界面"
+    echo -e "\n${YELLOW}提示: 初次使用请选择选项 1${NC}"
+    echo -n "请输入选项 (0-2): "
+}
+
+# 处理系统安装菜单
+handle_install_menu() {
+    while true; do
+        clear
+        show_logo
+        show_install_menu
+        read install_choice
+        
+        case $install_choice in
+            1)
+                init_environment
+                ;;
+            2)
+                init_environment force
+                ;;
+            0)
+                return
+                ;;
+            *)
+                echo -e "${RED}无效的选项${NC}"
+                sleep 2
+                ;;
+        esac
+        
+        if [ "$install_choice" != "0" ]; then
+            echo -e "\n${YELLOW}按回车键继续...${NC}"
+            read
+        fi
+    done
+}
+
+# 显示数据库管理菜单
+show_database_menu() {
+    echo -e "\n${YELLOW}┌────────────────────────────────────────────┐${NC}"
+    echo -e "${YELLOW}│${NC}            数据库管理控制台              ${YELLOW}│${NC}"
+    echo -e "${YELLOW}└────────────────────────────────────────────┘${NC}"
+    echo -e "\n${CYAN}可用操作:${NC}"
+    echo -e "${WHITE}1. ⬆️  升级所有数据库${NC}"
+    echo -e "   └─ 将所有服务的数据库升级到最新版本"
+    echo -e "${WHITE}2. ⬇️  回滚所有数据库${NC}"
+    echo -e "   └─ 将所有服务的数据库回滚到初始状态"
+    echo -e "${WHITE}3. 📦 升级指定服务数据库${NC}"
+    echo -e "   └─ 选择特定服务进行数据库升级"
+    echo -e "${WHITE}4. 🔄 回滚指定服务数据库${NC}"
+    echo -e "   └─ 选择特定服务进行数据库回滚"
+    echo -e "${WHITE}5. 📊 查看数据库状态${NC}"
+    echo -e "   └─ 显示所有数据库的当前版本和迁移历史"
+    echo -e "${WHITE}0. ↩️  返回主菜单${NC}"
+    echo -e "   └─ 返回到主操作界面"
+    echo -e "\n${YELLOW}提示: 首次使用请先执行选项 1${NC}"
+    echo -n "请输入选项 (0-5): "
+}
+
 # 显示服务选择菜单
 show_service_menu() {
-    echo -e "\n${YELLOW}请选择要启动的服务:${NC}"
+    echo -e "\n${YELLOW}┌────────────────────────────────────────────┐${NC}"
+    echo -e "${YELLOW}│${NC}            可用服务列表                  ${YELLOW}│${NC}"
+    echo -e "${YELLOW}└────────────────────────────────────────────┘${NC}"
+    echo -e "\n${CYAN}请选择要操作的服务:${NC}"
     local i=1
     for service_info in "${SERVICES[@]}"; do
         local name=$(get_service_name "$service_info")
         local port=$(get_service_port "$service_info")
-        echo -e "${WHITE}$i. $name (端口: $port)${NC}"
+        echo -e "${WHITE}$i. 🚀 $name${NC}"
+        echo -e "   └─ 端口: $port | 状态: $(check_service_status_quiet "$service_info")"
         ((i++))
     done
-    echo -e "${WHITE}0. 返回主菜单${NC}"
+    echo -e "${WHITE}0. ↩️  返回主菜单${NC}"
+    echo -e "   └─ 返回到主操作界面"
     echo -n "请输入选项 (0-$((${#SERVICES[@]})): "
+}
+
+# 显示数据库服务选择菜单
+show_db_service_menu() {
+    echo -e "\n${YELLOW}┌────────────────────────────────────────────┐${NC}"
+    echo -e "${YELLOW}│${NC}            数据库服务列表                ${YELLOW}│${NC}"
+    echo -e "${YELLOW}└────────────────────────────────────────────┘${NC}"
+    echo -e "\n${CYAN}请选择要操作的数据库:${NC}"
+    local i=1
+    for service in "${DB_SERVICES[@]}"; do
+        echo -e "${WHITE}$i. 💾 $service${NC}"
+        echo -e "   └─ $(get_db_service_status "$service")"
+        ((i++))
+    done
+    echo -e "${WHITE}0. ↩️  返回上级菜单${NC}"
+    echo -e "   └─ 返回到数据库管理菜单"
+    echo -n "请输入选项 (0-$((${#DB_SERVICES[@]})): "
+}
+
+# 获取服务状态的简短描述
+check_service_status_quiet() {
+    local service_info=$1
+    local name=$(get_service_name "$service_info")
+    local port=$(get_service_port "$service_info")
+    if curl -s "http://localhost:$port/health" > /dev/null; then
+        echo -e "${GREEN}运行中${NC}"
+    else
+        echo -e "${RED}未运行${NC}"
+    fi
+}
+
+# 获取数据库服务状态
+get_db_service_status() {
+    local service=$1
+    if [ -f "$PROJECT_ROOT/$service/alembic.ini" ]; then
+        cd "$PROJECT_ROOT/$service"
+        local current_version=$(alembic current 2>/dev/null | grep "^[a-f0-9]" | cut -d' ' -f1)
+        if [ -n "$current_version" ]; then
+            echo "当前版本: ${CYAN}$current_version${NC}"
+        else
+            echo "${YELLOW}未初始化${NC}"
+        fi
+    else
+        echo "${RED}配置缺失${NC}"
+    fi
+}
+
+# 显示主菜单
+show_menu() {
+    echo -e "\n${YELLOW}┌────────────────────────────────────────────┐${NC}"
+    echo -e "${YELLOW}│${NC}            MeekYOLO 控制面板            ${YELLOW}│${NC}"
+    echo -e "${YELLOW}└────────────────────────────────────────────┘${NC}"
+    
+    echo -e "\n${CYAN}服务管理:${NC}"
+    echo -e "${WHITE}1. 🖥️  启动服务 (前台运行)${NC}"
+    echo -e "   └─ 在终端前台启动服务，可实时查看日志"
+    echo -e "${WHITE}2. 🚀 启动服务 (后台运行)${NC}"
+    echo -e "   └─ 在后台启动所有服务，适合生产环境"
+    echo -e "${WHITE}3. 🛑 停止服务${NC}"
+    echo -e "   └─ 停止所有正在运行的服务"
+    
+    echo -e "\n${CYAN}系统管理:${NC}"
+    echo -e "${WHITE}4. ⚙️  系统安装${NC}"
+    echo -e "   └─ 环境初始化和系统配置"
+    echo -e "${WHITE}5. 🗄️  数据库管理${NC}"
+    echo -e "   └─ 数据库迁移、升级和状态管理"
+    
+    echo -e "\n${RED}其他任意键退出程序${NC}"
+    
+    # 显示系统状态
+    echo -e "\n${PURPLE}系统状态:${NC}"
+    echo -e "├─ 运行环境: $(python3 --version 2>/dev/null || echo "Python未安装")"
+    echo -e "├─ 数据库: $(check_mysql_status)"
+    echo -e "└─ 活动服务: $(count_active_services)/${#SERVICES[@]}"
+    
+    echo -n "请输入选项: "
+}
+
+# 检查MySQL状态
+check_mysql_status() {
+    if docker exec mysql8 mysqladmin ping -h localhost -u root -p123456 >/dev/null 2>&1; then
+        echo -e "${GREEN}已连接${NC}"
+    else
+        echo -e "${RED}未连接${NC}"
+    fi
+}
+
+# 统计活动服务数量
+count_active_services() {
+    local count=0
+    for service_info in "${SERVICES[@]}"; do
+        local name=$(get_service_name "$service_info")
+        local port=$(get_service_port "$service_info")
+        if curl -s "http://localhost:$port/health" > /dev/null; then
+            ((count++))
+        fi
+    done
+    echo "$count"
 }
 
 # 启动服务
@@ -253,16 +511,52 @@ stop_services() {
     done
 }
 
-# 显示菜单
-show_menu() {
-    echo -e "\n${YELLOW}请选择操作:${NC}"
-    echo -e "${WHITE}1. 初始化环境${NC}"
-    echo -e "${WHITE}2. 重新初始化环境${NC}"
-    echo -e "${WHITE}3. 启动服务 (前台运行)${NC}"
-    echo -e "${WHITE}4. 启动服务 (后台运行)${NC}"
-    echo -e "${WHITE}5. 停止服务${NC}"
-    echo -e "${WHITE}0. 退出${NC}"
-    echo -n "请输入选项 (0-5): "
+# 处理数据库管理菜单
+handle_database_menu() {
+    while true; do
+        clear
+        show_logo
+        show_database_menu
+        read db_choice
+        
+        case $db_choice in
+            1)
+                migrate_database "upgrade"
+                ;;
+            2)
+                migrate_database "downgrade"
+                ;;
+            3)
+                show_db_service_menu
+                read service_choice
+                if [ "$service_choice" != "0" ] && [ "$service_choice" -le "${#DB_SERVICES[@]}" ]; then
+                    migrate_database "upgrade" "${DB_SERVICES[$((service_choice-1))]}"
+                fi
+                ;;
+            4)
+                show_db_service_menu
+                read service_choice
+                if [ "$service_choice" != "0" ] && [ "$service_choice" -le "${#DB_SERVICES[@]}" ]; then
+                    migrate_database "downgrade" "${DB_SERVICES[$((service_choice-1))]}"
+                fi
+                ;;
+            5)
+                show_database_status
+                ;;
+            0)
+                return
+                ;;
+            *)
+                echo -e "${RED}无效的选项${NC}"
+                sleep 2
+                ;;
+        esac
+        
+        if [ "$db_choice" != "0" ]; then
+            echo -e "\n${YELLOW}按回车键继续...${NC}"
+            read
+        fi
+    done
 }
 
 # 主循环
@@ -274,35 +568,27 @@ while true; do
     read choice
     case $choice in
         1)
-            init_environment
-            echo -e "\n${YELLOW}按回车键继续...${NC}"
-            read
-            ;;
-        2)
-            init_environment force
-            echo -e "\n${YELLOW}按回车键继续...${NC}"
-            read
-            ;;
-        3)
             start_services foreground
             ;;
-        4)
+        2)
             start_services background
             echo -e "\n${YELLOW}按回车键继续...${NC}"
             read
             ;;
-        5)
+        3)
             stop_services
             echo -e "\n${YELLOW}按回车键继续...${NC}"
             read
             ;;
-        0)
-            echo -e "${GREEN}再见!${NC}"
-            exit 0
+        4)
+            handle_install_menu
+            ;;
+        5)
+            handle_database_menu
             ;;
         *)
-            echo -e "${RED}无效的选项${NC}"
-            sleep 2
+            echo -e "${GREEN}再见!${NC}"
+            exit 0
             ;;
     esac
 done 

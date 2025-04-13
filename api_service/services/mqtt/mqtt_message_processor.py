@@ -72,6 +72,15 @@ class MQTTMessageProcessor:
                 logger.info("MQTT消息处理器已初始化")
                 return
                 
+            # 确保主线程有一个事件循环
+            try:
+                asyncio.get_event_loop()
+            except RuntimeError:
+                # 如果当前线程没有事件循环，创建一个新的
+                logger.info("为主线程创建事件循环")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
             # 启动消息处理线程
             self.running = True
             self.processing_thread = threading.Thread(
@@ -273,6 +282,9 @@ class MQTTMessageProcessor:
                 if topic and message:
                     # 处理消息
                     self._dispatch_message(topic, message)
+                
+                # 处理异步消息队列中的消息
+                self._process_async_messages()
                     
                 # 短暂休眠，避免CPU占用过高
                 time.sleep(0.01)
@@ -282,6 +294,67 @@ class MQTTMessageProcessor:
                 time.sleep(1)  # 出错时等待1秒
                 
         logger.info("MQTT消息处理循环已停止")
+    
+    def _process_async_messages(self):
+        """处理异步消息队列中的消息"""
+        try:
+            # 检查异步消息队列
+            async_queue = self._get_async_message_queue()
+            if async_queue.empty():
+                return
+                
+            # 获取一条异步消息
+            try:
+                item = async_queue.get_nowait()
+            except queue.Empty:
+                return
+                
+            # 获取消息内容
+            msg_id = item.get("id")
+            topic = item.get("topic")
+            payload = item.get("payload")
+            handler = item.get("handler")
+            
+            if not topic or not payload or not handler:
+                logger.warning(f"异步消息格式错误: {msg_id}")
+                return
+                
+            # 尝试调用异步处理函数
+            try:
+                logger.debug(f"开始处理异步消息: {msg_id}, 处理函数: {handler.__name__}")
+                
+                # 获取或创建事件循环
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    # 如果当前线程没有事件循环，创建一个新的
+                    logger.debug("当前线程没有事件循环，创建新循环")
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
+                # 安全地运行异步函数
+                if loop.is_running():
+                    # 如果循环正在运行，使用call_soon_threadsafe来安排任务
+                    logger.debug("事件循环正在运行，使用call_soon_threadsafe方法")
+                    future = asyncio.run_coroutine_threadsafe(handler(payload), loop)
+                    # 可以添加回调来处理完成状态，但不等待结果
+                    future.add_done_callback(
+                        lambda f: logger.debug(f"异步消息 {msg_id} 处理完成: {'成功' if not f.exception() else f'失败({f.exception()})'}")
+                    )
+                else:
+                    # 如果循环没有运行，直接运行协程
+                    logger.debug("事件循环未运行，直接运行协程")
+                    try:
+                        result = loop.run_until_complete(handler(payload))
+                        logger.debug(f"异步消息 {msg_id} 处理成功: {result}")
+                    except Exception as e:
+                        logger.error(f"异步消息 {msg_id} 处理失败: {e}")
+                        
+            except Exception as e:
+                logger.error(f"处理异步消息 {msg_id} 时出错: {e}")
+                
+        except Exception as e:
+            logger.error(f"处理异步消息队列时出错: {e}")
     
     def _dispatch_message(self, topic: str, message: Dict[str, Any]):
         """
@@ -370,3 +443,40 @@ class MQTTMessageProcessor:
         if not hasattr(cls, '_instance'):
             cls._instance = MQTTMessageProcessor()
         return cls._instance 
+
+    def add_message(self, topic: str, payload: Any, async_handler: Callable):
+        """
+        添加消息到处理队列，包含处理该消息的异步处理函数
+        
+        Args:
+            topic: 消息主题
+            payload: 消息内容
+            async_handler: 异步处理函数
+        """
+        try:
+            logger.debug(f"添加异步消息到处理队列: topic={topic}, message_id={payload.get('message_id', 'unknown')}")
+            
+            # 使用时间戳+随机数作为唯一标识
+            msg_id = f"{int(time.time())}-{id(payload)}"
+            
+            # 添加到处理队列，仅存储在内存中，避免使用Redis异步操作
+            item = {
+                "id": msg_id,
+                "topic": topic,
+                "payload": payload,
+                "handler": async_handler,
+                "timestamp": time.time()
+            }
+            
+            # 添加到本地队列，使用标准库的queue
+            self._get_async_message_queue().put(item)
+            logger.debug(f"异步消息已加入队列: {msg_id}")
+            
+        except Exception as e:
+            logger.error(f"添加异步消息到处理队列失败: {e}")
+    
+    def _get_async_message_queue(self):
+        """获取异步消息队列"""
+        if not hasattr(self, "_async_queue"):
+            self._async_queue = queue.Queue()
+        return self._async_queue 

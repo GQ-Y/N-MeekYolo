@@ -5,6 +5,7 @@ import httpx
 import uuid
 import json
 import time
+import asyncio
 from typing import List, Optional, Dict, Any
 from core.config import settings
 from shared.utils.logger import setup_logger
@@ -358,6 +359,9 @@ class AnalysisService:
             task_id: 分析任务ID
             node_id: 节点ID，如果提供则直接使用该节点停止任务
         """
+        logger.info(f"===== 开始处理停止任务请求 =====")
+        logger.info(f"传入参数: task_id={task_id}, node_id={node_id}")
+        
         try:
             # 如果没有提供node_id，尝试从数据库中查找所有关联子任务
             if not node_id:
@@ -371,22 +375,36 @@ class AnalysisService:
                 db = SessionLocal()
                 try:
                     # 方法1: 通过analysis_task_id查找 - 处理直接使用analysis_task_id的情况
+                    logger.info(f"[步骤1] 通过analysis_task_id={task_id}查找子任务")
                     subtasks = db.query(SubTask).filter(SubTask.analysis_task_id == task_id).all()
+                    if subtasks:
+                        logger.info(f"通过analysis_task_id找到 {len(subtasks)} 个子任务")
+                    else:
+                        logger.info(f"通过analysis_task_id未找到子任务")
                     
                     # 方法2: 通过任务ID查询所有子任务 - 处理停止整个主任务的情况
                     if not subtasks and task_id.isdigit():
                         # 尝试将task_id作为主任务ID查询
+                        logger.info(f"[步骤2] 将task_id={task_id}作为主任务ID进行查询")
                         task = db.query(Task).filter(Task.id == int(task_id)).first()
                         if task:
-                            logger.info(f"通过主任务ID {task_id} 查找所有子任务")
+                            logger.info(f"通过主任务ID {task_id} 找到主任务")
                             subtasks = task.sub_tasks
+                            logger.info(f"主任务 {task_id} 关联的子任务数量: {len(subtasks)}")
+                        else:
+                            logger.warning(f"未找到主任务ID为 {task_id} 的任务")
                     
                     if subtasks:
-                        logger.info(f"找到与任务 {task_id} 关联的 {len(subtasks)} 个子任务")
+                        logger.info(f"[步骤3] 找到与任务 {task_id} 关联的 {len(subtasks)} 个子任务")
+                        logger.info(f"子任务详情:")
                         
                         # 按节点类型分类子任务
                         for subtask in subtasks:
+                            logger.info(f"子任务ID: {subtask.id}, 状态: {subtask.status}, node_id: {subtask.node_id}, mqtt_node_id: {subtask.mqtt_node_id}, analysis_task_id: {subtask.analysis_task_id}")
+                            
                             if subtask.status == 1:  # 只处理运行中的子任务
+                                logger.info(f"子任务 {subtask.id} 处于运行中状态，准备停止")
+                                
                                 if subtask.node_id:
                                     # HTTP节点子任务
                                     http_node_subtasks.append((subtask, subtask.node_id))
@@ -400,6 +418,8 @@ class AnalysisService:
                                         logger.info(f"子任务 {subtask.id} 运行在MQTT节点 {mqtt_node.mac_address}")
                                     else:
                                         logger.warning(f"找不到子任务 {subtask.id} 关联的MQTT节点 {subtask.mqtt_node_id}")
+                            else:
+                                logger.info(f"子任务 {subtask.id} 不是运行中状态 (当前状态: {subtask.status})，跳过停止操作")
                     else:
                         logger.warning(f"未找到与任务 {task_id} 关联的子任务")
                 
@@ -408,16 +428,23 @@ class AnalysisService:
                 
                 # 处理HTTP节点上的子任务
                 if http_node_subtasks:
+                    logger.info(f"[HTTP停止] 找到 {len(http_node_subtasks)} 个运行在HTTP节点上的子任务")
                     for subtask, node_id in http_node_subtasks:
                         logger.info(f"将使用HTTP方式停止子任务 {subtask.id} (节点ID: {node_id})")
+                else:
+                    logger.info("[HTTP停止] 没有运行在HTTP节点上的子任务需要停止")
                 
                 # 处理MQTT节点上的子任务
                 mqtt_results = []
                 if mqtt_node_subtasks:
+                    logger.info(f"[MQTT停止] 找到 {len(mqtt_node_subtasks)} 个运行在MQTT节点上的子任务")
+                    
                     # 获取共享的 AnalysisClient 实例
                     from app import app as fastapi_app
+                    logger.info("[MQTT停止] 正在获取共享的MQTT客户端")
+                    
                     if not hasattr(fastapi_app.state, "analysis_client") or not fastapi_app.state.analysis_client:
-                        logger.error("无法从应用状态获取共享的 analysis_client")
+                        logger.error("[MQTT停止] 无法从应用状态获取共享的 analysis_client")
                         raise ValueError("共享的MQTT客户端不可用")
                     
                     analysis_client = fastapi_app.state.analysis_client
@@ -426,16 +453,16 @@ class AnalysisService:
                     # 检查MQTT连接
                     if analysis_client.mqtt_connected and analysis_client.mqtt_client:
                         mqtt_client = analysis_client.mqtt_client
-                        logger.info("成功获取共享的MQTT客户端连接")
+                        logger.info("[MQTT停止] 成功获取共享的MQTT客户端连接，当前连接状态: 已连接")
                     else:
                         # 尝试重新连接共享客户端
-                        logger.warning("共享的MQTT客户端未连接，尝试重新连接...")
+                        logger.warning("[MQTT停止] 共享的MQTT客户端未连接，尝试重新连接...")
                         reconnected = await analysis_client.mqtt_client.connect() # 假设 connect 是 async
                         if reconnected and analysis_client.mqtt_connected:
                             mqtt_client = analysis_client.mqtt_client
-                            logger.info("共享的MQTT客户端重新连接成功")
+                            logger.info("[MQTT停止] 共享的MQTT客户端重新连接成功")
                         else:
-                            logger.error("共享的MQTT客户端重新连接失败，无法发送停止命令")
+                            logger.error("[MQTT停止] 共享的MQTT客户端重新连接失败，无法发送停止命令")
                             raise ValueError("共享的MQTT客户端未连接")
 
                     # 向每个MQTT节点发送停止命令
@@ -443,7 +470,7 @@ class AnalysisService:
                         try:
                             # 获取节点MAC地址
                             mac_address = mqtt_node.mac_address
-                            logger.info(f"[停止MQTT子任务] 准备停止子任务 ID: {subtask.id} (分析任务 ID: {subtask.analysis_task_id})，目标节点 MAC: {mac_address}")
+                            logger.info(f"[MQTT停止] 准备停止子任务 ID: {subtask.id} (分析任务 ID: {subtask.analysis_task_id})，目标节点 MAC: {mac_address}")
 
                             # 构建停止任务命令
                             message_id = int(time.time())
@@ -455,79 +482,108 @@ class AnalysisService:
                                 "request_type": "task_cmd",
                                 "data": {
                                     "cmd_type": "stop_task",
-                                    "task_id": subtask.analysis_task_id,  # 确认使用 analysis_task_id
-                                    "subtask_id": str(subtask.id)
+                                    "task_id": str(subtask.task_id),  # 使用主任务ID
+                                    "subtask_id": str(subtask.id)  # 用子任务ID作为subtask_id
                                 }
                             }
+                            logger.info(f"[MQTT停止] 停止命令详情: task_id={subtask.task_id}, subtask_id={subtask.id}, message_id={message_id}, message_uuid={message_uuid}")
                             payload_json = json.dumps(stop_command)
 
                             # 确定目标主题
                             topic = f"{settings.MQTT['topic_prefix']}{mac_address}/request_setting" # 使用配置中的前缀
-                            logger.info(f"[停止MQTT子任务] 目标主题: {topic}")
-                            logger.info(f"[停止MQTT子任务] 消息内容: {payload_json}")
+                            logger.info(f"[MQTT停止] 目标主题: {topic}")
+                            logger.info(f"[MQTT停止] 消息内容: {payload_json}")
 
                             # 发送停止命令
-                            logger.info(f"[停止MQTT子任务] 正在调用 publish 发送 MQTT 消息...")
-                            result = mqtt_client.client.publish(
-                                topic,
-                                payload_json,
-                                qos=settings.MQTT['qos'] # 使用配置中的 QoS
-                            )
-                            logger.info(f"[停止MQTT子任务] publish 调用完成，等待 MQTT Broker 确认...")
-
-                            # result 对象通常包含 mid (message id) 和 rc (return code)
-                            # rc=0 表示成功发送到 Broker
-                            if hasattr(result, 'rc'):
-                                logger.info(f"[停止MQTT子任务] MQTT Broker 返回码: {result.rc}")
-                                if result.rc == 0:
-                                    logger.info(f"[停止MQTT子任务] 停止命令已成功发送到 MQTT Broker (主题: {topic})，目标子任务 ID: {subtask.id}，节点 MAC: {mac_address}")
-
-                                    # 减少节点任务计数 (仅在确认发送成功后执行)
-                                    db_session = SessionLocal()
-                                    try:
-                                        # 重新查询以避免会话过期问题
-                                        node_in_session = db_session.query(MQTTNode).filter(MQTTNode.id == mqtt_node_id).first()
-                                        if node_in_session and node_in_session.task_count > 0:
-                                            node_in_session.task_count -= 1
-                                            db_session.commit()
-                                            logger.info(f"[停止MQTT子任务] MQTT节点 {mqtt_node_id} ({mac_address}) 任务计数减1 (当前: {node_in_session.task_count})")
-                                        elif node_in_session:
-                                             logger.warning(f"[停止MQTT子任务] MQTT节点 {mqtt_node_id} ({mac_address}) 任务计数已为0，无需减少")
-                                        else:
-                                             logger.warning(f"[停止MQTT子任务] 在减少任务计数时未找到节点 {mqtt_node_id}")
-                                    except Exception as db_err:
-                                        logger.error(f"[停止MQTT子任务] 减少节点 {mqtt_node_id} 任务计数时数据库操作出错: {db_err}")
-                                        db_session.rollback()
-                                    finally:
-                                        db_session.close()
-
-                                    mqtt_results.append({
-                                        "subtask_id": subtask.id,
-                                        "node": mac_address,
-                                        "status": "success",
-                                        "message": "停止命令已成功发送至MQTT Broker"
-                                    })
-                                else:
-                                    logger.error(f"[停止MQTT子任务] 发送停止命令到 MQTT Broker 失败 (主题: {topic})，返回码: {result.rc}，目标子任务 ID: {subtask.id}，节点 MAC: {mac_address}")
-                                    mqtt_results.append({
-                                        "subtask_id": subtask.id,
-                                        "node": mac_address,
-                                        "status": "error",
-                                        "error": f"发送至 MQTT Broker 失败，返回码: {result.rc}"
-                                    })
-                            else:
-                                # 如果 result 对象没有 rc 属性，记录警告
-                                logger.warning(f"[停止MQTT子任务] publish 返回的对象没有 'rc' 属性: {result}，无法确认发送状态，目标子任务 ID: {subtask.id}，节点 MAC: {mac_address}")
-                                # 假设发送可能成功，但无法确认
+                            logger.info(f"[MQTT停止] 正在调用 publish 发送 MQTT 消息...")
+                            if not mqtt_client.client:
+                                logger.error("[MQTT停止] mqtt_client.client 为空，无法发送消息")
+                                raise ValueError("MQTT客户端未初始化")
+                                
+                            # 检查client是否已连接
+                            if not mqtt_client.client.is_connected():
+                                logger.error("[MQTT停止] MQTT客户端已初始化但未连接，尝试重新连接...")
+                                try:
+                                    mqtt_client.client.reconnect()
+                                    if not mqtt_client.client.is_connected():
+                                        logger.error("[MQTT停止] 重连尝试失败，无法发送停止命令")
+                                        raise ValueError("MQTT客户端连接失败，无法发送停止命令")
+                                    logger.info("[MQTT停止] MQTT客户端重连成功")
+                                except Exception as reconnect_e:
+                                    logger.error(f"[MQTT停止] MQTT客户端重连时发生异常: {reconnect_e}")
+                                    raise ValueError(f"MQTT客户端重连失败: {reconnect_e}")
+                            
+                            # 增加重试逻辑，确保消息能发送出去
+                            max_retries = 3
+                            retry_count = 0
+                            success = False
+                            
+                            while retry_count < max_retries and not success:
+                                try:
+                                    result = mqtt_client.client.publish(
+                                        topic,
+                                        payload_json,
+                                        qos=settings.MQTT['qos'] # 使用配置中的 QoS
+                                    )
+                                    logger.info(f"[MQTT停止] publish 调用完成，等待 MQTT Broker 确认... (第 {retry_count+1} 次尝试)")
+                                    
+                                    # 等待消息发送完成
+                                    if hasattr(result, 'wait_for_publish'):
+                                        try:
+                                            is_published = result.wait_for_publish(timeout=5.0)
+                                            if is_published:
+                                                logger.info(f"[MQTT停止] 消息成功发布到MQTT Broker")
+                                                success = True
+                                                break
+                                            else:
+                                                logger.warning(f"[MQTT停止] 等待消息发布超时")
+                                        except Exception as wait_e:
+                                            logger.error(f"[MQTT停止] 等待消息发布时发生异常: {wait_e}")
+                                    
+                                    # 详细记录发送结果
+                                    logger.info(f"[MQTT停止] 发送结果: {result}")
+                                    
+                                    # result 对象通常包含 mid (message id) 和 rc (return code)
+                                    # rc=0 表示成功发送到 Broker
+                                    if hasattr(result, 'rc'):
+                                        logger.info(f"[MQTT停止] MQTT Broker 返回码: {result.rc}")
+                                        if result.rc == 0:
+                                            logger.info(f"[MQTT停止] 停止命令已成功发送到 MQTT Broker (主题: {topic})，目标子任务 ID: {subtask.id}，节点 MAC: {mac_address}")
+                                            success = True
+                                            break
+                                except Exception as e:
+                                    logger.error(f"[MQTT停止] 向 MQTT 节点 {mqtt_node.mac_address} 发送停止命令时发生异常: {str(e)}，子任务 ID: {subtask.id} (第 {retry_count+1} 次尝试)")
+                                    import traceback
+                                    logger.error(traceback.format_exc())
+                                    
+                                # 增加重试计数
+                                retry_count += 1
+                                if retry_count < max_retries and not success:
+                                    logger.info(f"[MQTT停止] 准备第 {retry_count+1} 次重试发送停止命令...")
+                                    await asyncio.sleep(1.0)  # 等待1秒后重试
+                            
+                            # 记录最终结果
+                            if success:
+                                # 注意：不再在这里更新节点任务计数和子任务状态
+                                # 这些操作将由MQTT响应处理回调完成 
+                                # 这样可以确保任务状态更新和MQTT响应处理保持一致
                                 mqtt_results.append({
                                     "subtask_id": subtask.id,
                                     "node": mac_address,
-                                    "status": "unknown",
-                                    "error": "无法确认发送状态 (无返回码)"
+                                    "status": "success",
+                                    "message": f"停止命令已成功发送至MQTT Broker (重试{retry_count}次)"
                                 })
-
+                                logger.info(f"[MQTT停止] 成功向节点 {mac_address} 发送停止命令，子任务 ID: {subtask.id}")
+                            else:
+                                mqtt_results.append({
+                                    "subtask_id": subtask.id,
+                                    "node": mac_address,
+                                    "status": "error",
+                                    "error": f"发送停止命令失败，已重试 {retry_count} 次"
+                                })
+                                logger.error(f"[MQTT停止] 向节点 {mac_address} 发送停止命令失败，子任务 ID: {subtask.id}，已重试 {retry_count} 次")
                         except Exception as e:
-                            logger.error(f"[停止MQTT子任务] 向 MQTT 节点 {mqtt_node.mac_address} 发送停止命令时发生异常: {str(e)}，子任务 ID: {subtask.id}")
+                            logger.error(f"[MQTT停止] 向 MQTT 节点 {mqtt_node.mac_address} 发送停止命令时发生异常: {str(e)}，子任务 ID: {subtask.id}")
                             import traceback
                             logger.error(traceback.format_exc())
                             mqtt_results.append({
@@ -536,178 +592,28 @@ class AnalysisService:
                                 "status": "error",
                                 "error": f"发送过程中发生异常: {str(e)}"
                             })
+                else:
+                    logger.info("[MQTT停止] 没有运行在MQTT节点上的子任务需要停止")
 
-                    # 如果有MQTT节点子任务，返回处理结果
-                    if mqtt_results:
-                        # 返回详细结果，包括每个子任务的发送状态
-                        return {
-                            "status": "partial_success" if any(r['status'] == 'success' for r in mqtt_results) else "failure",
-                            "message": f"已尝试向 {len(mqtt_results)} 个MQTT节点发送停止命令",
-                            "results": mqtt_results
-                        }
-                
-                # 如果MQTT节点和HTTP节点都为空，抛出错误
-                if not http_node_subtasks and not mqtt_node_subtasks:
-                    logger.error(f"无法找到任务 {task_id} 关联的节点，无法停止任务")
-                    raise ValueError(f"无法找到任务 {task_id} 关联的节点")
-                
-                # 如果找到了HTTP节点但没有MQTT节点，继续执行后面的HTTP节点停止逻辑
-                if http_node_subtasks and not mqtt_node_subtasks:
-                    node_id = http_node_subtasks[0][1]  # 取第一个HTTP节点ID继续处理
-
-            # 如果已经在上面的新逻辑中处理了所有的MQTT节点子任务，这段代码不会执行
-            # 这里保留用于向后兼容，处理单个MQTT节点的情况
-            if 'mqtt_node_id' in locals() and mqtt_node_id and not mqtt_node_subtasks:
-                logger.info(f"[MQTT Stop - Legacy] 使用单节点MQTT模式停止任务: {task_id}, Node ID: {mqtt_node_id}")
-
-                try:
-                    # 获取节点MAC地址
-                    mac_address = None
-                    # 需要重新查询 mqtt_node，因为它可能来自不同的作用域
-                    db_legacy = SessionLocal()
-                    try:
-                         mqtt_node_legacy = db_legacy.query(MQTTNode).filter(MQTTNode.id == mqtt_node_id).first()
-                         if mqtt_node_legacy:
-                             mac_address = mqtt_node_legacy.mac_address
-                             logger.info(f"[MQTT Stop - Legacy] 向节点 {mac_address} 发送停止任务命令: task_id={task_id}")
-                         else:
-                             logger.error(f"[MQTT Stop - Legacy] 找不到 MQTT 节点 {mqtt_node_id}")
-                             raise ValueError(f"找不到 MQTT 节点 {mqtt_node_id}")
-                    finally:
-                         db_legacy.close()
-
-                    # 创建一个独立的分析客户端用于发送MQTT命令
-                    from services.http.analysis_client import AnalysisClient
-                    from core.config import settings
-
-                    # 使用系统配置创建客户端
-                    analysis_client_legacy = AnalysisClient(settings.config)
-                    mqtt_client_legacy = None
-
-                    # 检查MQTT连接
-                    if analysis_client_legacy.mqtt_connected and analysis_client_legacy.mqtt_client:
-                        mqtt_client_legacy = analysis_client_legacy.mqtt_client
-                        logger.info("[MQTT Stop - Legacy] 成功获取MQTT客户端连接")
-                    else:
-                        logger.error("[MQTT Stop - Legacy] MQTT客户端未连接，无法发送停止命令")
-                        raise ValueError("MQTT客户端未连接")
-
-                    # 构建停止任务命令
-                    message_id_legacy = int(time.time())
-                    message_uuid_legacy = str(uuid.uuid4()).replace("-", "")[:16]
-                    # !! 注意：这里的 subtask 可能未定义，这是一个潜在错误 !!
-                    # !! 假设 task_id 本身就是用来停止的标识 !!
-                    stop_command_legacy = {
-                        "confirmation_topic": f"meek/device_config_reply",
-                        "message_id": message_id_legacy,
-                        "message_uuid": message_uuid_legacy,
-                        "request_type": "task_cmd",
-                        "data": {
-                            "cmd_type": "stop_task",
-                            "task_id": task_id,
-                            # "subtask_id": str(subtask.id) #  Legacy code might not have subtask here
-                        }
+                # 如果有MQTT节点子任务，返回处理结果
+                if mqtt_results:
+                    # 返回详细结果，包括每个子任务的发送状态
+                    result_summary = {
+                        "status": "partial_success" if any(r['status'] == 'success' for r in mqtt_results) else "failure",
+                        "message": f"已尝试向 {len(mqtt_results)} 个MQTT节点发送停止命令",
+                        "results": mqtt_results
                     }
-                    payload_json_legacy = json.dumps(stop_command_legacy)
-
-                    # 发送停止命令
-                    topic_legacy = f"meek/{mac_address}/request_setting"
-                    logger.info(f"[MQTT Stop - Legacy] 目标主题: {topic_legacy}")
-                    logger.info(f"[MQTT Stop - Legacy] 消息内容: {payload_json_legacy}")
-                    logger.info(f"[MQTT Stop - Legacy] 正在调用 publish 发送消息...")
-
-                    result_legacy = mqtt_client_legacy.client.publish(
-                        topic_legacy,
-                        payload_json_legacy,
-                        qos=1
-                    )
-                    logger.info(f"[MQTT Stop - Legacy] publish 调用完成，等待结果...")
-
-                    if hasattr(result_legacy, 'rc'):
-                        logger.info(f"[MQTT Stop - Legacy] 发送结果: rc={result_legacy.rc}")
-                        if result_legacy.rc == 0:
-                            logger.info(f"[MQTT Stop - Legacy] 停止命令已成功发送到节点 {mac_address} (主题: {topic_legacy})")
-
-                            # 减少节点任务计数
-                            db_session_legacy = SessionLocal()
-                            try:
-                                node_in_session_legacy = db_session_legacy.query(MQTTNode).filter(MQTTNode.id == mqtt_node_id).first()
-                                if node_in_session_legacy and node_in_session_legacy.task_count > 0:
-                                    node_in_session_legacy.task_count -= 1
-                                    db_session_legacy.commit()
-                                    logger.info(f"[MQTT Stop - Legacy] MQTT节点 {mqtt_node_id} ({mac_address}) 任务计数减1 (当前: {node_in_session_legacy.task_count})")
-                                elif node_in_session_legacy:
-                                     logger.warning(f"[MQTT Stop - Legacy] MQTT节点 {mqtt_node_id} ({mac_address}) 任务计数已为0，无需减少")
-                                else:
-                                     logger.warning(f"[MQTT Stop - Legacy] 在减少任务计数时未找到节点 {mqtt_node_id}")
-
-                            except Exception as db_err_legacy:
-                                logger.error(f"[MQTT Stop - Legacy] 减少节点 {mqtt_node_id} 任务计数时出错: {db_err_legacy}")
-                                db_session_legacy.rollback()
-                            finally:
-                                db_session_legacy.close()
-
-                            return {"status": "success", "message": "停止命令已发送"}
-                        else:
-                            logger.error(f"[MQTT Stop - Legacy] 发送停止命令到节点 {mac_address} (主题: {topic_legacy}) 失败，返回码: {result_legacy.rc}")
-                            raise ValueError(f"发送停止命令失败，返回码: {result_legacy.rc}")
-                    else:
-                         logger.warning(f"[MQTT Stop - Legacy] publish 返回的对象没有 'rc' 属性: {result_legacy}")
-                         # 假设发送可能成功
-                         return {"status": "unknown", "message": "无法确认发送状态 (无返回码)"}
-
-                except Exception as e:
-                    logger.error(f"[MQTT Stop - Legacy] 通过单节点MQTT模式停止任务 {task_id} 失败: {str(e)}")
-                    import traceback
-                    logger.error(traceback.format_exc())
-                    raise
-
-            # 如果提供了node_id或成功查找到了node_id，使用HTTP方式通过该节点停止任务
-            if node_id:
-                # 查询节点信息
-                from core.database import SessionLocal
-                from models.database import Node
+                    logger.info(f"[MQTT停止] 处理完成: {result_summary}")
+                    return result_summary
                 
-                db = SessionLocal()
-                try:
-                    node = db.query(Node).filter(Node.id == node_id).first()
-                    if node:
-                        stop_url = f"http://{node.ip}:{node.port}/api/v1/analyze/task/stop"
-                        logger.info(f"使用节点 {node_id} 停止任务 {task_id}")
-                    else:
-                        logger.error(f"找不到节点 {node_id}，无法停止任务 {task_id}")
-                        raise ValueError(f"找不到节点 {node_id}")
-                finally:
-                    db.close()
-            else:
-                logger.error(f"无法找到任务 {task_id} 关联的节点，无法停止任务")
-                raise ValueError(f"无法找到任务 {task_id} 关联的节点")
-            
-            request_data = {"task_id": task_id}
-            
-            logger.info(f"发送停止请求: task_id={task_id}, URL={stop_url}")
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    stop_url,
-                    json=request_data
-                )
-                
-                if response.status_code != 200:
-                    logger.error(f"停止任务请求失败: {response.status_code}")
-                    response.raise_for_status()
-                
-                response_data = response.json()
-                logger.info(f"任务 {task_id} 已停止")
-                
-                # 如果提供了节点ID，减少节点任务计数
-                if node_id:
-                    self._decrease_node_task_count(node_id)
-                
-                return response_data
         except Exception as e:
-            logger.error(f"停止任务 {task_id} 失败: {str(e)}")
-            raise 
+            logger.error(f"停止任务 {task_id} 时发生异常: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise ValueError(f"停止任务失败: {str(e)}")
+            
+        logger.info(f"===== 停止任务处理完成 =====")
+        return {"status": "success", "message": "任务停止请求已处理"}
 
     def _decrease_node_image_task_count(self, node_id: int):
         """减少节点图片任务计数"""

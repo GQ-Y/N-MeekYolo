@@ -17,9 +17,10 @@ from core.database import SessionLocal
 from services.task.task_priority_manager import task_priority_manager, get_task_priority_manager
 from services.core.smart_task_scheduler import smart_task_scheduler, get_smart_task_scheduler
 from services.mqtt.mqtt_client import MQTTClient, get_mqtt_client
+from shared.utils.logger import setup_logger
 
 # 配置日志
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__)
 
 class MQTTTaskManager:
     """
@@ -300,7 +301,7 @@ class MQTTTaskManager:
                 "data": {
                     "cmd_type": "stop_task",
                     "task_id": task_id,
-                    "subtask_id": subtask_id
+                    "subtask_id": str(subtask.id)
                 }
             }
             
@@ -485,7 +486,7 @@ class MQTTTaskManager:
                     logger.warning(f"子任务 {subtask.id} 在离线节点上运行超时，标记为失败并重新入队")
                     
                     # 标记任务为失败
-                    subtask.status = 3  # 失败
+                    subtask.status = 2  # 已停止
                     subtask.error_message = f"节点离线或任务运行超时，已自动重新排队"
                     
                     # 添加重试计数
@@ -528,6 +529,8 @@ def get_mqtt_task_manager() -> MQTTTaskManager:
         # 使用全局MQTT客户端
         mqtt_client = get_mqtt_client()
         mqtt_task_manager = MQTTTaskManager(mqtt_client=mqtt_client)
-        # 异步启动
-        asyncio.create_task(mqtt_task_manager.start())
+        
+        # 不再直接启动，而是由调用者在异步上下文中启动
+        # 在这里只创建实例
+        logger.info("MQTT任务管理器已创建，等待在异步上下文中启动")
     return mqtt_task_manager 

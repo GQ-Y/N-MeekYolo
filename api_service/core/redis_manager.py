@@ -186,6 +186,24 @@ class RedisManager:
         except Exception as e:
             logger.error(f"检查Redis键是否存在失败 - {key}: {str(e)}")
             return False
+            
+    def exists_key_sync(self, key: str) -> bool:
+        """
+        同步方式检查键是否存在
+        
+        Args:
+            key: 键名
+            
+        Returns:
+            bool: 键是否存在
+        """
+        try:
+            import redis
+            r = redis.Redis(connection_pool=self._sync_pool)
+            return bool(r.exists(key))
+        except Exception as e:
+            logger.error(f"同步方式检查Redis键是否存在失败 - {key}: {str(e)}")
+            return False
 
     async def ping(self) -> bool:
         """测试连接"""
@@ -315,4 +333,24 @@ class RedisManager:
         
         except Exception as e:
             logger.error(f"Redis.set_value_sync - 设置键值失败 - {key}: {str(e)}")
+            return False
+
+    def delete_key_sync(self, key: str) -> bool:
+        """
+        同步方式删除键
+        
+        Args:
+            key: 键名
+            
+        Returns:
+            bool: 是否成功删除
+        """
+        try:
+            import redis
+            r = redis.Redis(connection_pool=self._sync_pool)
+            r.delete(key)
+            logger.debug(f"同步方式成功删除Redis键: {key}")
+            return True
+        except Exception as e:
+            logger.error(f"同步方式删除Redis键失败 - {key}: {str(e)}")
             return False
